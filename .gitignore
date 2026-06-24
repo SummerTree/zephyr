@@ -31,3 +31,7 @@ Engine/SwiftSDL_image/Samples
 Engine/EngineAsBuilt/libpdfium.dylib
 swift-6.3-book.xml
 swift-6.3-cpp-interop.md
+*.dwg
+*.dwl
+*.dwl2
+*.dwt
