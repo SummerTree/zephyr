@@ -753,6 +753,8 @@ public:
   std::vector<unsigned int> blockOwnerHandles;
   std::vector<DXFRW_TextStyleData> textStyles;
   std::vector<DXFRW_LinetypeData> linetypes;
+  
+  double globalLinetypeScale = 1.0;
 
   /* Track current block for entity→block association */
   std::string currentBlockName;
@@ -859,7 +861,12 @@ public:
 
   void addHeader(const DRW_Header *data) override {
     DXFRW_TRACE("  addHeader");
-    (void)data;
+    if (!data) return;
+    
+    auto it = data->vars.find("$LTSCALE");
+    if (it != data->vars.end() && it->second && it->second->type() == DRW_Variant::DOUBLE) {
+        globalLinetypeScale = it->second->content.d;
+    }
   }
 
   void addLType(const DRW_LType &data) override {
@@ -2385,6 +2392,9 @@ int dxfrw_read(const char *filePath, DXFRW_Result *outResult) {
   DXFRW_TRACE("dxfrw_read: success, returning");
   cleanupTempPath(mtextStrippedPath);
   cleanupTempPath(codepageStrippedPath);
+  
+  outResult->globalLinetypeScale = collector.globalLinetypeScale;
+  
   outResult->success = 1;
   return 1;
 }

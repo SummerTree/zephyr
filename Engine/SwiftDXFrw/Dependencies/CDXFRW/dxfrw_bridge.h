@@ -317,6 +317,8 @@ typedef struct {
   DXFRW_EntityMetadata *entityMetadata;
   DXFRW_BlockMetadata *blockMetadata;
 
+  double globalLinetypeScale;
+
   /* Error info */
   int success;        /* 1 if parse succeeded, 0 on error */
   char *errorMessage; /* error description, or NULL */

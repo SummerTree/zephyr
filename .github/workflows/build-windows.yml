@@ -624,6 +624,16 @@ jobs:
             Write-Host "Fonts copied."
           }
 
+          # Copy Plot Styles (CTB/STB)
+          $plotStylesSource = "$swiftDir\Plot Styles"
+          if (Test-Path $plotStylesSource) {
+            $plotStylesDest = "$dllDest\Plot Styles"
+            New-Item -ItemType Directory -Force -Path $plotStylesDest | Out-Null
+            Copy-Item -Path "$plotStylesSource\*.ctb" -Destination $plotStylesDest -Force -ErrorAction SilentlyContinue
+            Copy-Item -Path "$plotStylesSource\*.stb" -Destination $plotStylesDest -Force -ErrorAction SilentlyContinue
+            Write-Host "Plot Styles copied."
+          }
+
           Write-Host "--- DLLs in output ---"
           Get-ChildItem $dllDest -Filter "*.dll" | ForEach-Object { Write-Host "  $($_.Name)" }
 
@@ -648,6 +658,9 @@ jobs:
           Get-ChildItem "$buildDir\*.dxil" | Copy-Item -Destination $stageDir -Force
           if (Test-Path "$buildDir\Fonts") {
             Copy-Item -Path "$buildDir\Fonts" -Destination "$stageDir\Fonts" -Recurse -Force
+          }
+          if (Test-Path "$buildDir\Plot Styles") {
+            Copy-Item -Path "$buildDir\Plot Styles" -Destination "$stageDir\Plot Styles" -Recurse -Force
           }
 
           Write-Host "--- Staged files ---"

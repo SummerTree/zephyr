@@ -259,19 +259,47 @@ public enum CADPrimitiveGenerator {
             guard points.count >= 2 else { return [] }
             
             if let pattern = dashPattern {
-                let scaledPattern = pattern.map { $0 * scale }
-                let cycleLength = scaledPattern.reduce(0.0, +)
-                
                 var pathLength: Double = 0.0
                 for i in 0..<(points.count - 1) {
                     let dx = Double(points[i+1].x - points[i].x)
                     let dy = Double(points[i+1].y - points[i].y)
                     pathLength += sqrt(dx*dx + dy*dy)
                 }
+
+                let isSigned = pattern.contains { $0 <= 0 }
+                var cycleLength: Double = isSigned
+                    ? pattern.reduce(0.0) { $0 + abs($1) } * scale
+                    : pattern.reduce(0.0, +) * scale
+
+                // Fallback: If the entity is shorter than one full dash cycle,
+                // dynamically scale down the pattern so it looks dashed anyway.
+                var effectiveScale = scale
+                if cycleLength > 1e-6 && pathLength < cycleLength {
+                    // Force it to fit at least 2 cycles
+                    let newCycleLength = pathLength / 2.0
+                    effectiveScale = scale * (newCycleLength / cycleLength)
+                    cycleLength = newCycleLength
+                }
+
+                var steps: [(len: Double, draw: Bool)] = []
+                if isSigned {
+                    let dotLength = max(cycleLength * 0.01, 1e-6)
+                    for v in pattern {
+                        if v > 0 { steps.append((v * effectiveScale, true)) }
+                        else if v < 0 { steps.append((-v * effectiveScale, false)) }
+                        else { steps.append((dotLength, true)) }
+                    }
+                } else {
+                    for (idx, v) in pattern.enumerated() {
+                        steps.append((v * effectiveScale, idx % 2 == 0))
+                    }
+                }
+                
+                // pathLength is already calculated above
                 
                 // If the dash cycle is extremely small relative to the path length,
-                // or if we would generate more than 60 dash cycles, treat it as solid (continuous).
-                if cycleLength > 1e-6 && (pathLength / cycleLength) > 60.0 {
+                // or if we would generate more than 10000 dash cycles, treat it as solid (continuous).
+                if cycleLength > 1e-6 && (pathLength / cycleLength) > 10000.0 {
                     if weight > 0.25 || geomWidth > 0.0 {
                         var specs: [PrimitiveSpec] = []
                         for i in 0..<(points.count - 1) {
@@ -283,7 +311,24 @@ public enum CADPrimitiveGenerator {
                     }
                 }
                 
-                var subLines: [(SDL_FPoint, SDL_FPoint)] = []
+                if steps.isEmpty { return [] }
+                
+                var dashedPolylines: [[SDL_FPoint]] = []
+                var currentDash: [SDL_FPoint] = []
+                
+                func addSubLine(p1: SDL_FPoint, p2: SDL_FPoint) {
+                    if currentDash.isEmpty {
+                        currentDash.append(p1)
+                    }
+                    currentDash.append(p2)
+                }
+                
+                func endDash() {
+                    if currentDash.count >= 2 {
+                        dashedPolylines.append(currentDash)
+                    }
+                    currentDash = []
+                }
                 
                 var currentPtIndex = 0
                 var segmentStart = points[0]
@@ -294,7 +339,7 @@ public enum CADPrimitiveGenerator {
                 var segmentUsed: Double = 0.0
                 
                 var patternIndex = 0
-                var drawing = true
+                var drawing = steps[0].draw
                 
                 while currentPtIndex < points.count - 1 {
                     if segmentLen <= 1e-5 {
@@ -310,7 +355,7 @@ public enum CADPrimitiveGenerator {
                         continue
                     }
                     
-                    let step = scaledPattern[patternIndex]
+                    let step = steps[patternIndex].len
                     let segmentRemaining = segmentLen - segmentUsed
                     
                     if step <= segmentRemaining {
@@ -320,21 +365,19 @@ public enum CADPrimitiveGenerator {
                         let p1 = SDL_FPoint(x: segmentStart.x + Float(dx) * t1, y: segmentStart.y + Float(dy) * t1)
                         let p2 = SDL_FPoint(x: segmentStart.x + Float(dx) * t2, y: segmentStart.y + Float(dy) * t2)
                         
-                        if drawing {
-                            subLines.append((p1, p2))
-                        }
+                        if drawing { addSubLine(p1: p1, p2: p2) }
                         
                         segmentUsed = nextUsed
-                        patternIndex = (patternIndex + 1) % scaledPattern.count
-                        drawing.toggle()
+                        patternIndex = (patternIndex + 1) % steps.count
+                        let nextDrawing = steps[patternIndex].draw
+                        if drawing && !nextDrawing { endDash() }
+                        drawing = nextDrawing
                     } else {
                         let t1 = Float(segmentUsed / segmentLen)
                         let p1 = SDL_FPoint(x: segmentStart.x + Float(dx) * t1, y: segmentStart.y + Float(dy) * t1)
                         let p2 = segmentEnd
                         
-                        if drawing {
-                            subLines.append((p1, p2))
-                        }
+                        if drawing { addSubLine(p1: p1, p2: p2) }
                         
                         var remainingStep = step - segmentRemaining
                         currentPtIndex += 1
@@ -366,21 +409,19 @@ public enum CADPrimitiveGenerator {
                                     let p1_new = segmentStart
                                     let p2_new = SDL_FPoint(x: segmentStart.x + Float(dx) * t, y: segmentStart.y + Float(dy) * t)
                                     
-                                    if drawing {
-                                        subLines.append((p1_new, p2_new))
-                                    }
+                                    if drawing { addSubLine(p1: p1_new, p2: p2_new) }
                                     
                                     segmentUsed = nextUsed
-                                    remainingStep = 0.0
-                                    patternIndex = (patternIndex + 1) % scaledPattern.count
-                                    drawing.toggle()
+                                    patternIndex = (patternIndex + 1) % steps.count
+                                    let nextDrawing = steps[patternIndex].draw
+                                    if drawing && !nextDrawing { endDash() }
+                                    drawing = nextDrawing
+                                    remainingStep = 0
                                 } else {
                                     let p1_new = segmentStart
                                     let p2_new = segmentEnd
                                     
-                                    if drawing {
-                                        subLines.append((p1_new, p2_new))
-                                    }
+                                    if drawing { addSubLine(p1: p1_new, p2: p2_new) }
                                     
                                     remainingStep -= segmentLen
                                     currentPtIndex += 1
@@ -399,10 +440,19 @@ public enum CADPrimitiveGenerator {
                         }
                     }
                 }
+                endDash()
                 
                 var specs: [PrimitiveSpec] = []
-                for line in subLines {
-                    specs.append(makeLineSpec(p1: line.0, p2: line.1, weight: weight, z: z, color: color))
+                if weight > 0.25 || geomWidth > 0.0 {
+                    for dash in dashedPolylines {
+                        for i in 0..<(dash.count - 1) {
+                            specs.append(makeLineSpec(p1: dash[i], p2: dash[i+1], weight: weight, z: z, color: color))
+                        }
+                    }
+                } else {
+                    for dash in dashedPolylines {
+                        specs.append(PrimitiveSpec(type: .lines, points: dash, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: geomWidth))
+                    }
                 }
                 return specs
             }

@@ -323,7 +323,8 @@ public enum DXFImporter {
                             pattern = nil // continuous — nothing to bake
                         }
                         if let pattern {
-                            let ltScale = src.lineTypeScale > 0 ? src.lineTypeScale : 1.0
+                            let globalScale = result.globalLinetypeScale > 0 ? result.globalLinetypeScale : 1.0
+                            let ltScale = (src.lineTypeScale > 0 ? src.lineTypeScale : 1.0) * globalScale
                             primitives = bakeDashedLinetype(primitives, pattern: pattern, scale: ltScale)
                         }
                     }
@@ -353,6 +354,7 @@ public enum DXFImporter {
                     blockNameToID: blockNameToID,
                     blockNameToBase: blockNameToBase,
                     drawOrder: i,
+                    globalLinetypeScale: result.globalLinetypeScale,
                     textStyleFonts: textStyleFonts
                 )
                 looseEntities.append((entity, layerName))
@@ -1059,6 +1061,7 @@ public enum DXFImporter {
         blockNameToID: [String: UUID],
         blockNameToBase: [String: Vector3],
         drawOrder: Int,
+        globalLinetypeScale: Double,
         textStyleFonts: [String: String] = [:]
     ) -> CADEntity {
 
@@ -1178,7 +1181,12 @@ public enum DXFImporter {
         if src.lineWeight >= 0 {
             entity.xdata["dxf.lineWeight"] = .double(DXFColorTable.lineWeightToMM(src.lineWeight))
         }
-        entity.xdata["dxf.lineTypeScale"] = .double(src.lineTypeScale)
+        
+        let globalScale = globalLinetypeScale > 0 ? globalLinetypeScale : 1.0
+        let ltScale = (src.lineTypeScale > 0 ? src.lineTypeScale : 1.0) * globalScale
+        if ltScale != 1.0 {
+            entity.xdata["dxf.lineTypeScale"] = .double(ltScale)
+        }
 
         if (src.type == DXFRW_ET_LWPOLYLINE || src.type == DXFRW_ET_POLYLINE),
            let verts = src.vertices, src.vertexCount > 0 {

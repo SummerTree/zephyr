@@ -134,4 +134,18 @@ else {
     Write-Host "No Fonts directory found -- skipping."
 }
 
+Write-Host ""
+Write-Host "### Copying Plot Styles to build output... ###"
+$plotStylesSource = "Plot Styles"
+$plotStylesDest = "$dllDest\Plot Styles"
+if (Test-Path $plotStylesSource) {
+    New-Item -ItemType Directory -Path $plotStylesDest -Force | Out-Null
+    Copy-Item -Path "$plotStylesSource\*.ctb" -Destination $plotStylesDest -Force -ErrorAction SilentlyContinue
+    Copy-Item -Path "$plotStylesSource\*.stb" -Destination $plotStylesDest -Force -ErrorAction SilentlyContinue
+    Write-Host "Plot Styles copied: $plotStylesDest"
+}
+else {
+    Write-Host "No Plot Styles directory found -- skipping."
+}
+
 Write-Host "### Build complete. Run with: .\$dllDest\Zephyr.exe ###"

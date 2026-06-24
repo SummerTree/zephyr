@@ -32,17 +32,18 @@ if [ "$BUILD_STATUS" -ne 0 ]; then
 fi
 
 echo ""
-echo "### Copying Shaders and Fonts to build output... ###"
+echo "### Copying Shaders, Fonts, and Plot Styles to build output... ###"
 BUILD_DIR=".build/debug"
 if [ "$CONFIG" = "release" ]; then
     BUILD_DIR=".build/release"
 fi
 mkdir -p "$BUILD_DIR"
 cp -R Fonts "$BUILD_DIR/"
+cp -R "Plot Styles" "$BUILD_DIR/" || true
 cp Shaders/*.msl "$BUILD_DIR/"
 if [ -f "libpdfium.dylib" ]; then
     cp libpdfium.dylib "$BUILD_DIR/"
 fi
-echo "Fonts and shaders copied to $BUILD_DIR"
+echo "Resources copied to $BUILD_DIR"
 echo ""
 echo "### Build complete! Run with: $BUILD_DIR/Zephyr ###"
