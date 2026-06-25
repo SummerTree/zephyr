@@ -151,7 +151,7 @@ public final class EngineUIManager {
         SDL_BindGPUVertexBuffers(renderPass, 0, &vertexBinding, 1)
 
         var indexBinding = SDL_GPUBufferBinding(buffer: renderer.imguiIndexBuffer, offset: 0)
-        SDL_BindGPUIndexBuffer(renderPass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT)
+        SDL_BindGPUIndexBuffer(renderPass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT)
 
         // Push orthographic projection matrix
         let w = Float(drawData.pointee.DisplaySize.x)

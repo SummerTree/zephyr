@@ -1403,7 +1403,7 @@ struct ImGuiSelectionExternalStorage
     void* UserData;
     void (*AdapterSetItemSelected)(ImGuiSelectionExternalStorage* self, int idx, bool selected);
 };
-typedef unsigned short ImDrawIdx;
+typedef unsigned int ImDrawIdx;
 typedef void (*ImDrawCallback)(const ImDrawList* parent_list, const ImDrawCmd* cmd);
 struct ImDrawCmd
 {
