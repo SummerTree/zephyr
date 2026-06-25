@@ -144,7 +144,9 @@ public struct CommandDescriptor: Sendable {
         CommandDescriptor(canonicalName: "NEW",        aliases: ["N"],             category: .draw,    syntax: "", description: "Create a new blank drawing in a new tab"),
         CommandDescriptor(canonicalName: "OPEN",       aliases: [],                category: .draw,    syntax: "", description: "Open a DXF or EAB file in a new tab"),
         CommandDescriptor(canonicalName: "CLOSE",      aliases: [],                category: .draw,    syntax: "", description: "Close the active drawing tab"),
-        CommandDescriptor(canonicalName: "SAVE",       aliases: [],                category: .draw,    syntax: "", description: "Save the current drawing to its file"),
+        CommandDescriptor(canonicalName: "CLOSEALL",   aliases: [],                category: .draw,    syntax: "", description: "Close all open drawing tabs"),
+        CommandDescriptor(canonicalName: "CLOSEALLOTHERS", aliases: [],            category: .draw,    syntax: "", description: "Close all tabs except the active one"),
+        CommandDescriptor(canonicalName: "SAVE",       aliases: ["QSAVE"],          category: .draw,    syntax: "", description: "Save the current drawing to its file"),
         CommandDescriptor(canonicalName: "SAVEAS",     aliases: [],                category: .draw,    syntax: "", description: "Save the current drawing as a new file"),
         CommandDescriptor(canonicalName: "PDFEXPORT",  aliases: ["EXPORTPDF"],     category: .draw,    syntax: "", description: "Export the current drawing to a PDF file"),
         CommandDescriptor(canonicalName: "PDFIMPORT",  aliases: ["PDFI", "PDF"],   category: .draw,    syntax: "", description: "Import a PDF page as an image underlay"),
@@ -166,10 +168,17 @@ public struct CommandDescriptor: Sendable {
         CommandDescriptor(canonicalName: "ROTATE",     aliases: ["R"],             category: .modify,  syntax: "", description: "Rotate selected entities around their collective center"),
         CommandDescriptor(canonicalName: "SCALE",      aliases: ["S"],             category: .modify,  syntax: "", description: "Scale selected entities around their collective center"),
         CommandDescriptor(canonicalName: "ERASE",      aliases: ["E"],             category: .modify,  syntax: "", description: "Delete all currently selected entities"),
+        CommandDescriptor(canonicalName: "COPY",       aliases: ["CO", "CP"],      category: .modify,  syntax: "", description: "Duplicate selected entities within the drawing"),
+        CommandDescriptor(canonicalName: "COPYCLIP",   aliases: [],                category: .modify,  syntax: "", description: "Copy selected entities to clipboard"),
+        CommandDescriptor(canonicalName: "COPYBASE",   aliases: [],                category: .modify,  syntax: "", description: "Copy selected entities to clipboard with a base point"),
+        CommandDescriptor(canonicalName: "PASTECLIP",  aliases: [],                category: .modify,  syntax: "", description: "Paste clipboard entities at viewport center"),
+        CommandDescriptor(canonicalName: "PASTEORIG",  aliases: [],                category: .modify,  syntax: "", description: "Paste clipboard entities at original coordinates"),
+        CommandDescriptor(canonicalName: "PASTEBLOCK", aliases: [],                category: .modify,  syntax: "", description: "Paste clipboard entities as a new block"),
         CommandDescriptor(canonicalName: "CLEANSPECKLES", aliases: ["CS", "SPECKLES"], category: .modify, syntax: "", description: "Remove tiny/speckle entities from the drawing"),
         CommandDescriptor(canonicalName: "DDEDIT",     aliases: ["ED"],            category: .modify,  syntax: "", description: "Edit the selected text entity"),
         CommandDescriptor(canonicalName: "JOIN",       aliases: ["J"],             category: .modify,  syntax: "", description: "Join selected line entities into polylines"),
         CommandDescriptor(canonicalName: "TRIM",       aliases: ["TR"],            category: .modify,  syntax: "", description: "Trim lines at intersections — click the side to remove"),
+        CommandDescriptor(canonicalName: "MATCHPROP",   aliases: ["MA", "MATCH"],  category: .modify,  syntax: "", description: "Copy properties from one entity to others"),
         CommandDescriptor(canonicalName: "SPLINEEDIT", aliases: ["SPE"],           category: .modify,  syntax: "", description: "Edit an existing spline (reverse, convert to polyline, etc.)"),
         // --- View ---
         CommandDescriptor(canonicalName: "SELECTALL",  aliases: ["SELALL"],        category: .view,    syntax: "", description: "Select all entities in the active layer"),
@@ -183,6 +192,11 @@ public struct CommandDescriptor: Sendable {
         CommandDescriptor(canonicalName: "AALINES",    aliases: ["AA"],            category: .view,    syntax: "", description: "Toggle anti-aliased line rendering on/off"),
         CommandDescriptor(canonicalName: "PROPS",      aliases: ["PROPERTIES", "PR"], category: .view, syntax: "", description: "Show/hide the properties panel for the selected entity"),
         CommandDescriptor(canonicalName: "NAV",        aliases: ["RADIALNAV"],     category: .view,    syntax: "", description: "Show/hide the radial navigation tool"),
+        CommandDescriptor(canonicalName: "PAN",        aliases: ["P"],             category: .view,    syntax: "", description: "Pan the view by clicking and dragging"),
+        CommandDescriptor(canonicalName: "-PAN",       aliases: [],                category: .view,    syntax: "", description: "Pan the view by specifying a displacement vector"),
+        CommandDescriptor(canonicalName: "PLAN",       aliases: [],                category: .view,    syntax: "", description: "Reset view rotation to standard orientation"),
+        CommandDescriptor(canonicalName: "DVIEW",      aliases: ["DV"],            category: .view,    syntax: "", description: "Dynamic view: twist the 2D view angle"),
+        CommandDescriptor(canonicalName: "SNAPANG",    aliases: [],                category: .settings, syntax: "<degrees>", description: "Set the crosshair and ortho rotation angle"),
         // --- Layer ---
         CommandDescriptor(canonicalName: "LAYER",      aliases: ["LA"],            category: .layer,   syntax: "", description: "Show/hide the layer panel"),
         CommandDescriptor(canonicalName: "LAYER NEW",  aliases: ["LA NEW"],        category: .layer,   syntax: "<name>", description: "Create a new layer with an optional name"),
@@ -253,6 +267,9 @@ public final class CADCommandProcessor {
 
     /// Last executed command text, used by Spacebar repeat-last-command (AutoCAD style).
     public var lastExecutedCommand: String?
+
+    /// Internal clipboard for CAD entity copy/paste (COPYCLIP, COPYBASE, PASTECLIP, etc.).
+    public var clipboard = CADClipboard()
 
     // MARK: Move Ghost Preview State
     /// World-space mouse position during MOVE command (for ghost preview).
@@ -362,7 +379,34 @@ public final class CADCommandProcessor {
         case "CLOSE":
             _ = engine?.tabManager.closeActiveTab()
             clearCommand()
-        case "SAVE":
+        case "CLOSEALL":
+            guard let engine = engine else { clearCommand(); return }
+            // Create a fresh blank tab first, then close all others.
+            // This avoids the "can't close last tab" restriction.
+            engine.tabManager.newTab()
+            engine.zoomExtents()
+            let keepIndex = engine.tabManager.activeIndex
+            var idx = engine.tabManager.tabs.count - 1
+            while idx >= 0 {
+                if idx != keepIndex {
+                    _ = engine.tabManager.closeTab(at: idx)
+                }
+                idx -= 1
+            }
+            clearCommand()
+        case "CLOSEALLOTHERS":
+            guard let engine = engine else { clearCommand(); return }
+            let activeIdx = engine.tabManager.activeIndex
+            // Close all tabs except the active one (iterate from end to avoid index shifts)
+            var idx = engine.tabManager.tabs.count - 1
+            while idx >= 0 {
+                if idx != activeIdx {
+                    _ = engine.tabManager.closeTab(at: idx)
+                }
+                idx -= 1
+            }
+            clearCommand()
+        case "SAVE", "QSAVE": 
             guard let eng = engine else { clearCommand(); return }
             do {
                 try eng.tabManager.saveActiveTab()
@@ -411,8 +455,135 @@ public final class CADCommandProcessor {
             startCommand("SCALE", prompt: "Pick scale factor or drag")
         case "E", "ERASE":
             engine?.deleteSelected()
+
+        // --- Copy / Paste (Modify) ---
+        case "COPYCLIP":
+            guard let engine = engine else { clearCommand(); return }
+            guard engine.cadSelection.hasSelection else {
+                print("[CAD] COPYCLIP requires entities to be selected.")
+                clearCommand()
+                break
+            }
+            captureToClipboard(engine: engine)
+            print("[CAD] Copied \(engine.cadSelection.selectedHandles.count) entities to clipboard.")
+            clearCommand()
+
+        case "COPYBASE":
+            guard let engine = engine else { clearCommand(); return }
+            guard engine.cadSelection.hasSelection else {
+                print("[CAD] COPYBASE requires entities to be selected.")
+                clearCommand()
+                break
+            }
+            startCommand("COPYBASE", prompt: "Specify base point")
+
+        case "COPY", "CO", "CP":
+            guard let engine = engine else { clearCommand(); return }
+            guard engine.cadSelection.hasSelection else {
+                print("[CAD] COPY requires entities to be selected.")
+                clearCommand()
+                break
+            }
+            // Duplicate selected entities in-place
+            let result = engine.document.duplicateEntities(
+                handles: engine.cadSelection.selectedHandles)
+            // Add new blocks (create copies of originals with remapped UUIDs)
+            for (origBlockID, newBlockID) in result.blockRemap {
+                if let origBlock = engine.document.block(for: origBlockID) {
+                    let newBlock = CADBlock(
+                        handle: newBlockID,
+                        name: origBlock.name,
+                        geometry: origBlock.geometry)
+                    engine.document.addBlock(newBlock)
+                }
+            }
+            // Add new entities
+            var newHandles = Set<UUID>()
+            for entity in result.entities {
+                engine.document.addEntity(entity)
+                newHandles.insert(entity.handle)
+            }
+            // Select the new entities and start MOVE to reposition them
+            engine.cadSelection.clearSelection()
+            for h in newHandles {
+                engine.cadSelection.addToSelection(h)
+            }
+            startCommand("MOVE", prompt: "Select base point")
+            print("[CAD] Copied \(newHandles.count) entities. Specify destination.")
+
+        case "PASTECLIP":
+            guard let engine = engine else { clearCommand(); return }
+            guard let entry = clipboard.entry else {
+                print("[CAD] Clipboard is empty. Use COPYCLIP or COPYBASE first.")
+                clearCommand()
+                break
+            }
+            pasteFromClipboard(engine: engine, at: .center, basePoint: entry.basePoint)
+            clearCommand()
+
+        case "PASTEORIG":
+            guard let engine = engine else { clearCommand(); return }
+            guard let entry = clipboard.entry else {
+                print("[CAD] Clipboard is empty. Use COPYCLIP or COPYBASE first.")
+                clearCommand()
+                break
+            }
+            pasteFromClipboard(engine: engine, at: .original, basePoint: nil)
+            clearCommand()
+
+        case "PASTEBLOCK":
+            guard let engine = engine else { clearCommand(); return }
+            guard let entry = clipboard.entry else {
+                print("[CAD] Clipboard is empty. Use COPYCLIP or COPYBASE first.")
+                clearCommand()
+                break
+            }
+            pasteFromClipboardAsBlock(engine: engine)
+            clearCommand()
+
         case "SELALL", "SELECTALL":
             engine?.selectAll()
+        case "PAN", "P":
+            guard let engine = engine else { clearCommand(); return }
+            let cmd = PanCommand()
+            activeFeatureCommand = cmd
+            cmd.start(engine: engine, processor: self)
+
+        case "-PAN":
+            guard let engine = engine else { clearCommand(); return }
+            startCommand("-PAN", prompt: "Specify base point")
+
+        case "PLAN":
+            guard let engine = engine else { clearCommand(); return }
+            engine.camera.rotation = 0
+            engine.zoomExtents()
+            print("[CAD] View reset to PLAN (standard orientation).")
+            clearCommand()
+
+        case "DVIEW", "DV":
+            guard let engine = engine else { clearCommand(); return }
+            let cmd = DViewCommand()
+            activeFeatureCommand = cmd
+            cmd.start(engine: engine, processor: self)
+
+        case _ where upper.hasPrefix("SNAPANG "):
+            guard let engine = engine else { clearCommand(); return }
+            let arg = String(text.dropFirst(8)).trimmingCharacters(in: .whitespaces)
+            guard let val = Double(arg) else {
+                print("[CAD] SNAPANG requires an angle in degrees (e.g. SNAPANG 45)")
+                clearCommand()
+                break
+            }
+            engine.snap.snapAngle = val.truncatingRemainder(dividingBy: 360.0)
+            print("[CAD] Snap angle set to \(engine.snap.snapAngle)°")
+            clearCommand()
+
+        case "SNAPANG":
+            guard let engine = engine else { clearCommand(); return }
+            print("[CAD] Current snap angle: \(engine.snap.snapAngle)°")
+            print("[CAD] Usage: SNAPANG <degrees>")
+            clearCommand()
+
         case "ZOOME", "ZOOMEXTENTS":
             engine?.zoomExtents()
         case "AA", "AALINES":
@@ -424,9 +595,6 @@ public final class CADCommandProcessor {
         case "PROPS", "PROPERTIES", "PR":
             if let engine = engine, engine.cadSelection.hasSelection {
                 engine.ui.showPropertiesPanel.toggle()
-                print("[CAD] PROPS: showPropertiesPanel = \(engine.ui.showPropertiesPanel), hasSelection = \(engine.cadSelection.hasSelection), lastHandle = \(String(describing: engine.cadSelection.lastSelectedHandle))")
-            } else {
-                print("[CAD] PROPS: not toggled. engine=\(engine != nil), hasSelection=\(engine?.cadSelection.hasSelection ?? false)")
             }
             clearCommand()
         case "NAV", "RADIALNAV":
@@ -897,6 +1065,27 @@ public final class CADCommandProcessor {
     internal func handleCommandClick(worldX: Double, worldY: Double) {
         guard let engine = engine, let cmd = activeCommand else { return }
         switch cmd {
+        case "-PAN":
+            if commandRefPoint == nil {
+                commandRefPoint = (worldX, worldY)
+                commandPrompt = "Specify destination point"
+            } else {
+                let dx = worldX - commandRefPoint!.0
+                let dy = worldY - commandRefPoint!.1
+                engine.camera.offset.x -= dx
+                engine.camera.offset.y -= dy
+                clearCommand()
+            }
+
+        case "COPYBASE":
+            guard engine.cadSelection.hasSelection else {
+                clearCommand()
+                return
+            }
+            captureToClipboard(engine: engine, basePoint: Vector3(x: worldX, y: worldY, z: 0))
+            print("[CAD] Copied \(engine.cadSelection.selectedHandles.count) entities to clipboard with base point.")
+            clearCommand()
+
         case "MOVE":
             guard engine.cadSelection.hasSelection else {
                 clearCommand()
@@ -993,5 +1182,213 @@ public final class CADCommandProcessor {
         default:
             break
         }
+    }
+
+    // MARK: - Clipboard Helpers
+
+    /// Paste location mode.
+    private enum PasteLocation {
+        /// Place at viewport center (PASTECLIP).
+        case center
+        /// Place at original world coordinates (PASTEORIG).
+        case original
+    }
+
+    /// Capture selected entities plus their block definitions into the internal clipboard.
+    private func captureToClipboard(engine: PhrostEngine, basePoint: Vector3? = nil) {
+        let handles = engine.cadSelection.selectedHandles
+        var entities: [CADEntity] = []
+        var blocks: [UUID: CADBlock] = [:]
+
+        for handle in handles {
+            guard let entity = engine.document.entity(for: handle) else { continue }
+            entities.append(entity)
+
+            // Collect referenced block definitions
+            if let bid = entity.blockID, let block = engine.document.block(for: bid) {
+                blocks[bid] = block
+            }
+        }
+
+        clipboard.entry = CADClipboardEntry(
+            entities: entities,
+            blocks: blocks,
+            basePoint: basePoint
+        )
+    }
+
+    /// Paste clipboard entities into the current document.
+    private func pasteFromClipboard(
+        engine: PhrostEngine,
+        at location: PasteLocation,
+        basePoint: Vector3?
+    ) {
+        guard let entry = clipboard.entry else { return }
+
+        // Determine the offset: for PASTECLIP, offset so the content lands at viewport center.
+        // For PASTEORIG, no offset (entities keep original world coords).
+        let offset: Vector3
+        if location == .center {
+            let vp = engine.camera.worldViewportRect(
+                windowWidth: engine.windowWidth,
+                windowHeight: engine.windowHeight)
+            let viewCenter = Vector3(
+                x: (vp.minX + vp.maxX) / 2,
+                y: (vp.minY + vp.maxY) / 2,
+                z: 0)
+            let contentCenter: Vector3
+            if let bp = basePoint {
+                contentCenter = bp
+            } else {
+                // Compute bounding center of clipboard entities
+                var minX = Double.infinity, minY = Double.infinity
+                var maxX = -Double.infinity, maxY = -Double.infinity
+                for entity in entry.entities {
+                    if let bb = entity.worldBoundingBox {
+                        minX = min(minX, bb.min.x)
+                        minY = min(minY, bb.min.y)
+                        maxX = max(maxX, bb.max.x)
+                        maxY = max(maxY, bb.max.y)
+                    }
+                }
+                if minX.isFinite {
+                    contentCenter = Vector3(x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: 0)
+                } else {
+                    contentCenter = .zero
+                }
+            }
+            offset = Vector3(
+                x: viewCenter.x - contentCenter.x,
+                y: viewCenter.y - contentCenter.y,
+                z: 0)
+        } else {
+            offset = .zero
+        }
+
+        // Add blocks first (deduplicated by UUID)
+        for (_, block) in entry.blocks {
+            if engine.document.block(for: block.handle) == nil {
+                engine.document.addBlock(block)
+            }
+        }
+
+        // Duplicate entities with offset (generate new UUIDs for each pasted entity)
+        // We directly create copies from clipboard entries (not from document)
+        var newHandles = Set<UUID>()
+        for entity in entry.entities {
+            var e = entity
+            // Generate new handle
+            e = CADEntity(
+                handle: UUID(),
+                layerID: entity.layerID,
+                blockID: entity.blockID,
+                localGeometry: entity.localGeometry,
+                transform: entity.transform,
+                xdata: entity.xdata,
+                drawOrder: entity.drawOrder
+            )
+            // Apply offset
+            var t = e.transform
+            t.position = Vector3(
+                x: t.position.x + offset.x,
+                y: t.position.y + offset.y,
+                z: t.position.z + offset.z
+            )
+            e.transform = t
+            engine.document.addEntity(e)
+            newHandles.insert(e.handle)
+        }
+
+        // Select the new entities
+        engine.cadSelection.clearSelection()
+        for h in newHandles {
+            engine.cadSelection.addToSelection(h)
+        }
+
+        let mode = location == .original ? "at original coordinates" : "from clipboard"
+        print("[CAD] Pasted \(newHandles.count) entities \(mode).")
+    }
+
+    /// Paste clipboard entities as a new block reference at viewport center.
+    private func pasteFromClipboardAsBlock(engine: PhrostEngine) {
+        guard let entry = clipboard.entry else { return }
+
+        // Collect world-space geometry from clipboard entities
+        var worldGeom: [CADPrimitive] = []
+        var minX = Double.infinity, minY = Double.infinity
+        var maxX = -Double.infinity, maxY = -Double.infinity
+
+        for entity in entry.entities {
+            if let bb = entity.worldBoundingBox {
+                minX = min(minX, bb.min.x)
+                minY = min(minY, bb.min.y)
+                maxX = max(maxX, bb.max.x)
+                maxY = max(maxY, bb.max.y)
+            }
+
+            let prims: [CADPrimitive]
+            if let bid = entity.blockID, let block = entry.blocks[bid] {
+                prims = block.geometry
+            } else if let local = entity.localGeometry {
+                prims = local
+            } else {
+                continue
+            }
+            let transformed = CADGeometryMath.transformPrimitives(prims, by: entity.transform)
+            worldGeom.append(contentsOf: transformed)
+        }
+
+        guard !worldGeom.isEmpty else {
+            print("[CAD] PASTEBLOCK: no geometry on clipboard.")
+            return
+        }
+
+        // Compute center of clipboard content
+        let contentCenter = Vector3(
+            x: minX.isFinite ? (minX + maxX) / 2 : 0,
+            y: minY.isFinite ? (minY + maxY) / 2 : 0,
+            z: 0)
+
+        // Transform to block-local space (relative to content center)
+        let invTransform = Transform3D.translated(
+            by: Vector3(x: -contentCenter.x, y: -contentCenter.y, z: -contentCenter.z))
+        let localGeom = CADGeometryMath.transformPrimitives(worldGeom, by: invTransform)
+
+        // Create block definition with a unique name
+        var blockName = "PasteBlock"
+        var suffix = 1
+        let existingNames = Set(engine.document.allBlocks.map { $0.name })
+        while existingNames.contains(blockName) {
+            suffix += 1
+            blockName = "PasteBlock_\(suffix)"
+            if suffix > 999 { break }
+        }
+        var block = CADBlock(name: blockName, geometry: localGeom)
+        block.updateBoundingBox()
+        engine.document.addBlock(block)
+
+        // Determine insertion point: viewport center
+        let vp = engine.camera.worldViewportRect(
+            windowWidth: engine.windowWidth,
+            windowHeight: engine.windowHeight)
+        let viewCenter = Vector3(
+            x: (vp.minX + vp.maxX) / 2,
+            y: (vp.minY + vp.maxY) / 2,
+            z: 0)
+
+        // Create block instance
+        let layerID = engine.document.activeLayerID
+            ?? engine.document.allLayers.first?.handle
+            ?? UUID()
+        let instance = CADEntity(
+            layerID: layerID,
+            blockID: block.handle,
+            localGeometry: nil,
+            transform: Transform3D.translated(by: viewCenter)
+        )
+        engine.document.addEntity(instance)
+        engine.cadSelection.select(instance.handle)
+
+        print("[CAD] Pasted \(entry.entities.count) entities as block '\(blockName)'.")
     }
 }

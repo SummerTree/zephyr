@@ -68,6 +68,10 @@ public final class EngineSnapManager {
     public var extensionSnapEnabled: Bool = true
 
     /// Wiggle room in screen pixels before the hover dwell timer resets.
+    /// Does NOT affect the drawing — only the cursor and ortho direction.
+    public var snapAngle: Double = 0.0
+
+    /// Wiggle room in screen pixels before the hover dwell timer resets.
     public var hoverWigglePixels: Double = 5.0
 
     // MARK: - Snap Hysteresis ("sticky" snap)

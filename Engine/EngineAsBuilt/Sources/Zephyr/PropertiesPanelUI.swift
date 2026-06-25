@@ -35,18 +35,18 @@ struct PropertiesPanelUI {
             return
         }
 
-        print("[PropsPanel] render() called, showPropertiesPanel=true")
-
         let doc = engine.document
         // Validate the selection — if the entity no longer exists, dismiss the panel.
         guard let handle = engine.cadSelection.lastSelectedHandle,
               let entity = doc.entity(for: handle)
         else {
-            print("[PropsPanel] No valid lastSelectedHandle, closing panel")
             _wasVisible = false
             engine.ui.showPropertiesPanel = false
             return
         }
+
+        let selectedHandles = engine.cadSelection.selectedHandles
+        let isMultiSelect = selectedHandles.count > 1
 
         let layer = doc.layer(for: entity.layerID)
         let block = entity.blockID.flatMap { doc.block(for: $0) }
@@ -109,6 +109,12 @@ struct PropertiesPanelUI {
             return
         }
 
+        // Selection count indicator (multi-select only)
+        if isMultiSelect {
+            ImGuiTextV("\(selectedHandles.count) entities selected — changes apply to all")
+            igSeparator()
+        }
+
         // Section 1: General — handle, layer, block
         if ImGuiCollapsingHeader("General", Int32(ImGuiTreeNodeFlags_DefaultOpen.rawValue)) {
             let uuidStr = entity.handle.uuidString
@@ -163,16 +169,36 @@ struct PropertiesPanelUI {
             let layerLW = layer?.lineWeight ?? 0.25
             let layerLT = layer?.lineType ?? "CONTINUOUS"
 
+            // --- Layer reassignment ---
+            let currentLayerName = layer?.name ?? "?"
+            if isMultiSelect {
+                ImGuiTextV("Layer: \(currentLayerName) (\(selectedHandles.count) entities)")
+            }
+            if ImGuiBeginCombo("##EntityLayer", currentLayerName, 0) {
+                let allLayers = engine.document.allLayers.sorted { $0.name < $1.name }
+                for ly in allLayers {
+                    let selected = ly.handle == entity.layerID
+                    if ImGuiSelectable(ly.name, selected, 0, ImVec2(x: 0, y: 0)) {
+                        engine.document.reassignEntities(handles: selectedHandles, to: ly.handle)
+                    }
+                    if selected {
+                        ImGuiSetItemDefaultFocus()
+                    }
+                }
+                ImGuiEndCombo()
+            }
+            igSeparator()
+
             // --- Color override ---
             let hasColorOverride = entity.xdata["dxf.color"] != nil
             var useColorOverride = hasColorOverride
             if ImGuiCheckbox("Use color override", &useColorOverride) {
                 if useColorOverride {
-                    // Enable: write current layer color as default
+                    // Enable: write current layer color as default to ALL selected entities
                     let hex = String(format: "#%02X%02X%02X", layerColor.r, layerColor.g, layerColor.b)
-                    engine.document.setXData(for: handle, key: "dxf.color", value: .string(hex))
+                    engine.document.setXDataForAll(handles: selectedHandles, key: "dxf.color", value: .string(hex))
                 } else {
-                    engine.document.removeXData(for: handle, key: "dxf.color")
+                    engine.document.removeXDataForAll(handles: selectedHandles, key: "dxf.color")
                 }
             }
             if useColorOverride {
@@ -185,7 +211,7 @@ struct PropertiesPanelUI {
                         Int(max(0, min(255, col[0] * 255))),
                         Int(max(0, min(255, col[1] * 255))),
                         Int(max(0, min(255, col[2] * 255))))
-                    engine.document.setXData(for: handle, key: "dxf.color", value: .string(hex))
+                    engine.document.setXDataForAll(handles: selectedHandles, key: "dxf.color", value: .string(hex))
                 }
             }
 
@@ -194,9 +220,9 @@ struct PropertiesPanelUI {
             var useLWOverride = hasLWOverride
             if ImGuiCheckbox("Use line weight override", &useLWOverride) {
                 if useLWOverride {
-                    engine.document.setXData(for: handle, key: "dxf.lineWeight", value: .double(layerLW))
+                    engine.document.setXDataForAll(handles: selectedHandles, key: "dxf.lineWeight", value: .double(layerLW))
                 } else {
-                    engine.document.removeXData(for: handle, key: "dxf.lineWeight")
+                    engine.document.removeXDataForAll(handles: selectedHandles, key: "dxf.lineWeight")
                 }
             }
             if useLWOverride {
@@ -207,7 +233,7 @@ struct PropertiesPanelUI {
                 var lw = Float(currentLW)
                 ImGuiPushItemWidth(ImGuiGetFontSize() * 6)
                 if ImGuiInputFloat("##EntityLW", &lw, 0.05, 0.25, "%.3f mm", 0) {
-                    engine.document.setXData(for: handle, key: "dxf.lineWeight", value: .double(Double(max(0, lw))))
+                    engine.document.setXDataForAll(handles: selectedHandles, key: "dxf.lineWeight", value: .double(Double(max(0, lw))))
                 }
                 ImGuiPopItemWidth()
             }
@@ -217,9 +243,9 @@ struct PropertiesPanelUI {
             var useLTOverride = hasLTOverride
             if ImGuiCheckbox("Use line type override", &useLTOverride) {
                 if useLTOverride {
-                    engine.document.setXData(for: handle, key: "dxf.lineType", value: .string(layerLT))
+                    engine.document.setXDataForAll(handles: selectedHandles, key: "dxf.lineType", value: .string(layerLT))
                 } else {
-                    engine.document.removeXData(for: handle, key: "dxf.lineType")
+                    engine.document.removeXDataForAll(handles: selectedHandles, key: "dxf.lineType")
                 }
             }
             if useLTOverride {
@@ -232,7 +258,7 @@ struct PropertiesPanelUI {
                     for lt in lineTypes {
                         let selected = (lt == currentLT)
                         if ImGuiSelectable(lt, selected, 0, ImVec2(x: 0, y: 0)) {
-                            engine.document.setXData(for: handle, key: "dxf.lineType", value: .string(lt))
+                            engine.document.setXDataForAll(handles: selectedHandles, key: "dxf.lineType", value: .string(lt))
                         }
                         if selected {
                             ImGuiSetItemDefaultFocus()
@@ -246,16 +272,16 @@ struct PropertiesPanelUI {
             var isDefaultOrder = entity.drawOrder == Int.max
             if ImGuiCheckbox("Default draw order", &isDefaultOrder) {
                 if isDefaultOrder {
-                    engine.document.setDrawOrder(for: handle, to: Int.max)
+                    engine.document.setDrawOrderForAll(handles: selectedHandles, to: Int.max)
                 } else {
-                    engine.document.setDrawOrder(for: handle, to: 0)
+                    engine.document.setDrawOrderForAll(handles: selectedHandles, to: 0)
                 }
             }
             if !isDefaultOrder {
                 var drawOrder = Int32(clamping: entity.drawOrder)
                 ImGuiPushItemWidth(ImGuiGetFontSize() * 4)
                 if ImGuiInputInt("Draw order", &drawOrder, 1, 10, 0) {
-                    engine.document.setDrawOrder(for: handle, to: Int(drawOrder))
+                    engine.document.setDrawOrderForAll(handles: selectedHandles, to: Int(drawOrder))
                 }
                 ImGuiPopItemWidth()
             }

@@ -182,7 +182,11 @@ internal final class EngineInputHandler {
                     engine.tabManager.newTab()
                     engine.zoomExtents()
                 case SDL_SCANCODE_W:
+                    if engine.io.pointee.KeyShift {
+                        engine.commandProcessor.executeCommand("CLOSEALL")
+                    } else {
                     _ = engine.tabManager.closeActiveTab()
+                    }
                 case SDL_SCANCODE_S:
                     if engine.io.pointee.KeyShift {
                         engine.saveFileBrowser.openSave(
@@ -199,8 +203,20 @@ internal final class EngineInputHandler {
                             print("Save failed: \(error)")
                         }
                     }
+                case SDL_SCANCODE_C:
+                    if engine.io.pointee.KeyShift {
+                        engine.commandProcessor.executeCommand("COPYBASE")
+                    } else {
+                        engine.commandProcessor.executeCommand("COPYCLIP")
+                    }
                 case SDL_SCANCODE_V:
+                    if engine.io.pointee.KeyShift {
+                        engine.commandProcessor.executeCommand("PASTEBLOCK")
+                    } else if engine.commandProcessor.clipboard.hasEntities {
+                        engine.commandProcessor.executeCommand("PASTECLIP")
+                    } else {
                     handleClipboardPaste()
+                    }
                 case SDL_SCANCODE_P:
                     if engine.io.pointee.KeyShift {
                         engine.commandProcessor.executeCommand("PDFIMPORT")

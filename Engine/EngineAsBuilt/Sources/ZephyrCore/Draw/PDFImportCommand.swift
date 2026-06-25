@@ -143,6 +143,12 @@ public final class PDFImportCommand: FeatureCommand {
             return
         }
 
+        // Vector extraction unavailable (PDFium not installed or PDF is raster-only).
+        if !PDFiumBridge.isAvailable {
+            print("[PDFImport] PDFium not available — falling back to raster import.")
+            print("[PDFImport] To enable vector import on macOS:  bash Engine/SwiftPdfium/download_pdfium.sh")
+        }
+
         // Unsupported or fully raster PDF: preserve the existing bitmap fallback.
         guard let result = PDFPageRenderer.renderPage(
             at: info.url, pageIndex: pageIndex, dpi: renderDPI
@@ -218,8 +224,12 @@ public final class PDFImportCommand: FeatureCommand {
                 ImGuiTextV("PDF rendering is not available on this platform.")
                 ImGuiPopStyleColor(1)
                 igSpacing()
-                ImGuiTextV("On macOS: PDFKit is built-in and should work automatically.")
-                ImGuiTextV("On Windows/Linux: install pdfium via:")
+                ImGuiTextV("On macOS: PDFKit handles raster, but vector import needs PDFium.")
+                ImGuiTextV("Install it via:")
+                igSpacing()
+                ImGuiTextV("  bash Engine/SwiftPdfium/download_pdfium.sh")
+                igSpacing()
+                ImGuiTextV("On Windows: install pdfium via:")
                 igSpacing()
                 ImGuiTextV("  Engine\\SwiftPdfium\\download_pdfium.ps1")
                 igSpacing()

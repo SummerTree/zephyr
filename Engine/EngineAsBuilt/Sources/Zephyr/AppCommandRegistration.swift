@@ -38,6 +38,11 @@ struct AppCommandRegistration {
             factory: { TrimCommand() }
         )
         engine.commandProcessor.registerFeatureCommand(
+            name: "MATCHPROP",
+            aliases: ["MA", "MATCH"],
+            factory: { MatchPropCommand() }
+        )
+        engine.commandProcessor.registerFeatureCommand(
             name: "SPLINEEDIT",
             aliases: ["SPE"],
             factory: { SplineEditCommand() }
@@ -125,6 +130,16 @@ struct AppCommandRegistration {
         )
 
         // --- View commands ---
+        engine.commandProcessor.registerFeatureCommand(
+            name: "PAN",
+            aliases: ["P"],
+            factory: { PanCommand() }
+        )
+        engine.commandProcessor.registerFeatureCommand(
+            name: "DVIEW",
+            aliases: ["DV"],
+            factory: { DViewCommand() }
+        )
         engine.commandProcessor.registerFeatureCommand(
             name: "ZOOM",
             aliases: ["Z"],

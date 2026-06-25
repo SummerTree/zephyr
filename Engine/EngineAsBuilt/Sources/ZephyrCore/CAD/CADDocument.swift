@@ -402,6 +402,74 @@ public final class CADDocument {
         invalidateEntityGrid()
     }
 
+    // MARK: - Entity Duplication (for COPY / PASTE commands)
+
+    /// Deep-copy a set of entities, generating new UUIDs for each entity and
+    /// their referenced blocks. Returns the duplicated entities ready to be
+    /// added to the document via `addEntity(_:)`.
+    ///
+    /// - Parameters:
+    ///   - handles: The entity handles to duplicate.
+    ///   - offset: A translation applied to each duplicated entity's transform
+    ///     (e.g., to offset from original for COPY, or from base-point for PASTECLIP).
+    /// - Returns: The duplicated entities with fresh UUID handles and optional
+    ///   block remapping. Caller is responsible for adding entities and blocks
+    ///   to the document.
+    public func duplicateEntities(
+        handles: Set<UUID>,
+        offset: Vector3 = .zero
+    ) -> (entities: [CADEntity], blockRemap: [UUID: UUID]) {
+        var newEntities: [CADEntity] = []
+        var blockRemap: [UUID: UUID] = [:]
+
+        // First pass: collect all referenced block IDs so we can remap them.
+        var referencedBlockIDs = Set<UUID>()
+        for handle in handles {
+            guard let entity = entityRegistry[handle] else { continue }
+            if let bid = entity.blockID {
+                referencedBlockIDs.insert(bid)
+            }
+        }
+
+        // Remap block UUIDs by copying the block definitions with new handles.
+        // (The caller is expected to add these new blocks to the document.)
+        for origBlockID in referencedBlockIDs {
+            if let block = blockTable[origBlockID] {
+                let newBlockID = UUID()
+                blockRemap[origBlockID] = newBlockID
+            }
+        }
+
+        // Second pass: duplicate each entity.
+        for handle in handles {
+            guard var entity = entityRegistry[handle] else { continue }
+
+            // New handle
+            entity = CADEntity(
+                handle: UUID(),
+                layerID: entity.layerID,
+                blockID: entity.blockID.flatMap { blockRemap[$0] ?? $0 },
+                localGeometry: entity.localGeometry,
+                transform: entity.transform,
+                xdata: entity.xdata,
+                drawOrder: entity.drawOrder
+            )
+
+            // Apply offset
+            var t = entity.transform
+            t.position = Vector3(
+                x: t.position.x + offset.x,
+                y: t.position.y + offset.y,
+                z: t.position.z + offset.z
+            )
+            entity.transform = t
+
+            newEntities.append(entity)
+        }
+
+        return (newEntities, blockRemap)
+    }
+
     public func entity(for handle: UUID) -> CADEntity? {
         entityRegistry[handle]
     }
@@ -526,6 +594,84 @@ public final class CADDocument {
     public func setDrawOrder(for handle: UUID, to drawOrder: Int) {
         pushUndo()
         guard var entity = entityRegistry[handle] else { return }
+        entity.drawOrder = drawOrder
+        entityRegistry[handle] = entity
+        isDirty = true
+    }
+
+    // MARK: - Bulk XData Setters
+
+    /// Set an XData key-value pair on all given entities in a single undo step.
+    public func setXDataForAll(handles: Set<UUID>, key: String, value: XDataValue) {
+        guard !handles.isEmpty else { return }
+        pushUndo()
+        for handle in handles {
+            guard var entity = entityRegistry[handle] else { continue }
+            entity.xdata[key] = value
+            entityRegistry[handle] = entity
+        }
+        isDirty = true
+    }
+
+    /// Remove an XData key from all given entities in a single undo step.
+    public func removeXDataForAll(handles: Set<UUID>, key: String) {
+        guard !handles.isEmpty else { return }
+        pushUndo()
+        for handle in handles {
+            guard var entity = entityRegistry[handle] else { continue }
+            entity.xdata.removeValue(forKey: key)
+            entityRegistry[handle] = entity
+        }
+        isDirty = true
+    }
+
+    /// Set the draw order on all given entities in a single undo step.
+    public func setDrawOrderForAll(handles: Set<UUID>, to drawOrder: Int) {
+        guard !handles.isEmpty else { return }
+        pushUndo()
+        for handle in handles {
+            guard var entity = entityRegistry[handle] else { continue }
+            entity.drawOrder = drawOrder
+            entityRegistry[handle] = entity
+        }
+        isDirty = true
+    }
+
+    /// Apply a full set of matchable properties to a single entity in one undo step.
+    /// Used by MATCHPROP to copy all visual properties atomically.
+    /// - Parameters:
+    ///   - handle: The destination entity handle.
+    ///   - layerID: Layer to assign.
+    ///   - colorXData: If non-nil, sets dxf.color XData. If nil, removes dxf.color.
+    ///   - lineWeightXData: If non-nil, sets dxf.lineWeight XData. If nil, removes dxf.lineWeight.
+    ///   - lineTypeXData: If non-nil, sets dxf.lineType XData. If nil, removes dxf.lineType.
+    ///   - drawOrder: Draw order value to set.
+    public func applyMatchProperties(
+        to handle: UUID,
+        layerID: UUID,
+        colorXData: XDataValue?,
+        lineWeightXData: XDataValue?,
+        lineTypeXData: XDataValue?,
+        drawOrder: Int
+    ) {
+        guard var entity = entityRegistry[handle] else { return }
+        pushUndo()
+        entity.layerID = layerID
+        if let cv = colorXData {
+            entity.xdata["dxf.color"] = cv
+        } else {
+            entity.xdata.removeValue(forKey: "dxf.color")
+        }
+        if let lw = lineWeightXData {
+            entity.xdata["dxf.lineWeight"] = lw
+        } else {
+            entity.xdata.removeValue(forKey: "dxf.lineWeight")
+        }
+        if let lt = lineTypeXData {
+            entity.xdata["dxf.lineType"] = lt
+        } else {
+            entity.xdata.removeValue(forKey: "dxf.lineType")
+        }
         entity.drawOrder = drawOrder
         entityRegistry[handle] = entity
         isDirty = true

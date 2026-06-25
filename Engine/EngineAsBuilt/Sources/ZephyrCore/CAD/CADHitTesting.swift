@@ -365,8 +365,14 @@ public enum CADHitTesting {
             let farEnd = Vector3(x: ws.x + wdx * 100_000, y: ws.y + wdy * 100_000, z: ws.z)
             let d = CADGeometryMath.pointToSegmentDistSq(point, ws, farEnd)
             return d <= t2 ? d : nil
-        case .image:
-            return nil
+        case .image(let insertion, let uAxis, let vAxis, _, _, _):
+            let c0 = transform.transformPoint(insertion)
+            let c1 = transform.transformPoint(Vector3(x: insertion.x + uAxis.x, y: insertion.y + uAxis.y, z: insertion.z + uAxis.z))
+            let c2 = transform.transformPoint(Vector3(x: insertion.x + uAxis.x + vAxis.x, y: insertion.y + uAxis.y + vAxis.y, z: insertion.z + uAxis.z + vAxis.z))
+            let c3 = transform.transformPoint(Vector3(x: insertion.x + vAxis.x, y: insertion.y + vAxis.y, z: insertion.z + vAxis.z))
+            let corners = [c0, c1, c2, c3]
+            if pointInConvexPolygon(point, corners) { return 0 }
+            return minEdgeDistSq(point, corners).flatMap { $0 <= t2 ? $0 : nil }
         }
     }
 

@@ -44,7 +44,7 @@ public final class CADRendererBridge {
     internal var entityPrimitiveMap: [UUID: [SpriteID]] = [:]
 
     /// Maps CAD entity handle → the text sprite IDs we created, so we can clean them up.
-    private var entitySpriteMap: [UUID: [SpriteID]] = [:]
+    internal var entitySpriteMap: [UUID: [SpriteID]] = [:]
 
     /// The z-order base for CAD primitives. Incremented per entity to ensure
     /// correct draw order (back-to-front).
@@ -643,19 +643,25 @@ public final class CADRendererBridge {
                     print("[CADBridge] Failed to load GPU texture for image '\(imgSpec.imageName)'")
                     continue
                 }
-                // Center of the quad for sprite position
-                let cx = Double(imgSpec.c0.x + imgSpec.c2.x) / 2.0
-                let cy = Double(imgSpec.c0.y + imgSpec.c2.y) / 2.0
+                // Sprite position is bottom-left corner (renderer adds hw/hh to get center).
+                // c0 = insertion point = bottom-left for unrotated images.
+                let w = sqrt(pow(Double(imgSpec.c1.x - imgSpec.c0.x), 2) + pow(Double(imgSpec.c1.y - imgSpec.c0.y), 2))
+                let h = sqrt(pow(Double(imgSpec.c3.x - imgSpec.c0.x), 2) + pow(Double(imgSpec.c3.y - imgSpec.c0.y), 2))
                 let spriteColor = imgSpec.tint ?? (UInt8(255), UInt8(255), UInt8(255), UInt8(255))
                 let spriteID = SpriteID(id1: Int64(entityIdx) + 1000000, id2: 0)
                 // Use sprite system to render as textured quad
                 engine.spriteManager.addSprite(
                     id1: spriteID.id1, id2: spriteID.id2,
-                    position: (cx, cy, imgSpec.z),
-                    size: (Double(abs(imgSpec.c1.x - imgSpec.c0.x)), Double(abs(imgSpec.c3.y - imgSpec.c0.y))),
+                    position: (Double(imgSpec.c0.x), Double(imgSpec.c0.y), imgSpec.z),
+                    size: (w, h),
                     color: spriteColor,
                     texture: texture
                 )
+                // Suppress textured quad during camera pan (like TTF fonts);
+                // bounding box is drawn by the CAD selection highlight.
+                if let sprite = engine.spriteManager.getSprite(for: spriteID) {
+                    sprite.useBoundsWhilePanning = true
+                }
                 spriteIDs.append(spriteID)
             }
             if !spriteIDs.isEmpty {
@@ -719,6 +725,31 @@ public final class CADRendererBridge {
         let ids = entityPrimitiveMap[handle] ?? []
         let invTransform = entity.transform.inverse()
 
+        /// Dashed/styled lines are tessellated into multiple render primitives
+        /// (one per dash segment). For start/end vertices we need the first or
+        /// last render primitive, not just the one at `primIdx`.
+        func firstRP() -> RenderPrimitive? {
+            guard let firstID = ids.first else { return nil }
+            return gm.getPrimitive(id: firstID)
+        }
+        func lastRP() -> RenderPrimitive? {
+            guard let lastID = ids.last else { return nil }
+            return gm.getPrimitive(id: lastID)
+        }
+        func updateFirstPointOfFirstRP() {
+            guard let rp = firstRP(), rp.points.count >= 2 else { return }
+            rp.points[0].x += dx
+            rp.points[0].y += dy
+            markPrimitiveDirty(rp)
+        }
+        func updateLastPointOfLastRP() {
+            guard let rp = lastRP(), rp.points.count >= 2 else { return }
+            let last = rp.points.count - 1
+            rp.points[last].x += dx
+            rp.points[last].y += dy
+            markPrimitiveDirty(rp)
+        }
+
         var offset = 0
         for (primIdx, prim) in geometry.enumerated() {
             let pts = CADGeometryMath.worldPointsForPrimitive(prim, transform: entity.transform)
@@ -735,7 +766,9 @@ public final class CADRendererBridge {
                     }
                 }
 
-                func renderPrimitiveForCurrentGeometryIndex() -> RenderPrimitive? {
+                /// Returns the render primitive at `primIdx` for cases that don't
+                /// do per-dash tessellation (circle, arc, spline, ellipse, hatch, ray).
+                func rpForCurrentPrimitive() -> RenderPrimitive? {
                     guard primIdx < ids.count else { return nil }
                     return gm.getPrimitive(id: ids[primIdx])
                 }
@@ -746,11 +779,7 @@ public final class CADRendererBridge {
                     let moved = Vector3(x: wp.x + Double(dx), y: wp.y + Double(dy), z: wp.z)
                     let local = invTransform.transformPoint(moved)
                     writeLiveGeometry(.point(position: local, color: c))
-                    if let rp = renderPrimitiveForCurrentGeometryIndex(), localIdx < rp.points.count {
-                        rp.points[localIdx].x += dx
-                        rp.points[localIdx].y += dy
-                        markPrimitiveDirty(rp)
-                    }
+                    updateFirstPointOfFirstRP()
                     return
 
                 case .line(let start, let end, let c):
@@ -761,11 +790,10 @@ public final class CADRendererBridge {
                     if localIdx == 0 { a = invTransform.transformPoint(moved) }
                     else { b = invTransform.transformPoint(moved) }
                     writeLiveGeometry(.line(start: a, end: b, color: c))
-                    if let rp = renderPrimitiveForCurrentGeometryIndex(), localIdx < rp.points.count {
-                        rp.points[localIdx].x += dx
-                        rp.points[localIdx].y += dy
-                        markPrimitiveDirty(rp)
-                    }
+                    // Dashed lines produce multiple RPs (one per dash).
+                    // Vertex 0 → first point of first RP; vertex 1 → last point of last RP.
+                    if localIdx == 0 { updateFirstPointOfFirstRP() }
+                    else { updateLastPointOfLastRP() }
                     return
 
                 case .polygon(let points, let c):
@@ -795,11 +823,8 @@ public final class CADRendererBridge {
                         document.updateEntityGeometryLive(for: handle, geometry: updatedGeometry)
                     }
 
-                    if let rp = renderPrimitiveForCurrentGeometryIndex(), localIdx < rp.points.count {
-                        rp.points[localIdx].x += dx
-                        rp.points[localIdx].y += dy
-                        markPrimitiveDirty(rp)
-                    }
+                    if localIdx == 0 { updateFirstPointOfFirstRP() }
+                    else if localIdx == points.count - 1 { updateLastPointOfLastRP() }
                     return
 
                 case .polyline(let points, let c):
@@ -809,11 +834,8 @@ public final class CADRendererBridge {
                     let moved = Vector3(x: wp.x + Double(dx), y: wp.y + Double(dy), z: wp.z)
                     movedPoints[localIdx] = invTransform.transformPoint(moved)
                     writeLiveGeometry(.polyline(points: movedPoints, color: c))
-                    if let rp = renderPrimitiveForCurrentGeometryIndex(), localIdx < rp.points.count {
-                        rp.points[localIdx].x += dx
-                        rp.points[localIdx].y += dy
-                        markPrimitiveDirty(rp)
-                    }
+                    if localIdx == 0 { updateFirstPointOfFirstRP() }
+                    else if localIdx == points.count - 1 { updateLastPointOfLastRP() }
                     return
 
                 case .fillPolygon(let points, let c):
@@ -823,11 +845,8 @@ public final class CADRendererBridge {
                     let moved = Vector3(x: wp.x + Double(dx), y: wp.y + Double(dy), z: wp.z)
                     movedPoints[localIdx] = invTransform.transformPoint(moved)
                     writeLiveGeometry(.fillPolygon(points: movedPoints, color: c))
-                    if let rp = renderPrimitiveForCurrentGeometryIndex(), localIdx < rp.points.count {
-                        rp.points[localIdx].x += dx
-                        rp.points[localIdx].y += dy
-                        markPrimitiveDirty(rp)
-                    }
+                    if localIdx == 0 { updateFirstPointOfFirstRP() }
+                    else if localIdx == points.count - 1 { updateLastPointOfLastRP() }
                     return
 
                 case .fillComplexPolygon(let outer, let holes, let c):
@@ -837,11 +856,8 @@ public final class CADRendererBridge {
                     let moved = Vector3(x: wp.x + Double(dx), y: wp.y + Double(dy), z: wp.z)
                     movedOuter[localIdx] = invTransform.transformPoint(moved)
                     writeLiveGeometry(.fillComplexPolygon(outer: movedOuter, holes: holes, color: c))
-                    if let rp = renderPrimitiveForCurrentGeometryIndex(), localIdx < rp.points.count {
-                        rp.points[localIdx].x += dx
-                        rp.points[localIdx].y += dy
-                        markPrimitiveDirty(rp)
-                    }
+                    if localIdx == 0 { updateFirstPointOfFirstRP() }
+                    else if localIdx == outer.count - 1 { updateLastPointOfLastRP() }
                     return
 
                 case .gradient(let outer, let holes, let gradientName, let angle, let color1, let color2):
@@ -851,11 +867,8 @@ public final class CADRendererBridge {
                     let moved = Vector3(x: wp.x + Double(dx), y: wp.y + Double(dy), z: wp.z)
                     movedOuter[localIdx] = invTransform.transformPoint(moved)
                     writeLiveGeometry(.gradient(outer: movedOuter, holes: holes, gradientName: gradientName, angle: angle, color1: color1, color2: color2))
-                    if let rp = renderPrimitiveForCurrentGeometryIndex(), localIdx < rp.points.count {
-                        rp.points[localIdx].x += dx
-                        rp.points[localIdx].y += dy
-                        markPrimitiveDirty(rp)
-                    }
+                    if localIdx == 0 { updateFirstPointOfFirstRP() }
+                    else if localIdx == outer.count - 1 { updateLastPointOfLastRP() }
                     return
 
                 case .rect(let origin, let size, let c):
@@ -900,7 +913,7 @@ public final class CADRendererBridge {
                     let s = entity.transform.scale
                     let scaleAvg = max(abs(s.x), abs(s.y))
                     let newRadius = scaleAvg > 1e-9 ? newRadiusWorld / scaleAvg : 1.0
-                    if let rp = renderPrimitiveForCurrentGeometryIndex() {
+                    if let rp = rpForCurrentPrimitive() {
                         CADGeometryMath.regenCirclePoints(rp: rp, center: newCenterLocal, radius: newRadius, transform: entity.transform)
                         markPrimitiveDirty(rp)
                     }
@@ -914,7 +927,7 @@ public final class CADRendererBridge {
 
                     if localIdx == 0 {
                         let movedCenter = invTransform.transformPoint(newWorldPts[0])
-                        if let rp = renderPrimitiveForCurrentGeometryIndex() {
+                        if let rp = rpForCurrentPrimitive() {
                             CADGeometryMath.regenArcPoints(rp: rp, center: movedCenter, radius: radius, startAngle: startAngle, endAngle: endAngle, transform: entity.transform)
                             markPrimitiveDirty(rp)
                         }
@@ -948,7 +961,7 @@ public final class CADRendererBridge {
 
                         if let solved = CADGeometryMath.circleThroughThreePoints(startLocal, midLocal, endLocal) {
                             let angles = CADGeometryMath.arcAnglesIncludingMid(center: solved.center, start: startLocal, mid: midLocal, end: endLocal)
-                            if let rp = renderPrimitiveForCurrentGeometryIndex() {
+                            if let rp = rpForCurrentPrimitive() {
                                 CADGeometryMath.regenArcPoints(rp: rp, center: solved.center, radius: solved.radius, startAngle: angles.start, endAngle: angles.end, transform: entity.transform)
                                 markPrimitiveDirty(rp)
                             }
@@ -969,7 +982,7 @@ public final class CADRendererBridge {
                     newLocalCPs[localIdx] = invTransform.transformPoint(newWP)
                     let w = weights ?? Array(repeating: 1.0, count: newLocalCPs.count)
                     let evaluated = NURBSEvaluator.evaluate(degree: degree, knots: knots, controlPoints: newLocalCPs, weights: w, segments: 48)
-                    if let rp = renderPrimitiveForCurrentGeometryIndex() {
+                    if let rp = rpForCurrentPrimitive() {
                         rp.points = evaluated.map {
                             let twp = entity.transform.transformPoint($0)
                             return SDL_FPoint(x: Float(twp.x), y: Float(twp.y))
@@ -1018,7 +1031,7 @@ public final class CADRendererBridge {
                         // Move center
                         let newCenter = invTransform.transformPoint(newWorldPts[0])
                         writeLiveGeometry(.ellipse(center: newCenter, majorAxis: majorAxis, minorRatio: minorRatio, color: c))
-                        if let rp = renderPrimitiveForCurrentGeometryIndex() {
+                        if let rp = rpForCurrentPrimitive() {
                             CADGeometryMath.regenEllipseRP(rp, center: newCenter, majorAxis: majorAxis, minorRatio: minorRatio, transform: entity.transform)
                             markPrimitiveDirty(rp)
                         }
@@ -1043,7 +1056,7 @@ public final class CADRendererBridge {
                             newMinorRatio = dist > 1e-9 && halfMajor > 1e-9 ? dist / halfMajor : minorRatio
                         }
                         writeLiveGeometry(.ellipse(center: center, majorAxis: newMajorAxis, minorRatio: newMinorRatio, color: c))
-                        if let rp = renderPrimitiveForCurrentGeometryIndex() {
+                        if let rp = rpForCurrentPrimitive() {
                             CADGeometryMath.regenEllipseRP(rp, center: center, majorAxis: newMajorAxis, minorRatio: newMinorRatio, transform: entity.transform)
                             markPrimitiveDirty(rp)
                         }
@@ -1060,7 +1073,7 @@ public final class CADRendererBridge {
                     let moved = Vector3(x: wp.x, y: wp.y, z: 0)
                     newBoundary[localIdx] = invTransform.transformPoint(moved)
                     writeLiveGeometry(.hatch(boundary: newBoundary, pattern: pattern, scale: scale, angle: angle, color: c))
-                    if let rp = renderPrimitiveForCurrentGeometryIndex(), localIdx < rp.points.count {
+                    if let rp = rpForCurrentPrimitive(), localIdx < rp.points.count {
                         rp.points[localIdx].x += dx
                         rp.points[localIdx].y += dy
                         markPrimitiveDirty(rp)
@@ -1074,7 +1087,7 @@ public final class CADRendererBridge {
                     if localIdx == 0 {
                         let newStart = invTransform.transformPoint(newWorldPts[0])
                         writeLiveGeometry(.ray(start: newStart, direction: direction, color: c))
-                        if let rp = renderPrimitiveForCurrentGeometryIndex(), 0 < rp.points.count {
+                        if let rp = rpForCurrentPrimitive(), 0 < rp.points.count {
                             rp.points[0].x += dx
                             rp.points[0].y += dy
                             markPrimitiveDirty(rp)
@@ -1086,7 +1099,7 @@ public final class CADRendererBridge {
                         let newDir = invTransform.transformPoint(Vector3(x: start.x + nd.x, y: start.y + nd.y, z: 0))
                         let dirVec = Vector3(x: newDir.x - start.x, y: newDir.y - start.y, z: 0)
                         writeLiveGeometry(.ray(start: start, direction: dirVec, color: c))
-                        if let rp = renderPrimitiveForCurrentGeometryIndex(), localIdx < rp.points.count {
+                        if let rp = rpForCurrentPrimitive(), localIdx < rp.points.count {
                             rp.points[localIdx].x += dx
                             rp.points[localIdx].y += dy
                             markPrimitiveDirty(rp)

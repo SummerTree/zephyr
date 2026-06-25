@@ -65,9 +65,34 @@ public enum CADGripSystem {
 
         for handle in handles {
             guard let entity = document.entity(for: handle) else { continue }
+            guard let layer = document.layer(for: entity.layerID), layer.isVisible else { continue }
             guard let geometry = document.resolvedGeometry(for: entity), !geometry.isEmpty else { continue }
 
             if simplifyComplexBlocks && geometry.count > 50 { continue }
+
+            // ── Image entities: generate entity-level grips (center + 4 corners)
+            //     from the oriented bounding box, for move/scale support.
+            if geometry.contains(where: { if case .image = $0 { return true }; return false }) {
+                if let corners = getOrientedCorners(handle, document: document) {
+                    let center = Vector3(
+                        x: corners.map(\.x).reduce(0, +) / Double(corners.count),
+                        y: corners.map(\.y).reduce(0, +) / Double(corners.count),
+                        z: 0)
+                    let sp = EngineCameraManager.worldToScreen(worldX: center.x, worldY: center.y, cam: cam)
+                    results.append(CADSelectionManager.CadGripInfo(
+                        handle: handle,
+                        grip: .center,
+                        screenPos: sp, worldPos: center))
+                    for (i, pt) in corners.enumerated() {
+                        let sp = EngineCameraManager.worldToScreen(worldX: pt.x, worldY: pt.y, cam: cam)
+                        results.append(CADSelectionManager.CadGripInfo(
+                            handle: handle,
+                            grip: .corner(index: i),
+                            screenPos: sp, worldPos: pt))
+                    }
+                }
+                continue
+            }
 
             let hasEditableBoundary = geometry.contains { isInvisibleEditBoundary($0) }
             var globalIdx = 0

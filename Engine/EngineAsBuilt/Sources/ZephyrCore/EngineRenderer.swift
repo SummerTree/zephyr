@@ -361,15 +361,18 @@ public final class EngineRenderer {
 
         // 1. Draw active command / interaction overlays on ImGui foreground draw list
         _foregroundVertexEstimate = 0
-        // Only recompute grips when camera, selection, or grip drag changes.
+        // Only recompute grips when camera, selection, grip drag, or document
+        // regeneration (e.g. layer visibility) changes.
         if engine.interaction.cachedGripGeneration != engine.camera.renderGeneration
             || engine._cachedSelectionGen != engine.cadSelection._selectionGeneration
+            || engine._cachedApplyGen != engine._appliedGeneration
             || engine.interaction.gripActive
             || engine.interaction.dragActive
         {
             engine._cachedCadGrips = engine.cadSelection.getAllGrips(document: engine.document, cam: transform)
             engine.interaction.cachedGripGeneration = engine.camera.renderGeneration
             engine._cachedSelectionGen = engine.cadSelection._selectionGeneration
+            engine._cachedApplyGen = engine._appliedGeneration
         }
         renderCrosshairCursor(cam: transform)
         renderGrid(cam: transform)
@@ -431,8 +434,29 @@ public final class EngineRenderer {
         // Draw sprites late in the frame so TTF quads never use a pre-pan camera.
         var backgroundVertexEstimate = 0
         let backgroundVertexLimit = 60000
+
+        // Suppress image sprites during active manipulation (drag/grip) —
+        // the selection highlight bounding box is shown instead.
+        // On plain selection, the sprite stays visible with grips on top.
+        let isAdjusting = engine.interaction.dragActive || engine.interaction.gripActive
+        let hiddenImageSpriteIDs: Set<SpriteID> = {
+            guard isAdjusting else { return [] }
+            var ids = Set<SpriteID>()
+            for handle in engine.cadSelection.selectedHandles {
+                guard let entity = engine.document.entity(for: handle),
+                      let geometry = entity.localGeometry ?? engine.document.resolvedGeometry(for: entity),
+                      geometry.contains(where: { if case .image = $0 { return true }; return false })
+                else { continue }
+                for sid in engine.cadBridge.entitySpriteMap[handle] ?? [] {
+                    ids.insert(sid)
+                }
+            }
+            return ids
+        }()
+
         for sprite in spritesToRender {
             guard backgroundVertexEstimate < backgroundVertexLimit else { break }
+            if hiddenImageSpriteIDs.contains(sprite.id) { continue }
             renderSprite(sprite, deltaSec: deltaSec, cam: transform)
             backgroundVertexEstimate += 4
         }
@@ -747,7 +771,29 @@ public final class EngineRenderer {
     }
 
     private func renderCadSelectionHighlight(cam: CameraTransform) {
-        // Selection is now indicated by geometry grips only (no bounding box).
+        // For entities containing image primitives, draw the bounding box
+        // as selection highlight. During drag/grip the textured sprite is
+        // suppressed (see hiddenImageSpriteIDs); the box remains visible.
+        for handle in engine.cadSelection.selectedHandles {
+            guard let entity = engine.document.entity(for: handle),
+                  let layer = engine.document.layer(for: entity.layerID), layer.isVisible,
+                  let geometry = entity.localGeometry ?? engine.document.resolvedGeometry(for: entity),
+                  geometry.contains(where: { if case .image = $0 { return true }; return false }),
+                  let wbb = entity.worldBoundingBox
+            else { continue }
+            let drawList = igGetBackgroundDrawList(nil)
+            let col = makeImCol32(r: 0, g: 128, b: 255, a: 255)
+            let lineWidth: Float = 1.5
+            let s0 = engine.camera.transformWorldToScreen(worldX: wbb.min.x, worldY: wbb.min.y, cam: cam)
+            let s1 = engine.camera.transformWorldToScreen(worldX: wbb.max.x, worldY: wbb.min.y, cam: cam)
+            let s2 = engine.camera.transformWorldToScreen(worldX: wbb.max.x, worldY: wbb.max.y, cam: cam)
+            let s3 = engine.camera.transformWorldToScreen(worldX: wbb.min.x, worldY: wbb.max.y, cam: cam)
+            ImDrawListAddLine(drawList, ImVec2(x: s0.x, y: s0.y), ImVec2(x: s1.x, y: s1.y), col, lineWidth)
+            ImDrawListAddLine(drawList, ImVec2(x: s1.x, y: s1.y), ImVec2(x: s2.x, y: s2.y), col, lineWidth)
+            ImDrawListAddLine(drawList, ImVec2(x: s2.x, y: s2.y), ImVec2(x: s3.x, y: s3.y), col, lineWidth)
+            ImDrawListAddLine(drawList, ImVec2(x: s3.x, y: s3.y), ImVec2(x: s0.x, y: s0.y), col, lineWidth)
+            _foregroundVertexEstimate += 8
+        }
     }
 
     /// AutoCAD-style hover highlight: draws the entity's actual geometry outline
@@ -758,6 +804,26 @@ public final class EngineRenderer {
         guard let entity = engine.document.entity(for: hoverHandle),
               let geometry = engine.document.resolvedGeometry(for: entity)
         else { return }
+
+        // Image entities have no visible geometry segments in the GPU pipeline —
+        // draw their bounding box instead of iterating (empty) world segments.
+        if geometry.contains(where: { if case .image = $0 { return true }; return false }) {
+            if let wbb = entity.worldBoundingBox {
+                let hc = makeImCol32(r: 64, g: 224, b: 208, a: 180)
+                let lineWidth: Float = 2.0
+                let s0 = engine.camera.transformWorldToScreen(worldX: wbb.min.x, worldY: wbb.min.y, cam: cam)
+                let s1 = engine.camera.transformWorldToScreen(worldX: wbb.max.x, worldY: wbb.min.y, cam: cam)
+                let s2 = engine.camera.transformWorldToScreen(worldX: wbb.max.x, worldY: wbb.max.y, cam: cam)
+                let s3 = engine.camera.transformWorldToScreen(worldX: wbb.min.x, worldY: wbb.max.y, cam: cam)
+                let drawList = igGetBackgroundDrawList(nil)
+                ImDrawListAddLine(drawList, ImVec2(x: s0.x, y: s0.y), ImVec2(x: s1.x, y: s1.y), hc, lineWidth)
+                ImDrawListAddLine(drawList, ImVec2(x: s1.x, y: s1.y), ImVec2(x: s2.x, y: s2.y), hc, lineWidth)
+                ImDrawListAddLine(drawList, ImVec2(x: s2.x, y: s2.y), ImVec2(x: s3.x, y: s3.y), hc, lineWidth)
+                ImDrawListAddLine(drawList, ImVec2(x: s3.x, y: s3.y), ImVec2(x: s0.x, y: s0.y), hc, lineWidth)
+                _foregroundVertexEstimate += 8
+            }
+            return
+        }
 
         let hc = makeImCol32(r: 64, g: 224, b: 208, a: 180)
         let lineWidth: Float = 2.0
@@ -961,25 +1027,34 @@ public final class EngineRenderer {
         let armLen: Float = 56  // pixels from center in each direction
         let gap: Float = 0      // small gap around center so the intersection is visible
 
-        // Vertical arms (above and below cursor, with center gap)
-        ImDrawListAddLine(drawList,
-            ImVec2(x: cx, y: cy - armLen),
-            ImVec2(x: cx, y: cy - gap),
-            col, 2.0)
-        ImDrawListAddLine(drawList,
-            ImVec2(x: cx, y: cy + gap),
-            ImVec2(x: cx, y: cy + armLen),
-            col, 2.0)
+        // Rotate crosshair by SNAPANG if set
+        let angleRad = Float(engine.snap.snapAngle * .pi / 180.0)
+        let cosA = cos(angleRad)
+        let sinA = sin(angleRad)
 
-        // Horizontal arms (left and right of cursor, with center gap)
-        ImDrawListAddLine(drawList,
-            ImVec2(x: cx - armLen, y: cy),
-            ImVec2(x: cx - gap, y: cy),
-            col, 2.0)
-        ImDrawListAddLine(drawList,
-            ImVec2(x: cx + gap, y: cy),
-            ImVec2(x: cx + armLen, y: cy),
-            col, 2.0)
+        // Arm end points in unrotated frame
+        let up    = (dx: Float(0),  dy: Float(-armLen))
+        let down  = (dx: Float(0),  dy: Float(armLen))
+        let left  = (dx: Float(-armLen), dy: Float(0))
+        let right = (dx: Float(armLen),  dy: Float(0))
+        let upGap    = (dx: Float(0), dy: Float(-gap))
+        let downGap  = (dx: Float(0), dy: Float(gap))
+        let leftGap  = (dx: Float(-gap), dy: Float(0))
+        let rightGap = (dx: Float(gap),  dy: Float(0))
+
+        func rot(_ d: (dx: Float, dy: Float)) -> (Float, Float) {
+            (cx + d.dx * cosA - d.dy * sinA, cy + d.dx * sinA + d.dy * cosA)
+        }
+
+        let (ux1, uy1) = rot(up);    let (ux2, uy2) = rot(upGap)
+        let (dx1, dy1) = rot(downGap); let (dx2, dy2) = rot(down)
+        let (lx1, ly1) = rot(left);  let (lx2, ly2) = rot(leftGap)
+        let (rx1, ry1) = rot(rightGap); let (rx2, ry2) = rot(right)
+
+        ImDrawListAddLine(drawList, ImVec2(x: ux1, y: uy1), ImVec2(x: ux2, y: uy2), col, 2.0)
+        ImDrawListAddLine(drawList, ImVec2(x: dx1, y: dy1), ImVec2(x: dx2, y: dy2), col, 2.0)
+        ImDrawListAddLine(drawList, ImVec2(x: lx1, y: ly1), ImVec2(x: lx2, y: ly2), col, 2.0)
+        ImDrawListAddLine(drawList, ImVec2(x: rx1, y: ry1), ImVec2(x: rx2, y: ry2), col, 2.0)
         _foregroundVertexEstimate += 24  // 4 thick lines ≈ 6 verts each
     }
 

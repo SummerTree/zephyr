@@ -70,6 +70,7 @@ public final class PhrostEngine {
     public internal(set) var _cachedCadGrips: [CADSelectionManager.CadGripInfo] = []
     internal var _cachedGripGeneration: Int = -1
     internal var _cachedSelectionGen: Int = -1
+    internal var _cachedApplyGen: Int = -1
 
     // MARK: Command Processor
     /// Encapsulates all CAD command-line state and execution logic.
