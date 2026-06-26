@@ -134,6 +134,10 @@ public final class PhrostEngine {
     public var fileBrowser = ImGuiFileBrowser()
     public var saveFileBrowser = ImGuiFileBrowser()
 
+    // MARK: - Autosave
+    public var autosaveIntervalMinutes: Double = 5.0
+    internal var _autosaveAccumulator: Double = 0
+
     // Frame timing (ms). Printed every 60 frames to console.
     internal var _frameTimingCount: Int = 0
     internal var _frameTimingCadMs: Double = 0
@@ -152,6 +156,8 @@ public final class PhrostEngine {
     public var _lastOTrackEnabled: Bool = false
     /// Status bar cache: last extension snap state.
     public var _lastExtEnabled: Bool = false
+    /// Track whether we were showing save progress last frame (to detect transition to idle).
+    public var _lastHadSaveState: Bool = false
 
     /// FPS string cache (recomputed every 15 frames).
     public var _cachedFpsText: String = ""

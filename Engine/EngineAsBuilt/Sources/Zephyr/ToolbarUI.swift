@@ -58,13 +58,10 @@ struct ToolbarUI {
             ImGuiSameLine(0, 4)
 
             if igSmallButton("Save") {
-                do {
-                    try engine.tabManager.saveActiveTab()
-                } catch TabManager.TabError.noFileURL {
-
+                // Use async save; fall back to Save As browser if no file URL
+                engine.tabManager.startSaveActiveTab()
+                if engine.tabManager.activeFileURL == nil {
                     engine.saveFileBrowser.open(filterExtension: "dxf;eab;pdf")
-                } catch {
-                    print("Save failed: \(error)")
                 }
             }
             if ImGuiIsItemHovered(0) {

@@ -36,6 +36,55 @@ public enum DXFExporter {
         try dxfContent.write(to: url, atomically: true, encoding: .ascii)
     }
 
+    /// Background-save: export from a snapshot with progress and cancellation.
+    public static func export(snapshot: CADDocumentSnapshot, to url: URL,
+                               progress: ((Float) -> Void)? = nil) throws {
+        try Task.checkCancellation()
+
+        let estimatedSize = estimateDXFSize(snapshot: snapshot)
+
+        // Reconstruct a temporary document
+        let tempDoc = CADDocument()
+        tempDoc.restore(from: snapshot)
+
+        var output = ""
+        writeHeader(unit: tempDoc.unit, into: &output)
+        try Task.checkCancellation()
+        writeTables(document: tempDoc, into: &output)
+        try Task.checkCancellation()
+        writeBlocks(document: tempDoc, into: &output)
+        try Task.checkCancellation()
+        writeEntities(document: tempDoc, into: &output)
+        try Task.checkCancellation()
+        writeEOF(into: &output)
+
+        let dxfContent = output.replacingOccurrences(of: "\n", with: "\r\n")
+        let progressFraction = min(0.99, Float(dxfContent.utf8.count) / Float(max(estimatedSize, 1)))
+        progress?(progressFraction)
+
+        try atomicWrite(data: Data(dxfContent.utf8), to: url)
+    }
+
+    private static func estimateDXFSize(snapshot: CADDocumentSnapshot) -> Int {
+        // Rough: ~200 bytes per entity in DXF ASCII
+        return 2000 + snapshot.entities.count * 200 + snapshot.blocks.count * 150
+    }
+
+    private static func atomicWrite(data: Data, to targetURL: URL) throws {
+        let tmpURL = targetURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(targetURL.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+        try data.write(to: tmpURL, options: .atomic)
+
+        if FileManager.default.fileExists(atPath: targetURL.path) {
+            _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: tmpURL)
+        } else {
+            try FileManager.default.moveItem(at: tmpURL, to: targetURL)
+        }
+    }
+
     // MARK: - HEADER Section
 
     private static func writeHeader(unit: CADUnit, into output: inout String) {

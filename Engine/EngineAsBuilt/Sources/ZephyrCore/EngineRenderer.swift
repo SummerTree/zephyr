@@ -251,10 +251,10 @@ public final class EngineRenderer {
         let activeDoc = engine.tabManager.activeDocument
 
         // Fold in-tab edits into the regeneration generation so they supersede any in-flight
-        // task exactly the way a tab switch does. isDirty stays the "needs regen" trigger for
+        // task exactly the way a tab switch does. needsRegeneration is the "needs regen" trigger for
         // edits/undo; tab switches bump the generation directly (see onActiveTabChanged).
-        if activeDoc.isDirty {
-            activeDoc.isDirty = false
+        if activeDoc.needsRegeneration {
+            activeDoc.needsRegeneration = false
             engine._regenerationGeneration &+= 1
         }
 

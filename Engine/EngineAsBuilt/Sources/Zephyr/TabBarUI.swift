@@ -68,14 +68,14 @@ struct TabBarUI {
                 for i in 0..<tabs.count {
                     let tab = tabs[i]
                     let isActive = (i == activeIdx)
-                    let isDirty = tab.document.isDirty
-                    let label = isDirty ? "\(tab.displayName)*" : tab.displayName
+                    let hasUnsaved = tab.document.hasUnsavedChanges
+                    let label = hasUnsaved ? "\(tab.displayName)*" : tab.displayName
 
                     var tabFlags: Int32 = 0
                     if isActive && shouldForceSelection {
                         tabFlags |= Int32(ImGuiTabItemFlags_SetSelected.rawValue)
                     }
-                    if isDirty {
+                    if hasUnsaved {
                         tabFlags |= Int32(ImGuiTabItemFlags_UnsavedDocument.rawValue)
                     }
 

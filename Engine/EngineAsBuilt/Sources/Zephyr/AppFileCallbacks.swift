@@ -27,14 +27,9 @@ struct AppFileCallbacks {
         }
 
         // Callback invoked when the user selects a destination in the Save As dialog.
-        // Persists the active tab's document to the chosen path.
+        // Launches background save with progress; cancel-and-restart if already saving.
         engine.saveFileBrowser.onFileSelected = { url in
-            do {
-                try engine.tabManager.saveActiveTabAs(url: url)
-                print("Saved as: \(url.lastPathComponent)")
-            } catch {
-                print("Save As failed: \(error)")
-            }
+            engine.tabManager.startSaveActiveTabAs(url: url)
         }
     }
 }

@@ -74,6 +74,41 @@ public enum PDFExporter {
     /// Bluebeam auto-calibration remains correct even when the page is
     /// fit-scaled down).
     public static func export(document: CADDocument, to url: URL, backgroundColor: ColorRGBA? = nil) throws {
+        let pdfData = try generatePDF(document: document, backgroundColor: backgroundColor)
+        try pdfData.write(to: url, options: .atomic)
+    }
+
+    /// Background-save: export from a snapshot with progress and cancellation.
+    public static func export(snapshot: CADDocumentSnapshot, to url: URL,
+                               backgroundColor: ColorRGBA? = nil,
+                               progress: ((Float) -> Void)? = nil) throws {
+        try Task.checkCancellation()
+        let tempDoc = CADDocument()
+        tempDoc.restore(from: snapshot)
+        let pdfData = try generatePDF(document: tempDoc, backgroundColor: backgroundColor)
+        try Task.checkCancellation()
+        progress?(0.95)
+        try atomicWrite(data: pdfData, to: url)
+        progress?(0.99)
+    }
+
+    private static func atomicWrite(data: Data, to targetURL: URL) throws {
+        let tmpURL = targetURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(targetURL.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+        try data.write(to: tmpURL, options: .atomic)
+
+        if FileManager.default.fileExists(atPath: targetURL.path) {
+            _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: tmpURL)
+        } else {
+            try FileManager.default.moveItem(at: tmpURL, to: targetURL)
+        }
+    }
+
+    /// Generate PDF data from a document (extracted for reuse by both sync and async paths).
+    private static func generatePDF(document: CADDocument, backgroundColor: ColorRGBA?) throws -> Data {
         let margin: Double = 36
 
         // ---- Pre-pass: collect drawables in screen-parity order ----------
@@ -182,7 +217,7 @@ public enum PDFExporter {
         writeFontRef(w, obj: 5, name: "Helvetica")
         writeFontRef(w, obj: 6, name: "Courier")
 
-        try w.finalize(rootObj: 1).write(to: url, options: .atomic)
+        return w.finalize(rootObj: 1)
     }
 
     // ---------------------------------------------------------------------

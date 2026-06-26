@@ -233,14 +233,13 @@ internal final class EngineInputHandler {
                             filterExtension: "dxf;eab;pdf",
                             defaultName: engine.tabManager.activeTab?.displayName ?? "untitled")
                     } else {
-                        do {
-                            try engine.tabManager.saveActiveTab()
-                        } catch TabManager.TabError.noFileURL {
+                        engine.tabManager.startSaveActiveTab()
+                        // If the tab has no file URL, startSaveActiveTab does nothing —
+                        // fall back to opening the Save As browser.
+                        if engine.tabManager.activeFileURL == nil {
                             engine.saveFileBrowser.openSave(
                                 filterExtension: "dxf;eab;pdf",
                                 defaultName: engine.tabManager.activeTab?.displayName ?? "untitled")
-                        } catch {
-                            print("Save failed: \(error)")
                         }
                     }
                 case SDL_SCANCODE_C:

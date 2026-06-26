@@ -30,7 +30,24 @@ struct StatusBarUI {
         let doc = engine.document
         let currentEntityCount = doc.entityCount
 
-        if engine._lastStatusEntityCount != currentEntityCount
+        // Check for active save state
+        let saveState = engine.tabManager.activeSaveState
+        let hasSaveState = saveState != nil
+
+        if let ss = saveState {
+            // When saving, always rebuild status text to show progress
+            let pct = Int(ss.progress * 100)
+            if case .failed(let msg) = ss.status {
+                engine._cachedStatusLeft = "Save failed: \(msg)"
+                // Auto-clear after 3 seconds
+                if let failedAt = ss.failedAt, Date().timeIntervalSince(failedAt) > 3 {
+                    engine.tabManager.clearSaveError()
+                }
+            } else {
+                engine._cachedStatusLeft = "\(ss.statusText) \(pct)%"
+            }
+            engine._lastHadSaveState = true
+        } else if engine._lastHadSaveState || engine._lastStatusEntityCount != currentEntityCount
             || engine._lastStatusUndo != doc.undoManager.undoDepth
             || engine._lastStatusRedo != doc.undoManager.redoDepth
             || engine._lastStatusLayerID != doc.activeLayerID
@@ -71,6 +88,7 @@ struct StatusBarUI {
             engine._lastPolarEnabled = engine.snap.polarTrackingEnabled
             engine._lastOTrackEnabled = engine.snap.objectSnapTrackingEnabled
             engine._lastExtEnabled = engine.snap.extensionSnapEnabled
+            engine._lastHadSaveState = false
         }
 
         let barH = AppLayout.statusBarHeight
@@ -95,6 +113,15 @@ struct StatusBarUI {
 
             ImGuiSetCursorPosX(16)
             ImGuiTextV(engine._cachedStatusLeft)
+
+            // Save failure indicator
+            if let ss = saveState, case .failed = ss.status {
+                ImGuiSameLine(0, 8)
+                let redColor = ImVec4(x: 1, y: 0.3, z: 0.3, w: 1)
+                ImGuiPushStyleColor(Int32(ImGuiCol_Text.rawValue), redColor)
+                ImGuiTextV("✕")
+                ImGuiPopStyleColor(1)
+            }
 
             // Right side: Coordinates
             let mousePos = EngineCameraManager.screenToWorld(screenX: io.pointee.MousePos.x, screenY: io.pointee.MousePos.y, cam: engine.camera.currentTransform(windowWidth: Int32(dw), windowHeight: Int32(dh)))

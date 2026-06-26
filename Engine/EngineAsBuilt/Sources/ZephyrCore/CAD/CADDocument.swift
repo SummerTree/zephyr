@@ -61,6 +61,58 @@ public struct CADDocumentSnapshot: Sendable {
 }
 
 // =========================================================================
+// MARK: - SaveDocumentSnapshot
+// =========================================================================
+
+/// A Sendable snapshot of a single drawing view for background save.
+/// Includes the CADDocumentSnapshot plus referenced image assets (raw Data).
+public struct SaveDocumentSnapshot: Sendable {
+    public let viewName: String
+    public let viewKind: DXFDrawingViewKind
+    public let cameraState: CameraState
+    public let docSnapshot: CADDocumentSnapshot
+    public let imageAssets: [String: CADImageAsset]
+
+    public init(viewName: String, viewKind: DXFDrawingViewKind,
+                cameraState: CameraState, docSnapshot: CADDocumentSnapshot,
+                imageAssets: [String: CADImageAsset]) {
+        self.viewName = viewName
+        self.viewKind = viewKind
+        self.cameraState = cameraState
+        self.docSnapshot = docSnapshot
+        self.imageAssets = imageAssets
+    }
+}
+
+/// A Sendable snapshot of an entire tab for background save.
+/// Captured synchronously on MainActor, then passed to a detached task.
+public struct SaveTabSnapshot: Sendable {
+    public let tabID: UUID
+    public let drawingViews: [SaveDocumentSnapshot]
+    public let fileURL: URL?
+    public let displayName: String
+    /// The editRevision at the moment the snapshot was taken.
+    /// Used by markSaved(upTo:) to avoid clearing dirty if user edited during save.
+    public let editRevision: UInt64
+    /// File format version for the exporter to embed in output.
+    public let formatVersion: UInt32
+    /// Application version string.
+    public let appVersion: String
+
+    public init(tabID: UUID, drawingViews: [SaveDocumentSnapshot], fileURL: URL?,
+                displayName: String, editRevision: UInt64,
+                formatVersion: UInt32, appVersion: String) {
+        self.tabID = tabID
+        self.drawingViews = drawingViews
+        self.fileURL = fileURL
+        self.displayName = displayName
+        self.editRevision = editRevision
+        self.formatVersion = formatVersion
+        self.appVersion = appVersion
+    }
+}
+
+// =========================================================================
 // MARK: - UndoManager
 // =========================================================================
 
@@ -243,9 +295,35 @@ public final class CADDocument {
 
     public let undoManager = UndoManager()
 
-    /// Dirty flag for save/UI purposes. NOTE: setting this no longer touches the spatial grid —
-    /// grid invalidation is now driven explicitly by the geometry-mutating methods below.
-    public var isDirty: Bool = false
+    // MARK: - Revision Tracking (replaces `isDirty`)
+
+    /// Monotonically incremented on every state mutation that should be persisted.
+    public internal(set) var editRevision: UInt64 = 0
+    /// Set to `editRevision` on successful manual save.
+    public internal(set) var savedRevision: UInt64 = 0
+    /// True when geometry/visual state needs regeneration.
+    public internal(set) var needsRegeneration: Bool = false
+
+    /// True when the document has unsaved changes (tab asterisk, autosave trigger).
+    public var hasUnsavedChanges: Bool { editRevision != savedRevision }
+
+    /// Call whenever the document changes in a way that should be persisted.
+    /// - Parameter regenerate: If true (default), also marks the document for regeneration.
+    public func markEdited(regenerate: Bool = true) {
+        editRevision &+= 1
+        if regenerate { needsRegeneration = true }
+    }
+
+    /// Call for render/cache-only invalidation (palette change, theme toggle).
+    public func markNeedsRegeneration() {
+        needsRegeneration = true
+    }
+
+    /// Call on successful manual save, passing the revision captured in the save snapshot.
+    /// - Parameter revision: The `editRevision` value from the snapshot, NOT the live value.
+    public func markSaved(upTo revision: UInt64) {
+        savedRevision = revision
+    }
 
     public init() {}
 
@@ -255,14 +333,14 @@ public final class CADDocument {
         pushUndo()
         layerTable[layer.handle] = layer
         if activeLayerID == nil { activeLayerID = layer.handle }
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func removeLayer(handle: UUID) {
         pushUndo()
         layerTable.removeValue(forKey: handle)
         if activeLayerID == handle { activeLayerID = layerTable.keys.first }
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func layer(for handle: UUID) -> Layer? {
@@ -281,7 +359,7 @@ public final class CADDocument {
         guard var layer = layerTable[handle] else { return }
         layer.isVisible = visible
         layerTable[handle] = layer
-        isDirty = true
+        markEdited(regenerate: true)
         // Visibility is filtered at query time; the grid still holds all handles. No invalidation.
     }
 
@@ -290,7 +368,7 @@ public final class CADDocument {
         guard var layer = layerTable[handle] else { return }
         layer.name = name
         layerTable[handle] = layer
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func setLayerOpacity(_ handle: UUID, opacity: Double) {
@@ -298,7 +376,7 @@ public final class CADDocument {
         guard var layer = layerTable[handle] else { return }
         layer.opacity = max(0.0, min(1.0, opacity))
         layerTable[handle] = layer
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func setLayerColor(_ handle: UUID, color: ColorRGBA) {
@@ -306,7 +384,7 @@ public final class CADDocument {
         guard var layer = layerTable[handle] else { return }
         layer.color = color
         layerTable[handle] = layer
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func setLayerLineWeight(_ handle: UUID, lineWeight: Double) {
@@ -314,7 +392,7 @@ public final class CADDocument {
         guard var layer = layerTable[handle] else { return }
         layer.lineWeight = lineWeight
         layerTable[handle] = layer
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func setLayerLineType(_ handle: UUID, lineType: String) {
@@ -322,7 +400,7 @@ public final class CADDocument {
         guard var layer = layerTable[handle] else { return }
         layer.lineType = lineType
         layerTable[handle] = layer
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     /// Find a layer by name (first match, case-sensitive).
@@ -346,13 +424,13 @@ public final class CADDocument {
     public func addBlock(_ block: CADBlock) {
         pushUndo()
         blockTable[block.handle] = block
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func removeBlock(handle: UUID) {
         pushUndo()
         blockTable.removeValue(forKey: handle)
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func block(for handle: UUID) -> CADBlock? {
@@ -377,7 +455,7 @@ public final class CADDocument {
             entity.updateAnchorCache(from: geometry)
             entityRegistry[entityHandle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()   // instance world boxes changed
     }
 
@@ -391,7 +469,7 @@ public final class CADDocument {
             e.updateAnchorCache(from: block.geometry)
         }
         entityRegistry[e.handle] = e
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
@@ -408,14 +486,14 @@ public final class CADDocument {
             }
             entityRegistry[entity.handle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
     public func removeEntity(handle: UUID) {
         pushUndo()
         entityRegistry.removeValue(forKey: handle)
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
@@ -503,7 +581,7 @@ public final class CADDocument {
         guard var entity = entityRegistry[handle] else { return }
         entity.transform = newTransform
         entityRegistry[handle] = entity
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
@@ -511,7 +589,7 @@ public final class CADDocument {
         guard var entity = entityRegistry[handle] else { return }
         entity.transform = newTransform
         entityRegistry[handle] = entity
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func moveEntity(handle: UUID, by delta: Vector3) {
@@ -530,7 +608,7 @@ public final class CADDocument {
         guard var entity = entityRegistry[handle] else { return }
         entity.layerID = layerID
         entityRegistry[handle] = entity
-        isDirty = true
+        markEdited(regenerate: true)
         // Layer reassignment does not change geometry/position; no grid invalidation.
     }
 
@@ -543,7 +621,7 @@ public final class CADDocument {
             entity.layerID = layerID
             entityRegistry[handle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: true)
         // Layer reassignment does not change geometry/position; no grid invalidation.
     }
 
@@ -556,7 +634,7 @@ public final class CADDocument {
             blockID: entity.blockID, localGeometry: geometry)
         entity.updateAnchorCache()   // anchors live in local space; geometry changed
         entityRegistry[handle] = entity
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
@@ -593,7 +671,7 @@ public final class CADDocument {
         guard var entity = entityRegistry[handle] else { return }
         entity.xdata[key] = value
         entityRegistry[handle] = entity
-        isDirty = true
+        markEdited(regenerate: false)
         // xdata does not affect bounds; no grid invalidation.
     }
 
@@ -603,7 +681,7 @@ public final class CADDocument {
         guard var entity = entityRegistry[handle] else { return }
         entity.xdata.removeValue(forKey: key)
         entityRegistry[handle] = entity
-        isDirty = true
+        markEdited(regenerate: false)
     }
 
     /// Set the draw order for an entity. Pushes undo, marks dirty.
@@ -613,7 +691,7 @@ public final class CADDocument {
         guard var entity = entityRegistry[handle] else { return }
         entity.drawOrder = drawOrder
         entityRegistry[handle] = entity
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     // MARK: - Bulk XData Setters
@@ -627,7 +705,7 @@ public final class CADDocument {
             entity.xdata[key] = value
             entityRegistry[handle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: false)
     }
 
     /// Remove an XData key from all given entities in a single undo step.
@@ -639,7 +717,7 @@ public final class CADDocument {
             entity.xdata.removeValue(forKey: key)
             entityRegistry[handle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: false)
     }
 
     /// Set the draw order on all given entities in a single undo step.
@@ -651,7 +729,7 @@ public final class CADDocument {
             entity.drawOrder = drawOrder
             entityRegistry[handle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     /// Apply a full set of matchable properties to a single entity in one undo step.
@@ -691,7 +769,7 @@ public final class CADDocument {
         }
         entity.drawOrder = drawOrder
         entityRegistry[handle] = entity
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     // MARK: - Bulk Transforms
@@ -709,7 +787,7 @@ public final class CADDocument {
             entity.transform = t
             entityRegistry[handle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
@@ -749,7 +827,7 @@ public final class CADDocument {
             entity.transform = t
             entityRegistry[handle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
@@ -797,7 +875,7 @@ public final class CADDocument {
             entity.transform = t
             entityRegistry[handle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
@@ -839,7 +917,7 @@ public final class CADDocument {
             }
             entityRegistry[entity.handle] = entity
         }
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
@@ -848,7 +926,7 @@ public final class CADDocument {
         for handle in handles {
             entityRegistry.removeValue(forKey: handle)
         }
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
     }
 
@@ -904,7 +982,7 @@ public final class CADDocument {
         )
         entityRegistry[instance.handle] = instance
 
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()
         return block
     }
@@ -941,13 +1019,13 @@ public final class CADDocument {
     public func addConstraint(_ constraint: CADConstraint) {
         pushUndo()
         constraintTable[constraint.handle] = constraint
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func removeConstraint(handle: UUID) {
         pushUndo()
         constraintTable.removeValue(forKey: handle)
-        isDirty = true
+        markEdited(regenerate: true)
     }
 
     public func constraint(for handle: UUID) -> CADConstraint? {
@@ -968,7 +1046,7 @@ public final class CADDocument {
     /// Clear all solved transforms (e.g. after editing constraints).
     public func clearSolvedTransforms() {
         solvedTransforms.removeAll()
-        isDirty = true
+        markEdited(regenerate: false)
     }
 
     /// Bulk import layers, blocks, and entities without per-item undo snapshots.
@@ -985,7 +1063,7 @@ public final class CADDocument {
             }
             entityRegistry[e.handle] = e
         }
-        isDirty = true
+        markEdited(regenerate: true)
         rebuildEntityGrid()   // build eagerly so the first hover doesn't pay for it
     }
 
@@ -1003,7 +1081,7 @@ public final class CADDocument {
         if activeLayerID == nil, let first = layers.first { activeLayerID = first.handle }
         for block in blocks { blockTable[block.handle] = block }
         for entity in entities { entityRegistry[entity.handle] = entity }
-        isDirty = true
+        markEdited(regenerate: true)
         rebuildEntityGrid()
     }
 
@@ -1049,7 +1127,8 @@ public final class CADDocument {
             }
             entityRegistry[e.handle] = e
         }
-        isDirty = false  // freshly loaded — not dirty
+        savedRevision = editRevision  // freshly loaded — not dirty
+        needsRegeneration = true
         rebuildEntityGrid()
     }
 
@@ -1085,6 +1164,26 @@ public final class CADDocument {
         )
     }
 
+    /// Build a save-specific snapshot that includes referenced image assets.
+    /// Image names are collected from all entities AND all blocks (including nested).
+    public func buildSaveSnapshot(viewName: String, viewKind: DXFDrawingViewKind,
+                                   cameraState: CameraState) -> SaveDocumentSnapshot {
+        let docSnap = snapshot()
+        // Collect referenced image names from entities and blocks
+        var referencedNames = docSnap.imageAssetNames
+        for block in blockTable.values {
+            for prim in block.geometry {
+                if case .image(_, _, _, let name, _, _) = prim { referencedNames.insert(name) }
+            }
+        }
+        let imageAssets = imageStore.filter { referencedNames.contains($0.key) }
+        return SaveDocumentSnapshot(
+            viewName: viewName, viewKind: viewKind,
+            cameraState: cameraState, docSnapshot: docSnap,
+            imageAssets: imageAssets
+        )
+    }
+
     public func restore(from snapshot: CADDocumentSnapshot) {
         layerTable = snapshot.layers
         blockTable = snapshot.blocks
@@ -1097,7 +1196,7 @@ public final class CADDocument {
         linetypePatterns = snapshot.linetypePatterns
         // Prune image assets no longer referenced by any entity after restore
         pruneUnreferencedImageAssets()
-        isDirty = true
+        markEdited(regenerate: true)
         invalidateEntityGrid()   // entity set changed wholesale; rebuild lazily on next hit-test
     }
 

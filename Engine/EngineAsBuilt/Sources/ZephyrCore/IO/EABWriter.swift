@@ -1,8 +1,51 @@
 import Foundation
+import CZLibNG
+
+// =========================================================================
+// MARK: - SaveProgressTracker
+// =========================================================================
+
+/// Aggregates progress across multiple serialization sections.
+/// Each section may use its own `BinaryWriter`; the tracker sums them.
+public final class SaveProgressTracker: @unchecked Sendable {
+    let estimatedTotal: Int
+    private var completedBytes: Int = 0
+    private var currentSectionBytes: Int = 0
+    private var lastPublished: Float = 0
+    var onProgress: ((Float) -> Void)?
+
+    init(estimatedTotal: Int) { self.estimatedTotal = max(estimatedTotal, 1) }
+
+    func attach(to writer: BinaryWriter) {
+        writer.progressHandler = { [weak self] byteCount in
+            self?.currentSectionBytes = byteCount
+            self?.maybePublish()
+        }
+    }
+
+    func finishSection(bytes: Int) {
+        completedBytes += bytes
+        currentSectionBytes = 0
+        maybePublish()
+    }
+
+    func publishNow() {
+        maybePublish()
+    }
+
+    private func maybePublish() {
+        let total = completedBytes + currentSectionBytes
+        let clamped = min(0.99, Float(total) / Float(estimatedTotal))
+        if abs(clamped - lastPublished) >= 0.01 {
+            lastPublished = clamped
+            onProgress?(clamped)
+        }
+    }
+}
 
 // =========================================================================
 // MARK: - EABWriter
-//
+// =========================================================================
 // Serializes a Zephyr CAD document to the EAB binary format.
 // Writes layers, blocks, entities, constraints, and a BVH tree for
 // fast spatial queries on subsequent loads. Uses the EABFileFormat
@@ -20,7 +63,7 @@ import Foundation
 /// ```
 public enum EABWriter {
 
-    // MARK: - Public API
+    // MARK: - Public API (sync, legacy)
 
     /// Write a complete .eab file from a document tab's drawing views.
     public static func write(views: [DrawingView], to url: URL) throws {
@@ -32,6 +75,75 @@ public enum EABWriter {
     public static func write(document: CADDocument, to url: URL) throws {
         let view = DrawingView(name: "Model", kind: .model, document: document)
         try write(views: [view], to: url)
+    }
+
+    // MARK: - Public API (async background-save)
+
+    /// Write a complete .eab file from save snapshots with progress and cancellation.
+    /// Writes to a unique temp file, then atomically replaces the target.
+    public static func write(snapshots: [SaveDocumentSnapshot], to url: URL,
+                              progress: ((Float) -> Void)? = nil) throws {
+        let estimatedSize = estimateSerializedSize(snapshots: snapshots)
+        let tracker = SaveProgressTracker(estimatedTotal: estimatedSize)
+        tracker.onProgress = progress
+        let data = try serialize(snapshots: snapshots, tracker: tracker)
+        try atomicWrite(data: data, to: url)
+    }
+
+    /// Rough estimate of serialized byte count for progress tracking.
+    public static func estimateSerializedSize(snapshots: [SaveDocumentSnapshot]) -> Int {
+        var estimate = 20  // V7 archive header
+        // Directory entries
+        for snap in snapshots {
+            estimate += 2 + snap.viewName.utf8.count + 1 + 32 + 8 + 8
+            estimate += estimateSerializedSize(docSnapshot: snap.docSnapshot)
+            // Image assets
+            for asset in snap.imageAssets.values {
+                estimate += 2 + asset.name.utf8.count
+                    + 2 + asset.originalFilename.utf8.count
+                    + 2 + asset.mimeType.utf8.count
+                    + 4 + 4 + 2 + asset.sha256.utf8.count + 8
+                    + asset.data.count
+            }
+        }
+        return estimate
+    }
+
+    private static func estimateSerializedSize(docSnapshot: CADDocumentSnapshot) -> Int {
+        var e = 32  // V6 header
+        e += 64     // metadata
+        e += 4 + docSnapshot.layers.count * 64
+        e += 4 + docSnapshot.blocks.count * 80
+        e += 4 + docSnapshot.entities.count * 128
+        e += 4 + docSnapshot.constraints.count * 64
+        e += 4 + docSnapshot.solvedTransforms.count * 72
+        // PVA: rough 56 bytes per vertex, estimate 4 verts per entity/block
+        let entityCount = max(docSnapshot.entities.count, 1)
+        let blockCount = max(docSnapshot.blocks.count, 1)
+        e += entityCount * 4 * 56
+        e += blockCount * 4 * 56
+        // BVH nodes
+        e += max((entityCount + blockCount) * 2, 1) * 40
+        e += entityCount * 4 + blockCount * 4  // index arrays
+        // Text styles, linetypes, images, section table
+        e += 256
+        return e
+    }
+
+    /// Write Data to a unique temp file, then atomically swap with the target.
+    private static func atomicWrite(data: Data, to targetURL: URL) throws {
+        let tmpURL = targetURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(targetURL.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+        try data.write(to: tmpURL, options: .atomic)
+
+        if FileManager.default.fileExists(atPath: targetURL.path) {
+            _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: tmpURL)
+        } else {
+            try FileManager.default.moveItem(at: tmpURL, to: targetURL)
+        }
     }
 
     // MARK: - Serialization
@@ -88,9 +200,82 @@ public enum EABWriter {
         return data
     }
 
+    /// Serialize from save snapshots with progress tracking and cancellation.
+    /// Reconstructs temporary CADDocuments from snapshots so it can reuse the
+    /// existing V6 serialization logic. The tracker aggregates progress across
+    /// all sections and all views.
+    public static func serialize(snapshots: [SaveDocumentSnapshot],
+                                  tracker: SaveProgressTracker) throws -> Data {
+        try Task.checkCancellation()
+
+        let w = BinaryWriter()
+        tracker.attach(to: w)
+
+        // 1. Reserve V7 Archive Header
+        w.writeZeros(20)
+
+        // 2. Directory table
+        var directoryPositions: [(cameraOffset: Int, offsetPos: Int, sizePos: Int)] = []
+        for snap in snapshots {
+            w.writeString(snap.viewName)
+            w.writeUInt8(snap.viewKind == .model ? 0 : 1)
+            let cameraOffset = w.count
+            w.writeZeros(32)
+            let offsetPos = w.reserveUInt64()
+            let sizePos = w.reserveUInt64()
+            directoryPositions.append((cameraOffset: cameraOffset, offsetPos: offsetPos, sizePos: sizePos))
+        }
+
+        let directoryOffset = UInt64(20)
+
+        // 3. Serialize each view
+        for (i, snap) in snapshots.enumerated() {
+            try Task.checkCancellation()
+
+            let dataOffset = UInt64(w.count)
+            // Reconstruct a temporary document from the snapshot
+            let tempDoc = CADDocument()
+            tempDoc.restore(from: snap.docSnapshot)
+            // Inject image assets so the inner serializer can find them
+            for (name, asset) in snap.imageAssets {
+                tempDoc.imageStore[name] = asset
+            }
+            let v6Data = try serialize(document: tempDoc, tracker: tracker)
+            tracker.finishSection(bytes: v6Data.count)
+            w.writeBytes(v6Data)
+            let dataSize = UInt64(v6Data.count)
+
+            let pos = directoryPositions[i]
+            w.fillFloat64(at: pos.cameraOffset, value: snap.cameraState.offsetX)
+            w.fillFloat64(at: pos.cameraOffset + 8, value: snap.cameraState.offsetY)
+            w.fillFloat64(at: pos.cameraOffset + 16, value: snap.cameraState.zoom)
+            w.fillFloat64(at: pos.cameraOffset + 24, value: snap.cameraState.rotation)
+            w.fillUInt64(at: pos.offsetPos, value: dataOffset)
+            w.fillUInt64(at: pos.sizePos, value: dataSize)
+        }
+
+        try Task.checkCancellation()
+
+        // 4. Fill header
+        var data = w.build()
+        data.replaceSubrange(0..<4, with: withUnsafeBytes(of: EABArchiveMagic.littleEndian) { Data($0) })
+        data.replaceSubrange(4..<8, with: withUnsafeBytes(of: EABVersion.littleEndian) { Data($0) })
+        data.replaceSubrange(8..<12, with: withUnsafeBytes(of: UInt32(snapshots.count).littleEndian) { Data($0) })
+        data.replaceSubrange(12..<20, with: withUnsafeBytes(of: directoryOffset.littleEndian) { Data($0) })
+
+        return data
+    }
+
+
     /// Serialize a single CADDocument to in-memory Data (V6).
     public static func serialize(document: CADDocument) throws -> Data {
+        return try serialize(document: document, tracker: nil)
+    }
+
+    /// Serialize with optional progress tracker for background saves.
+    private static func serialize(document: CADDocument, tracker: SaveProgressTracker?) throws -> Data {
         let w = BinaryWriter()
+        tracker?.attach(to: w)
 
         // 1. Reserve header (32 bytes)
         let headerOffset = w.count
@@ -99,6 +284,8 @@ public enum EABWriter {
         // 2. Build PVA data first (needed by blocks/entities sections for offsets)
         let (blockPVA, blockPVAOffsets, blockPVAByteCounts) = buildBlockPVA(document: document)
         let (entityPVA, entityPVAOffsets, entityPVAByteCounts) = buildEntityPVA(document: document)
+
+        try Task.checkCancellation()
 
         // 3. Write sections in order, collecting entries
         var entries: [EABSectionEntry] = []
@@ -134,6 +321,7 @@ public enum EABWriter {
                                         size: UInt64(entitiesData.count), compression: .none))
         w.writeBytes(entitiesData)
         w.pad(to: 4)
+        tracker?.publishNow()  // force progress update after heaviest section
 
         // Constraints
         let constraintsData = serializeConstraints(document: document)
@@ -173,6 +361,7 @@ public enum EABWriter {
                 type: .pvaEntity, offset: UInt64(newOffset),
                 size: UInt64(entityPVA.count), compression: .none)
             w.writeBytes(entityPVA)
+            tracker?.publishNow()  // PVA can be large
         }
 
         // BVH
@@ -209,11 +398,13 @@ public enum EABWriter {
 
         // Image assets (added in EAB v5)
         if !document.imageStore.isEmpty {
+            try Task.checkCancellation()
             let imagesData = serializeImageStore(document: document)
             entries.append(EABSectionEntry(type: .images, offset: UInt64(w.count),
                                             size: UInt64(imagesData.count), compression: .none))
             w.writeBytes(imagesData)
             w.pad(to: 4)
+            tracker?.publishNow()  // images can be large
         }
 
         // 4. Write section table at end
@@ -226,6 +417,8 @@ public enum EABWriter {
         let header = EABHeader(unit: document.unit, sectionTableOffset: tableOffset,
                                fileCRC: crc32(data[32...]))
         writeHeader(header, into: &data, at: headerOffset)
+
+        tracker?.publishNow()  // ensure final progress is published
 
         return data
     }
@@ -780,21 +973,14 @@ public enum EABWriter {
         return w.build()
     }
 
-    // MARK: - CRC32
+    // MARK: - CRC32 (zlib-ng native)
 
     private static func crc32(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFFFFFF
-        for byte in data {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 {
-                if (crc & 1) != 0 {
-                    crc = (crc >> 1) ^ 0xEDB88320
-                } else {
-                    crc >>= 1
-                }
-            }
+        guard !data.isEmpty else { return 0 }
+        return data.withUnsafeBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return UInt32(0) }
+            return UInt32(zng_crc32(0, base, UInt32(raw.count)))
         }
-        return ~crc
     }
 
     // MARK: - CADPrimitive Serialization

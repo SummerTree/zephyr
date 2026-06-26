@@ -55,7 +55,7 @@ public final class EngineLoopController {
             let isActionActive =
                 interaction.dragActive || interaction.panActive || interaction.touchPanActive
                 || engine.commandProcessor.activeCommand != nil || engine.commandProcessor.activeFeatureCommand != nil
-                || engine.commandProcessor.commandLineActive || engine.document.isDirty
+                || engine.commandProcessor.commandLineActive || engine.document.needsRegeneration
             
             if framesToRender <= 0 && !isActionActive {
                 SDL_WaitEventTimeout(nil, 16)
@@ -68,6 +68,24 @@ public final class EngineLoopController {
             }
 
             engine.camera.updateFollow(spriteManager: engine.spriteManager)
+
+            // Autosave tick
+            engine._autosaveAccumulator += deltaSec
+            let autosaveIntervalSec = engine.autosaveIntervalMinutes * 60.0
+            if engine._autosaveAccumulator >= autosaveIntervalSec {
+                var anyStarted = false
+                for tab in engine.tabManager.tabs where tab.document.hasUnsavedChanges {
+                    guard engine.tabManager.saveStateByTabID[tab.id] == nil else { continue }
+                    engine.tabManager.startAutosave(tabID: tab.id)
+                    anyStarted = true
+                }
+                if anyStarted || engine.tabManager.tabs.allSatisfy({ !$0.document.hasUnsavedChanges }) {
+                    engine._autosaveAccumulator = 0
+                } else {
+                    engine._autosaveAccumulator = autosaveIntervalSec * 0.9
+                }
+            }
+
             updateBlock?()
 
             // 3. Conditional Rendering
@@ -274,7 +292,7 @@ public final class EngineLoopController {
                     interaction.pendingPreviewHandles = [handle]
                     interaction.pendingPreviewIsBulkDrag = false
                 }
-                engine.document.isDirty = true
+                engine.document.markEdited(regenerate: true)
             }
             interaction.cachedGripGeneration = -1
             interaction.gripActive = false
@@ -300,7 +318,7 @@ public final class EngineLoopController {
                 }
                 interaction.pendingPreviewHandles = engine.cadSelection.selectedHandles
                 interaction.pendingPreviewIsBulkDrag = true
-                engine.document.isDirty = true
+                engine.document.markEdited(regenerate: true)
             }
             interaction.dragUndoSnapshot = nil
             

@@ -86,10 +86,63 @@ public struct DocumentTab {
         self.editingBlockID = editingBlockID
         self.parentDocument = parentDocument
     }
+
+    /// Build an immutable snapshot for background save.
+    /// Captures all drawing views, image assets, and the current edit revision.
+    public func buildSaveSnapshot(formatVersion: UInt32 = 7,
+                                   appVersion: String = "Zephyr 1.0") -> SaveTabSnapshot {
+        let viewSnapshots = drawingViews.map { view in
+            view.document.buildSaveSnapshot(
+                viewName: view.name,
+                viewKind: view.kind,
+                cameraState: view.cameraState
+            )
+        }
+        return SaveTabSnapshot(
+            tabID: id,
+            drawingViews: viewSnapshots,
+            fileURL: fileURL,
+            displayName: displayName,
+            editRevision: document.editRevision,
+            formatVersion: formatVersion,
+            appVersion: appVersion
+        )
+    }
 }
 
 // =========================================================================
 // MARK: - TabManager
+// =========================================================================
+// MARK: - SaveProgressState
+// =========================================================================
+
+public enum SaveStatus: Equatable {
+    case saving
+    case autosaving
+    case committing
+    case failed(String)
+}
+
+public struct SaveProgressState {
+    public var progress: Float = 0
+    public var statusText: String = ""
+    public var status: SaveStatus = .saving
+    public var saveID: UUID          // generation token — stale completions are dropped
+    public var isAutosave: Bool = false
+    public var failedAt: Date? = nil  // timestamp for error fade-out
+
+    public init(progress: Float = 0, statusText: String = "",
+                status: SaveStatus = .saving, saveID: UUID,
+                isAutosave: Bool = false, failedAt: Date? = nil) {
+        self.progress = progress
+        self.statusText = statusText
+        self.status = status
+        self.saveID = saveID
+        self.isAutosave = isAutosave
+        self.failedAt = failedAt
+    }
+}
+
 // =========================================================================
 
 /// Manages a list of `DocumentTab`s and tracks which one is active.
@@ -117,6 +170,19 @@ public final class TabManager {
     /// Callback that applies a camera state to the engine.
     /// Used by `switchToTab` to restore camera state from the incoming tab.
     public var applyCameraState: ((CameraState) -> Void)?
+
+    // MARK: - Save State (per-tab, background-save)
+
+    /// In-flight save tasks keyed by tab ID.
+    private var saveTasksByTabID: [UUID: (task: Task<Void, Never>, saveID: UUID)] = [:]
+    /// Progress/status for each tab's current (or most recent) save.
+    public private(set) var saveStateByTabID: [UUID: SaveProgressState] = [:]
+
+    /// Computed — the active tab's in-flight save state, for the status bar.
+    public var activeSaveState: SaveProgressState? {
+        guard let id = activeTab?.id else { return nil }
+        return saveStateByTabID[id]
+    }
 
     // MARK: - Computed Properties
 
@@ -155,7 +221,7 @@ public final class TabManager {
     /// Whether the active tab has unsaved changes.
     public var activeIsDirty: Bool {
         guard let tab = activeTab else { return false }
-        return tab.document.isDirty
+        return tab.document.hasUnsavedChanges
     }
 
     // MARK: - Tab Lifecycle
@@ -171,7 +237,7 @@ public final class TabManager {
             blocks: [],
             entities: []
         )
-        doc.isDirty = false  // blank docs aren't dirty until modified
+        doc.savedRevision = doc.editRevision  // blank docs aren't dirty until modified
 
         let tab = DocumentTab(document: doc, fileURL: nil, displayName: "Untitled")
         tabs.append(tab)
@@ -203,7 +269,7 @@ public final class TabManager {
             )
             doc.textStyleFonts = imported.textStyleFonts
             doc.linetypePatterns = imported.linetypePatterns
-            doc.isDirty = false
+            doc.savedRevision = doc.editRevision  // freshly imported
             return DrawingView(name: view.name, kind: view.kind, document: doc)
         }
         let doc = drawingViews[0].document
@@ -229,6 +295,10 @@ public final class TabManager {
             // Don't close the last tab — clear it instead
             return false
         }
+
+        // Cancel any in-flight save for this tab before removing it
+        let tabID = tabs[index].id
+        cancelSave(for: tabID, reason: .close)
 
         let wasActive = (index == activeIndex)
         tabs.remove(at: index)
@@ -375,7 +445,7 @@ public final class TabManager {
             entities: tempEntities
         )
 
-        tempDoc.isDirty = false
+        tempDoc.savedRevision = tempDoc.editRevision  // temp doc for block editing
         
         tab.parentDocument = tab.document
         tab.document = tempDoc
@@ -422,8 +492,8 @@ public final class TabManager {
     // MARK: - Save Operations
 
     /// Save the active tab to its associated file. If the tab has no file URL,
-    /// this is a no-op — the caller should use `saveActiveTabAs(url:)` instead.
-    /// - Throws: `DXFExportError` if writing fails.
+    /// this is a no-op — the caller should use `startSaveActiveTabAs(url:)` instead.
+    /// - Throws: `TabError` if no file URL or block editor is active.
     public func saveActiveTab() throws {
         guard let tab = activeTab else { throw TabError.noActiveTab }
         if tab.editingBlockID != nil {
@@ -435,9 +505,8 @@ public final class TabManager {
         try saveActiveTabAs(url: fileURL)
     }
 
-    /// Save the active tab to a new file URL.
+    /// Save the active tab to a new file URL (sync, legacy — blocks UI).
     /// Auto-detects format from file extension (.eab → binary, .dxf → DXF).
-    /// Updates the tab's fileURL and displayName on success.
     /// - Throws: `DXFExportError` or `EABError` if writing fails.
     public func saveActiveTabAs(url: URL) throws {
         guard var tab = activeTab else { throw TabError.noActiveTab }
@@ -454,9 +523,223 @@ public final class TabManager {
         }
         tab.fileURL = url
         tab.displayName = url.lastPathComponent
-        tab.document.isDirty = false
+        tab.document.savedRevision = tab.document.editRevision  // sync save — no race
         tabs[activeIndex] = tab
     }
+
+    // MARK: - Async Save Operations
+
+    /// Manual save (Ctrl+S). Cancels any in-flight save for this tab and starts a new one.
+    public func startSaveActiveTab() {
+        guard let tab = activeTab, tab.editingBlockID == nil else { return }
+        if let fileURL = tab.fileURL {
+            startSave(tab: tab, to: fileURL, isAutosave: false)
+        } else {
+            // No file URL — caller should open the Save As browser
+        }
+    }
+
+    /// Manual save-as (Ctrl+Shift+S, file browser). Cancel-and-restart if already saving.
+    public func startSaveActiveTabAs(url: URL) {
+        guard let tab = activeTab, tab.editingBlockID == nil else { return }
+        startSave(tab: tab, to: url, isAutosave: false)
+    }
+
+    /// Autosave triggered by the timer. Does NOT update fileURL, displayName, or savedRevision.
+    public func startAutosave(tabID: UUID) {
+        guard let idx = tabs.firstIndex(where: { $0.id == tabID }),
+              tabs[idx].editingBlockID == nil else { return }
+        let tab = tabs[idx]
+        guard let url = autosaveURL(for: tabID) else { return }
+        startSave(tab: tab, to: url, isAutosave: true)
+    }
+
+    /// Cancel an in-flight save for a tab.
+    /// - Parameters:
+    ///   - tabID: The tab whose save should be cancelled.
+    ///   - reason: `.restart` replaces state immediately (no flicker); `.close` removes state entirely.
+    public func cancelSave(for tabID: UUID, reason: SaveCancelReason) {
+        saveTasksByTabID[tabID]?.task.cancel()
+        if case .close = reason {
+            saveStateByTabID.removeValue(forKey: tabID)
+        }
+        saveTasksByTabID.removeValue(forKey: tabID)
+    }
+
+    /// Validate saveID and mark the state as `.committing`. Returns false if saveID doesn't match.
+    public func beginCommit(tabID: UUID, saveID: UUID) -> Bool {
+        guard let state = saveStateByTabID[tabID], state.saveID == saveID else { return false }
+        saveStateByTabID[tabID]?.status = .committing
+        saveStateByTabID[tabID]?.statusText = "Finishing..."
+        return true
+    }
+
+    /// Clear the save error state for the active tab (called by StatusBarUI after fade-out).
+    public func clearSaveError() {
+        guard let id = activeTab?.id, let state = saveStateByTabID[id],
+              case .failed = state.status else { return }
+        saveStateByTabID.removeValue(forKey: id)
+    }
+
+    /// Compute the autosave URL for a tab.
+    public func autosaveURL(for tabID: UUID) -> URL? {
+        guard let idx = tabs.firstIndex(where: { $0.id == tabID }) else { return nil }
+        let tab = tabs[idx]
+        if let fileURL = tab.fileURL {
+            return fileURL
+                .deletingLastPathComponent()
+                .appendingPathComponent(fileURL.deletingPathExtension().lastPathComponent + ".autosave.eab")
+        }
+        // Untitled docs: save to Application Support
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let autosaveDir = appSupport.appendingPathComponent("Zephyr/Autosave")
+        try? FileManager.default.createDirectory(at: autosaveDir, withIntermediateDirectories: true)
+        return autosaveDir.appendingPathComponent("Untitled-\(tabID.uuidString).autosave.eab")
+    }
+
+    // MARK: - Save Implementation
+
+    private func startSave(tab: DocumentTab, to url: URL, isAutosave: Bool) {
+        let saveID = UUID()
+        // 1. Cancel any existing save for this tab (restart — no flicker)
+        cancelSave(for: tab.id, reason: .restart)
+        // 2. Build immutable snapshot (on MainActor, fast)
+        let snapshot = tab.buildSaveSnapshot()
+        // 3. Set progress state
+        let status: SaveStatus = isAutosave ? .autosaving : .saving
+        let statusText = isAutosave ? "Autosaving..." : "Saving..."
+        saveStateByTabID[tab.id] = SaveProgressState(
+            progress: 0, statusText: statusText,
+            status: status, saveID: saveID,
+            isAutosave: isAutosave
+        )
+        // 4. Launch detached task
+        let task = Task.detached { [weak self] in
+            guard let self else { return }
+            await self.performBackgroundSave(
+                snapshot: snapshot, saveID: saveID,
+                targetURL: url, isAutosave: isAutosave
+            )
+        }
+        saveTasksByTabID[tab.id] = (task, saveID)
+    }
+
+    nonisolated private func performBackgroundSave(
+        snapshot: SaveTabSnapshot, saveID: UUID,
+        targetURL: URL, isAutosave: Bool
+    ) async {
+        let ext = targetURL.pathExtension.lowercased()
+        do {
+            try Task.checkCancellation()
+
+            let progressHandler: ((Float) -> Void)? = { progress in
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.saveStateByTabID[snapshot.tabID]?.saveID == saveID else { return }
+                    self.saveStateByTabID[snapshot.tabID]?.progress = progress
+                }
+            }
+
+            if ext == "eab" {
+                try EABWriter.write(
+                    snapshots: snapshot.drawingViews,
+                    to: targetURL,
+                    progress: progressHandler
+                )
+            } else if ext == "pdf" {
+                // For PDF, use the first view's document snapshot
+                let docSnap = snapshot.drawingViews.first?.docSnapshot
+                    ?? snapshot.drawingViews[0].docSnapshot
+                let bgColor = await MainActor.run { self.getBackgroundColor?() }
+                try PDFExporter.export(
+                    snapshot: docSnap,
+                    to: targetURL,
+                    backgroundColor: bgColor,
+                    progress: progressHandler
+                )
+            } else {
+                let docSnap = snapshot.drawingViews.first?.docSnapshot
+                    ?? snapshot.drawingViews[0].docSnapshot
+                try DXFExporter.export(
+                    snapshot: docSnap,
+                    to: targetURL,
+                    progress: progressHandler
+                )
+            }
+
+            // Commit phase — validate saveID on MainActor before final replace
+            try Task.checkCancellation()
+            let canCommit = await MainActor.run {
+                self.beginCommit(tabID: snapshot.tabID, saveID: saveID) == true
+            }
+            guard canCommit else { throw CancellationError() }
+            // atomicReplace already done inside the exporters
+
+            // Success — apply results on MainActor
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.saveStateByTabID[snapshot.tabID]?.saveID == saveID else { return }
+                self.finishSave(tabID: snapshot.tabID, saveID: saveID,
+                                snapshot: snapshot, targetURL: targetURL,
+                                isAutosave: isAutosave, success: true)
+            }
+        } catch is CancellationError {
+            await MainActor.run { [weak self] in
+                self?.finishSave(tabID: snapshot.tabID, saveID: saveID,
+                                 snapshot: snapshot, targetURL: targetURL,
+                                 isAutosave: isAutosave, success: false)
+            }
+        } catch {
+            await MainActor.run { [weak self] in
+                guard let self,
+                      self.saveStateByTabID[snapshot.tabID]?.saveID == saveID else { return }
+                self.finishSave(tabID: snapshot.tabID, saveID: saveID,
+                                snapshot: snapshot, targetURL: targetURL,
+                                isAutosave: isAutosave, success: false,
+                                errorMessage: error.localizedDescription)
+            }
+        }
+    }
+
+    @MainActor
+    private func finishSave(tabID: UUID, saveID: UUID, snapshot: SaveTabSnapshot,
+                             targetURL: URL, isAutosave: Bool, success: Bool,
+                             errorMessage: String? = nil) {
+        guard saveStateByTabID[tabID]?.saveID == saveID else { return }
+        saveTasksByTabID.removeValue(forKey: tabID)
+
+        if success {
+            if !isAutosave {
+                // Manual save: update file metadata and mark saved
+                if let idx = tabs.firstIndex(where: { $0.id == tabID }) {
+                    tabs[idx].fileURL = targetURL
+                    tabs[idx].displayName = targetURL.lastPathComponent
+                    tabs[idx].document.markSaved(upTo: snapshot.editRevision)
+                    // Force UI refresh so tab bar asterisk clears immediately
+                    tabs[idx].document.markNeedsRegeneration()
+                }
+            }
+            saveStateByTabID.removeValue(forKey: tabID)
+        } else {
+            if isAutosave {
+                // Autosave failure: silent, clear state
+                saveStateByTabID.removeValue(forKey: tabID)
+                print("[Autosave] failed for tab \(tabID): \(errorMessage ?? "unknown")")
+            } else {
+                // Manual save failure: show error in status bar for ~3 seconds
+                saveStateByTabID[tabID] = SaveProgressState(
+                    progress: 0,
+                    statusText: "Save failed: \(errorMessage ?? "unknown")",
+                    status: .failed(errorMessage ?? "unknown"),
+                    saveID: saveID,
+                    isAutosave: false,
+                    failedAt: Date()
+                )
+            }
+        }
+    }
+
+    public enum SaveCancelReason { case restart, close }
 
     /// Open an EAB (Zephyr Binary) file in a new tab and switch to it.
     /// - Parameter url: The .eab file URL.
@@ -466,6 +749,11 @@ public final class TabManager {
         let views = try EABReader.readViews(from: url)
         
         let displayName = url.lastPathComponent
+        // Mark documents as clean (just loaded) and needing regeneration
+        for view in views {
+            view.document.savedRevision = view.document.editRevision
+            view.document.needsRegeneration = true
+        }
         // DocumentTab will use the first view as active, but holds all views.
         let tab = DocumentTab(
             document: views.first?.document ?? CADDocument(),
@@ -482,7 +770,7 @@ public final class TabManager {
     /// Mark the active tab as dirty.
     public func markActiveDirty() {
         guard let tab = activeTab else { return }
-        tab.document.isDirty = true
+        tab.document.markEdited(regenerate: true)
     }
 
     // MARK: - Error Types

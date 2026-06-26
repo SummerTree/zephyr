@@ -38,12 +38,29 @@ public enum EABReader {
         case readError(String)
     }
 
+    // MARK: - Helpers
+
+    /// Safely convert a UInt64 to Int, returning nil if it exceeds Int.max.
+    private static func safeInt(_ value: UInt64) -> Int? {
+        guard value <= UInt64(Int.max) else { return nil }
+        return Int(value)
+    }
+
+    /// Create a Range<Int> that is guaranteed to be within [0, count].
+    /// Returns nil if offset is negative, size is non-positive, or the range overflows/overruns.
+    private static func checkedRange(offset: Int, size: Int, count: Int) -> Range<Int>? {
+        guard offset >= 0, size > 0, offset <= count else { return nil }
+        let (end, overflow) = offset.addingReportingOverflow(size)
+        guard !overflow, end <= count else { return nil }
+        return offset..<end
+    }
+
     // MARK: - Public API: Full Document Load
 
     /// Read a complete .eab file and return all views.
     /// Returns an array of `DrawingView` ready for `TabManager`.
     public static func readViews(from url: URL) throws -> [DrawingView] {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let data = try Data(contentsOf: url)  // no .mappedIfSafe — file may be replaced atomically
         return try readViews(from: data)
     }
 
@@ -99,25 +116,41 @@ public enum EABReader {
         activeLayerID: UUID?,
         imageStore: [String: CADImageAsset]
     ) {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let data = try Data(contentsOf: url)
         return try readDocument(from: data)
     }
 
     // MARK: - V7 Recovery Helpers
 
-    /// Parse a V7 archive directory. Returns nil if any directory entry has out-of-bounds offsets.
+    private struct ParsedViewEntry {
+        let name: String
+        let kind: DXFDrawingViewKind
+        let cameraState: CameraState
+        let dataOffset: Int
+        let dataSize: Int
+    }
+
+    /// Parse a V7 archive directory. Validates ALL entries before reading any payload.
+    /// Returns nil if any directory entry has out-of-bounds or overflowed offsets.
     private static func parseV7Archive(data: Data, r: BinaryReader) throws -> [DrawingView]? {
         let version = r.readUInt32()
         guard version <= EABVersion else { throw EABError.unsupportedVersion(version) }
 
         let viewCount = Int(r.readUInt32())
-        let directoryOffset = Int(r.readUInt64())
-        guard directoryOffset >= 16, directoryOffset < data.count else { return nil }
+        guard viewCount > 0, viewCount < 10_000 else { return nil }
 
-        var views: [DrawingView] = []
+        let rawDirOffset = r.readUInt64()
+        guard let directoryOffset = safeInt(rawDirOffset),
+              directoryOffset >= 16, directoryOffset < data.count else { return nil }
+
         let dirReader = BinaryReader(data: data, startOffset: directoryOffset)
 
+        // Phase 1: collect and validate every entry
+        var entries: [ParsedViewEntry] = []
         for _ in 0..<viewCount {
+            // Need at least: name (2+len), kind (1), camera (32), offset (8), size (8)
+            guard dirReader.canRead(1 + 32 + 8 + 8) else { return nil }
+
             let name = dirReader.readString()
             let kindRaw = dirReader.readUInt8()
             let kind: DXFDrawingViewKind = (kindRaw == 0) ? .model : .sheet
@@ -126,18 +159,32 @@ public enum EABReader {
             let camY = dirReader.readFloat64()
             let camZoom = dirReader.readFloat64()
             let camRot = dirReader.readFloat64()
-            let cameraState = CameraState(offsetX: camX, offsetY: camY, zoom: camZoom, rotation: camRot)
 
-            let dataOffset = Int(dirReader.readUInt64())
-            let dataSize = Int(dirReader.readUInt64())
+            let rawViewOffset = dirReader.readUInt64()
+            let rawViewSize = dirReader.readUInt64()
 
-            // Validate: offset must be after the directory region, size must be reasonable,
-            // and the sub-range must fit within the file.
-            guard dataOffset >= directoryOffset + 1,
-                  dataSize > 0,
-                  dataOffset + dataSize <= data.count else { return nil }
+            guard let dataOffset = safeInt(rawViewOffset),
+                  let dataSize = safeInt(rawViewSize) else { return nil }
 
-            let viewData = data.subdata(in: dataOffset..<dataOffset + dataSize)
+            // Offset must be after the directory and within the file
+            guard dataOffset > directoryOffset,
+                  checkedRange(offset: dataOffset, size: dataSize, count: data.count) != nil
+            else { return nil }
+
+            entries.append(ParsedViewEntry(
+                name: name, kind: kind,
+                cameraState: CameraState(offsetX: camX, offsetY: camY, zoom: camZoom, rotation: camRot),
+                dataOffset: dataOffset, dataSize: dataSize
+            ))
+        }
+
+        // Phase 2: read each validated view payload
+        var views: [DrawingView] = []
+        for entry in entries {
+            guard let range = checkedRange(offset: entry.dataOffset, size: entry.dataSize, count: data.count)
+            else { return nil }
+
+            let viewData = data.subdata(in: range)
             let components = try readDocument(from: viewData)
 
             let doc = CADDocument()
@@ -154,7 +201,8 @@ public enum EABReader {
                 imageStore: components.imageStore
             )
 
-            views.append(DrawingView(name: name, kind: kind, document: doc, cameraState: cameraState))
+            views.append(DrawingView(name: entry.name, kind: entry.kind,
+                                     document: doc, cameraState: entry.cameraState))
         }
 
         return views
@@ -169,10 +217,9 @@ public enum EABReader {
         while searchStart < data.count - 4 {
             guard let range = data.range(of: magicBytes, in: searchStart..<data.count) else { break }
             let offset = range.lowerBound
-            // Extract from this offset to end of data (or next magic, whichever comes first).
-            // For simplicity, take everything from offset to end — readDocument will
-            // only consume what it needs (section table is at end).
-            let viewData = data.subdata(in: offset..<data.count)
+            let size = data.count - offset
+            guard let viewRange = checkedRange(offset: offset, size: size, count: data.count) else { break }
+            let viewData = data.subdata(in: viewRange)
             do {
                 let components = try readDocument(from: viewData)
                 let doc = CADDocument()
@@ -213,7 +260,7 @@ public enum EABReader {
         imageStore: [String: CADImageAsset]
     ) {
         let header = try parseHeader(from: data)
-        let entries = try parseSectionTable(from: data, at: Int(header.sectionTableOffset))
+        let rawTableOffset = header.sectionTableOffset; guard rawTableOffset <= UInt64(Int.max) else { throw EABError.readError("Section table offset exceeds Int.max") }; let entries = try parseSectionTable(from: data, at: Int(rawTableOffset))
 
         var layers: [Layer] = []
         var blocks: [CADBlock] = []
@@ -226,7 +273,7 @@ public enum EABReader {
         var loadedImageStore: [String: CADImageAsset] = [:]
 
         for entry in entries {
-            let reader = BinaryReader(data: data, startOffset: Int(entry.offset))
+            let reader = BinaryReader(data: data, startOffset: safeInt(entry.offset) ?? 0)
             switch entry.type {
             case .layers:
                 layers = try parseLayers(reader, version: header.version)
@@ -283,9 +330,9 @@ public enum EABReader {
         activeLayerID: UUID?,
         imageStore: [String: CADImageAsset]
     ) {
-        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let data = try Data(contentsOf: url)
         let header = try parseHeader(from: data)
-        let entries = try parseSectionTable(from: data, at: Int(header.sectionTableOffset))
+        let rawTableOffset = header.sectionTableOffset; guard rawTableOffset <= UInt64(Int.max) else { throw EABError.readError("Section table offset exceeds Int.max") }; let entries = try parseSectionTable(from: data, at: Int(rawTableOffset))
 
         // Find BVH section and query it
         guard let bvhEntry = entries.first(where: { $0.type == .bvh }) else {
@@ -293,7 +340,7 @@ public enum EABReader {
             return try readDocument(from: data)
         }
 
-        let bvhReader = BinaryReader(data: data, startOffset: Int(bvhEntry.offset))
+        let bvhReader = BinaryReader(data: data, startOffset: safeInt(bvhEntry.offset) ?? 0)
         let tree = try parseBVHTree(bvhReader)
         let (entityIndices, blockIndices) = tree.query(viewport: viewport)
 
@@ -308,7 +355,7 @@ public enum EABReader {
         var loadedImageStore: [String: CADImageAsset] = [:]
 
         for entry in entries {
-            let reader = BinaryReader(data: data, startOffset: Int(entry.offset))
+            let reader = BinaryReader(data: data, startOffset: safeInt(entry.offset) ?? 0)
             switch entry.type {
             case .layers:
                 layers = try parseLayers(reader, version: header.version)
@@ -652,7 +699,11 @@ public enum EABReader {
             let pixelWidth = Int(r.readUInt32())
             let pixelHeight = Int(r.readUInt32())
             let sha256 = r.readString()
-            let dataLen = Int(r.readUInt64())
+            let rawDataLen = r.readUInt64()
+            guard rawDataLen <= UInt64(Int.max) else {
+                throw EABError.readError("Image asset '\(name)' data length overflow")
+            }
+            let dataLen = Int(rawDataLen)
             // Safety: cap max data length to avoid OOM on corrupt files
             guard dataLen <= CADImageAsset.maxFileBytes else {
                 throw EABError.readError("Image asset '\(name)' exceeds max file size")

@@ -208,6 +208,10 @@ public struct BVHTree: Sendable {
 /// Appends binary data to a backing Data buffer. Little-endian.
 public final class BinaryWriter {
     private var data: Data
+    private var lastProgressBytes: Int = 0
+    
+    /// Called every ~64 KB of accumulated data with the current byte count.
+    public var progressHandler: ((Int) -> Void)?
 
     public init() { data = Data() }
 
@@ -221,11 +225,13 @@ public final class BinaryWriter {
     @inline(__always)
     public func writeUInt16(_ v: UInt16) {
         withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) }
+        checkProgress()
     }
 
     @inline(__always)
     public func writeUInt32(_ v: UInt32) {
         withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) }
+        checkProgress()
     }
 
     @inline(__always)
@@ -236,34 +242,51 @@ public final class BinaryWriter {
     @inline(__always)
     public func writeUInt64(_ v: UInt64) {
         withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) }
+        checkProgress()
     }
 
     @inline(__always)
     public func writeFloat32(_ v: Float) {
         withUnsafeBytes(of: v) { data.append(contentsOf: $0) }
+        checkProgress()
     }
 
     @inline(__always)
     public func writeFloat64(_ v: Double) {
         withUnsafeBytes(of: v) { data.append(contentsOf: $0) }
+        checkProgress()
     }
 
     public func writeUUID(_ uuid: UUID) {
         withUnsafeBytes(of: uuid.uuid) { data.append(contentsOf: $0) }  // 16 bytes
+        checkProgress()
     }
 
     public func writeString(_ s: String) {
         let utf8 = s.utf8
         writeUInt16(UInt16(utf8.count))
         data.append(contentsOf: utf8)
+        checkProgress()
     }
 
     public func writeBytes(_ bytes: Data) {
         data.append(bytes)
+        checkProgress()
     }
 
     public func writeZeros(_ count: Int) {
         data.append(Data(count: count))
+        checkProgress()
+    }
+
+    /// Fire progress handler every 65536 bytes.
+    private func checkProgress() {
+        guard let handler = progressHandler else { return }
+        let threshold = lastProgressBytes + 65536
+        if data.count >= threshold {
+            lastProgressBytes = data.count
+            handler(data.count)
+        }
     }
 
     /// Pad to the given alignment with zero bytes.
@@ -324,21 +347,31 @@ public final class BinaryReader {
     public var position: Int { cursor }
     public var remaining: Int { data.count - cursor }
 
+    /// Check that we can read `count` bytes safely without overflow or OOB.
+    public func canRead(_ count: Int) -> Bool {
+        guard cursor >= 0, cursor <= data.count, count >= 0 else { return false }
+        let (end, overflow) = cursor.addingReportingOverflow(count)
+        return !overflow && end <= data.count
+    }
+
     // MARK: Fixed-width reads
 
     public func readUInt8() -> UInt8 {
+        guard canRead(1) else { return 0 }
         let v = data[cursor]
         cursor += 1
         return v
     }
 
     public func readUInt16() -> UInt16 {
+        guard canRead(2) else { return 0 }
         let v = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: cursor, as: UInt16.self) }
         cursor += 2
         return UInt16(littleEndian: v)
     }
 
     public func readUInt32() -> UInt32 {
+        guard canRead(4) else { return 0 }
         let v = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: cursor, as: UInt32.self) }
         cursor += 4
         return UInt32(littleEndian: v)
@@ -349,24 +382,31 @@ public final class BinaryReader {
     }
 
     public func readUInt64() -> UInt64 {
+        guard canRead(8) else { return 0 }
         let v = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: cursor, as: UInt64.self) }
         cursor += 8
         return UInt64(littleEndian: v)
     }
 
     public func readFloat32() -> Float {
+        guard canRead(4) else { return 0 }
         let v = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: cursor, as: Float.self) }
         cursor += 4
         return v
     }
 
     public func readFloat64() -> Double {
+        guard canRead(8) else { return 0 }
         let v = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: cursor, as: Double.self) }
         cursor += 8
         return v
     }
 
     public func readUUID() -> UUID {
+        guard canRead(16) else {
+            cursor = data.count
+            return UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))
+        }
         var bytes: [UInt8] = []
         bytes.reserveCapacity(16)
         for i in 0..<16 { bytes.append(data[cursor + i]) }
@@ -381,15 +421,16 @@ public final class BinaryReader {
 
     public func readString() -> String {
         let len = Int(readUInt16())
-        guard len > 0 else { return "" }
+        guard len > 0, canRead(len) else { return "" }
         let str = String(data: data.subdata(in: cursor..<cursor+len), encoding: .utf8) ?? ""
         cursor += len
         return str
     }
 
     public func readBytes(count: Int) -> Data {
-        let d = data.subdata(in: cursor..<cursor+count)
-        cursor += count
+        let safeCount = min(count, max(0, data.count - cursor))
+        let d = safeCount > 0 ? data.subdata(in: cursor..<cursor+safeCount) : Data()
+        cursor += safeCount
         return d
     }
 
