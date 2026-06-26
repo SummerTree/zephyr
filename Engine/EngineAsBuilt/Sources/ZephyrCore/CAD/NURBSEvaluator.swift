@@ -377,6 +377,142 @@ public enum NURBSEvaluator {
     }
 
     // =====================================================================
+    // MARK: - Single knot insertion (Boehm)
+    // =====================================================================
+
+    /// Inserts a single knot at parameter `t` using one step of Boehm's algorithm.
+    /// This adds exactly one control point and one knot while preserving the exact
+    /// curve shape (no splitting).
+    ///
+    /// The algorithm converts to homogeneous coordinates, blends control points
+    /// across the affected span `k-p+1 ... k`, inserts `t` into the knot vector,
+    /// and converts back to Cartesian.
+    ///
+    /// A **knot multiplicity guard** prevents insertion when `t` already appears
+    /// `p+1` or more times — inserting beyond degree multiplicity would create a
+    /// C⁻¹ discontinuity (sharp kink).
+    ///
+    /// - Parameters:
+    ///   - degree: The degree `p`.
+    ///   - knots: The full knot vector (length `n + p + 2`).
+    ///   - controlPoints: The control point array.
+    ///   - weights: The weight array (same length as controlPoints).
+    ///   - at: The insertion parameter `t`. Must be strictly inside (tMin, tMax).
+    /// - Returns: A tuple `(controlPoints, knots, weights)` with one extra element
+    ///   in each array, or nil on error / multiplicity limit exceeded.
+    public static func insertKnot(
+        degree: Int,
+        knots: [Double],
+        controlPoints: [Vector3],
+        weights: [Double],
+        at t: Double
+    ) -> (controlPoints: [Vector3], knots: [Double], weights: [Double])? {
+        let p = degree
+        let n = controlPoints.count - 1  // n+1 control points total
+
+        guard p >= 1, n >= p,
+              knots.count == n + p + 2,
+              weights.count == controlPoints.count
+        else { return nil }
+
+        let tMin = knots[p]
+        let tMax = knots[n + 1]
+        guard t > tMin && t < tMax else { return nil }
+
+        // ── Knot multiplicity guard ──
+        // Count how many existing knots equal t (within epsilon).
+        // If multiplicity is already ≥ p+1, inserting another would violate
+        // C⁻¹ continuity and create a sharp corner.
+        let existingCount = knots.reduce(0) { $0 + (abs($1 - t) < 1e-12 ? 1 : 0) }
+        guard existingCount < p + 1 else { return nil }
+
+        // ── Convert to homogeneous coordinates ──
+        // Pw[i] = (w_i * P_i.x, w_i * P_i.y, w_i * P_i.z, w_i)
+        var Qw: [(x: Double, y: Double, z: Double, w: Double)] = []
+        Qw.reserveCapacity(controlPoints.count)
+        for i in 0..<controlPoints.count {
+            let wi = weights[i]
+            Qw.append((
+                x: controlPoints[i].x * wi,
+                y: controlPoints[i].y * wi,
+                z: controlPoints[i].z * wi,
+                w: wi
+            ))
+        }
+
+        var Uk = knots  // mutable copy of the knot vector
+
+        // ── Find knot span ──
+        // We need k such that Uk[k] ≤ t < Uk[k+1].
+        // Special case: if t equals Uk[k+1], use k+1 to avoid division by zero.
+        var k = p
+        while k < Uk.count - 1 - p && Uk[k + 1] < t {
+            k += 1
+        }
+        // If t equals Uk[k+1], bump to next span
+        while k < Uk.count - 1 - p && abs(Uk[k + 1] - t) < 1e-12 {
+            k += 1
+        }
+
+        // ── One Boehm insertion step ──
+        guard k < Uk.count - 1 - p else { return nil }
+
+        var newQw: [(Double, Double, Double, Double)] = []
+        newQw.reserveCapacity(Qw.count + 1)
+
+        for i in 0...k {
+            if i <= k - p {
+                // Unchanged CPs (before the affected span)
+                newQw.append(Qw[i])
+            } else {
+                // Compute alpha = (t - U[i]) / (U[i+p] - U[i])
+                let denom = Uk[i + p] - Uk[i]
+                guard denom > 1e-15 else { return nil }
+
+                let alpha = (t - Uk[i]) / denom
+                let r1 = 1.0 - alpha
+                newQw.append((
+                    x: Qw[i - 1].x * r1 + Qw[i].x * alpha,
+                    y: Qw[i - 1].y * r1 + Qw[i].y * alpha,
+                    z: Qw[i - 1].z * r1 + Qw[i].z * alpha,
+                    w: Qw[i - 1].w * r1 + Qw[i].w * alpha
+                ))
+            }
+        }
+
+        // Shift remaining CPs (after the affected span)
+        for i in k..<Qw.count {
+            newQw.append(Qw[i])
+        }
+
+        Qw = newQw
+        Uk.insert(t, at: k + 1)
+
+        // ── Convert back from homogeneous to Cartesian ──
+        var newCPs: [Vector3] = []
+        var newWeights: [Double] = []
+        for i in 0..<Qw.count {
+            let wi = Qw[i].w
+            guard wi > 1e-15 else { return nil }
+            newCPs.append(Vector3(
+                x: Qw[i].x / wi,
+                y: Qw[i].y / wi,
+                z: Qw[i].z / wi
+            ))
+            newWeights.append(wi)
+        }
+
+        // ── Validate result ──
+        let newN = newCPs.count - 1
+        guard newCPs.count == controlPoints.count + 1,
+              Uk.count == knots.count + 1,
+              Uk.count == newN + p + 2
+        else { return nil }
+
+        return (controlPoints: newCPs, knots: Uk, weights: newWeights)
+    }
+
+    // =====================================================================
     // MARK: - Curve subdivision (Boehm knot insertion)
     // =====================================================================
 

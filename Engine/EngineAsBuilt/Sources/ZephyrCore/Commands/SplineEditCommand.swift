@@ -14,12 +14,14 @@ public final class SplineEditCommand: FeatureCommand {
     private enum State {
         case selecting
         case menuOpen
+        case insertingKnot
         case promptingPrecision
         case finished
     }
 
     private var state: State = .selecting
     private var targetHandle: UUID?
+    private var splineIndex: Int = 0
 
     // UI state
     private var openMenuNextFrame = false
@@ -39,6 +41,7 @@ public final class SplineEditCommand: FeatureCommand {
 
     public func cancel(engine: PhrostEngine, processor: CADCommandProcessor) {
         print("[SplineEditCommand] cancel called")
+        engine.cadSelection.clearSelection()
         state = .finished
     }
 
@@ -66,6 +69,7 @@ public final class SplineEditCommand: FeatureCommand {
                 
                 if hasSpline {
                     targetHandle = handle
+                    engine.cadSelection.select(handle)
                     state = .menuOpen
                     openMenuNextFrame = true
                     
@@ -77,6 +81,57 @@ public final class SplineEditCommand: FeatureCommand {
                     return .continue
                 }
             }
+        }
+
+        if state == .insertingKnot {
+            guard let handle = targetHandle,
+                  let entity = engine.document.entity(for: handle),
+                  let geometry = entity.localGeometry,
+                  splineIndex < geometry.count,
+                  case let .spline(cps, knots, degree, weights, color) = geometry[splineIndex]
+            else {
+                state = .finished
+                return .continue
+            }
+
+            let w = weights ?? Array(repeating: 1.0, count: cps.count)
+            let invTransform = entity.transform.inverse()
+            let localClick = invTransform.transformPoint(Vector3(x: worldX, y: worldY, z: 0))
+
+            // Find the closest parameter t on the spline to the click
+            let t = NURBSEvaluator.findClosestParameter(
+                degree: degree,
+                knots: knots,
+                controlPoints: cps,
+                weights: w,
+                to: localClick,
+                segments: 48
+            )
+
+            // Attempt single knot insertion
+            if let inserted = NURBSEvaluator.insertKnot(
+                degree: degree,
+                knots: knots,
+                controlPoints: cps,
+                weights: w,
+                at: t
+            ) {
+                var newGeom = geometry
+                newGeom[splineIndex] = .spline(
+                    controlPoints: inserted.controlPoints,
+                    knots: inserted.knots,
+                    degree: degree,
+                    weights: inserted.weights,
+                    color: color
+                )
+                engine.document.updateEntityGeometry(for: handle, geometry: newGeom)
+                engine.tabManager.markActiveDirty()
+                processor.commandPrompt = "Control point inserted. Click again or Esc/Enter to finish."
+            } else {
+                processor.commandPrompt = "Cannot insert knot at this location — try a different spot."
+            }
+
+            return .continue
         }
         
         if state == .finished {
@@ -95,8 +150,20 @@ public final class SplineEditCommand: FeatureCommand {
         scancode: SDL_Scancode, engine: PhrostEngine, processor: CADCommandProcessor
     ) -> CommandResult {
         if scancode == SDL_SCANCODE_ESCAPE {
+            if state == .insertingKnot {
+                processor.commandPrompt = "Knot insertion complete."
+            }
+            engine.cadSelection.clearSelection()
             state = .finished
             return .finished
+        }
+        if scancode == SDL_SCANCODE_RETURN || scancode == SDL_SCANCODE_KP_ENTER {
+            if state == .insertingKnot {
+                processor.commandPrompt = "Knot insertion complete."
+                engine.cadSelection.clearSelection()
+                state = .finished
+                return .finished
+            }
         }
         return state == .finished ? .finished : .continue
     }
@@ -119,19 +186,39 @@ public final class SplineEditCommand: FeatureCommand {
             if ImGuiButton("Close/Open", ImVec2(x: 150, y: 0)) {
                 // Stub for now
                 ImGuiCloseCurrentPopup()
+                engine.cadSelection.clearSelection()
                 state = .finished
             }
             if ImGuiButton("Join (Stub)", ImVec2(x: 150, y: 0)) {
                 ImGuiCloseCurrentPopup()
+                engine.cadSelection.clearSelection()
                 state = .finished
             }
             if ImGuiButton("Fit Data (Stub)", ImVec2(x: 150, y: 0)) {
                 ImGuiCloseCurrentPopup()
+                engine.cadSelection.clearSelection()
                 state = .finished
             }
             if ImGuiButton("Edit Vertex (Stub)", ImVec2(x: 150, y: 0)) {
                 ImGuiCloseCurrentPopup()
+                engine.cadSelection.clearSelection()
                 state = .finished
+            }
+            if ImGuiButton("Insert Knot", ImVec2(x: 150, y: 0)) {
+                // Find the spline primitive index for later replacement
+                if let handle = targetHandle,
+                   let entity = engine.document.entity(for: handle),
+                   let geom = entity.localGeometry {
+                    for (idx, prim) in geom.enumerated() {
+                        if case .spline = prim {
+                            splineIndex = idx
+                            break
+                        }
+                    }
+                }
+                ImGuiCloseCurrentPopup()
+                state = .insertingKnot
+                engine.commandProcessor.commandPrompt = "Click on the spline to insert a control point (Esc to finish)."
             }
             if ImGuiButton("Convert to Polyline", ImVec2(x: 150, y: 0)) {
                 ImGuiCloseCurrentPopup()
@@ -141,11 +228,13 @@ public final class SplineEditCommand: FeatureCommand {
             if ImGuiButton("Reverse", ImVec2(x: 150, y: 0)) {
                 applyReverse(engine: engine)
                 ImGuiCloseCurrentPopup()
+                engine.cadSelection.clearSelection()
                 state = .finished
             }
             ImGuiSeparator()
             if ImGuiButton("Exit", ImVec2(x: 150, y: 0)) {
                 ImGuiCloseCurrentPopup()
+                engine.cadSelection.clearSelection()
                 state = .finished
             }
             ImGuiEndPopup()
@@ -167,11 +256,13 @@ public final class SplineEditCommand: FeatureCommand {
             if ImGuiButton("Convert", ImVec2(x: 120, y: 0)) {
                 applyConvert(engine: engine)
                 ImGuiCloseCurrentPopup()
+                engine.cadSelection.clearSelection()
                 state = .finished
             }
             ImGuiSameLine(0, -1)
             if ImGuiButton("Cancel", ImVec2(x: 120, y: 0)) {
                 ImGuiCloseCurrentPopup()
+                engine.cadSelection.clearSelection()
                 state = .finished
             }
             ImGuiEndPopup()
