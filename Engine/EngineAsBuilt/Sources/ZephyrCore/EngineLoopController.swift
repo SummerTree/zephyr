@@ -342,6 +342,10 @@ public final class EngineLoopController {
         let snapWX = engine.snap.currentSnapResult?.worldPos.x ?? wx
         let snapWY = engine.snap.currentSnapResult?.worldPos.y ?? wy
 
+        if engine.commandProcessor.activeCommand != nil {
+            engine.commandProcessor.handleCommandMotion(worldX: snapWX, worldY: snapWY)
+        }
+
         if interaction.dragActive {
             let dx = snapWX - interaction.dragLastWorldX
             let dy = snapWY - interaction.dragLastWorldY

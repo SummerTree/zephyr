@@ -1091,6 +1091,8 @@ public final class CADCommandProcessor {
         commandSelectionIndex = 0
         _lastMatchInput = ""
         _cachedMatches = []
+        _moveGhostWorldX = 0
+        _moveGhostWorldY = 0
     }
 
     // MARK: - Autocomplete Matching
@@ -1135,6 +1137,8 @@ public final class CADCommandProcessor {
             }
             if commandRefPoint == nil {
                 commandRefPoint = (worldX, worldY)
+                _moveGhostWorldX = worldX
+                _moveGhostWorldY = worldY
                 commandPrompt = "Select destination point"
             } else {
                 let dx = worldX - commandRefPoint!.0

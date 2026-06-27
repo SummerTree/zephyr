@@ -1437,105 +1437,241 @@ public final class EngineRenderer {
     // MARK: - Move Ghost Preview
 
     /// When MOVE command is active and a base point has been selected,
-    /// renders a ghost preview of the selected entities at the proposed
-    /// destination. Uses outlining for simple entities and a dashed bounding
-    /// box for complex geometry (>200 segments).
+    /// renders an exact outline preview of the selected entities at the proposed
+    /// destination.
     private func renderMoveGhostPreview(cam: CameraTransform) {
         guard engine.commandProcessor.activeCommand == "MOVE",
-              engine.commandProcessor.commandRefPoint != nil
+              let base = engine.commandProcessor.commandRefPoint,
+              engine.cadSelection.hasSelection
         else { return }
 
-        let baseX = engine.commandProcessor.commandRefPoint!.0
-        let baseY = engine.commandProcessor.commandRefPoint!.1
-        let dx = engine.commandProcessor._moveGhostWorldX - baseX
-        let dy = engine.commandProcessor._moveGhostWorldY - baseY
-        // No significant movement yet
-        guard dx * dx + dy * dy > 4 else { return }
+        let ghostX = engine.commandProcessor._moveGhostWorldX
+        let ghostY = engine.commandProcessor._moveGhostWorldY
+        let dx = ghostX - base.0
+        let dy = ghostY - base.1
 
-        // Count total segments to decide ghost vs bounding box
-        var totalSegments = 0
+        let baseScreen = engine.camera.transformWorldToScreen(worldX: base.0, worldY: base.1, cam: cam)
+        let ghostScreen = engine.camera.transformWorldToScreen(worldX: ghostX, worldY: ghostY, cam: cam)
+        let screenDX = ghostScreen.x - baseScreen.x
+        let screenDY = ghostScreen.y - baseScreen.y
+        guard screenDX * screenDX + screenDY * screenDY > 0.25 else { return }
+
+        let drawList = igGetBackgroundDrawList(nil)
+        let color = makeImCol32(r: 255, g: 200, b: 64, a: 190)
+        let lineWidth: Float = 1.5
+        var remainingSegments = 12000
+
         for handle in engine.cadSelection.selectedHandles {
-            engine.cadBridge.vertexEditor.forEachWorldSegment(handle: handle, in: engine.geometryManager) { _, _, _, _ in
-                totalSegments += 1
+            guard remainingSegments > 0 else { break }
+            guard let entity = engine.document.entity(for: handle),
+                  let geometry = engine.document.resolvedGeometry(for: entity)
+            else { continue }
+
+            renderMoveGhostGeometry(
+                geometry,
+                transform: entity.transform,
+                dx: dx,
+                dy: dy,
+                cam: cam,
+                drawList: drawList,
+                color: color,
+                lineWidth: lineWidth,
+                remainingSegments: &remainingSegments)
+        }
+    }
+
+    private func renderMoveGhostGeometry(
+        _ geometry: [CADPrimitive],
+        transform: Transform3D,
+        dx: Double,
+        dy: Double,
+        cam: CameraTransform,
+        drawList: UnsafeMutablePointer<ImDrawList>?,
+        color: UInt32,
+        lineWidth: Float,
+        remainingSegments: inout Int
+    ) {
+        for primitive in geometry {
+            guard remainingSegments > 0 else { return }
+            renderMoveGhostPrimitive(
+                primitive,
+                transform: transform,
+                dx: dx,
+                dy: dy,
+                cam: cam,
+                drawList: drawList,
+                color: color,
+                lineWidth: lineWidth,
+                remainingSegments: &remainingSegments)
+        }
+    }
+
+    private func renderMoveGhostPrimitive(
+        _ primitive: CADPrimitive,
+        transform: Transform3D,
+        dx: Double,
+        dy: Double,
+        cam: CameraTransform,
+        drawList: UnsafeMutablePointer<ImDrawList>?,
+        color: UInt32,
+        lineWidth: Float,
+        remainingSegments: inout Int
+    ) {
+        func movedWorld(_ point: Vector3) -> Vector3 {
+            let p = transform.transformPoint(point)
+            return Vector3(x: p.x + dx, y: p.y + dy, z: p.z)
+        }
+
+        func drawPath(_ points: [Vector3], closed: Bool) {
+            guard points.count >= 2, remainingSegments > 0 else { return }
+            let count = closed ? points.count : points.count - 1
+            guard count > 0 else { return }
+
+            for i in 0..<count {
+                guard remainingSegments > 0 else { return }
+                let a = movedWorld(points[i])
+                let b = movedWorld(points[(i + 1) % points.count])
+                let s0 = engine.camera.transformWorldToScreen(worldX: a.x, worldY: a.y, cam: cam)
+                let s1 = engine.camera.transformWorldToScreen(worldX: b.x, worldY: b.y, cam: cam)
+                ImDrawListAddLine(
+                    drawList,
+                    ImVec2(x: s0.x, y: s0.y),
+                    ImVec2(x: s1.x, y: s1.y),
+                    color,
+                    lineWidth)
+                remainingSegments -= 1
             }
         }
 
-        if totalSegments <= 200 {
-            // Ghost: draw entity outlines at proposed position
-            let color = makeImCol32(r: 255, g: 200, b: 64, a: 160)
-            let lw: Float = 1.5
-            let drawList = igGetBackgroundDrawList(nil)
-
-            for handle in engine.cadSelection.selectedHandles {
-                engine.cadBridge.vertexEditor.forEachWorldSegment(handle: handle, in: engine.geometryManager) { x1, y1, x2, y2 in
-                    let prev = engine.camera.transformWorldToScreen(
-                        worldX: x1 + dx, worldY: y1 + dy, cam: cam)
-                    let cur = engine.camera.transformWorldToScreen(
-                        worldX: x2 + dx, worldY: y2 + dy, cam: cam)
-                    ImDrawListAddLine(drawList,
-                        ImVec2(x: prev.x, y: prev.y),
-                        ImVec2(x: cur.x, y: cur.y), color, lw)
-                }
-
-                // If it is a text entity, render a box outline showing its target position
-                if let entity = engine.document.entity(for: handle),
-                   entity.xdata["dxf.text"] != nil,
-                   let box = entity.worldBoundingBox {
-                    let p0 = engine.camera.transformWorldToScreen(worldX: box.min.x + dx, worldY: box.min.y + dy, cam: cam)
-                    let p1 = engine.camera.transformWorldToScreen(worldX: box.max.x + dx, worldY: box.min.y + dy, cam: cam)
-                    let p2 = engine.camera.transformWorldToScreen(worldX: box.max.x + dx, worldY: box.max.y + dy, cam: cam)
-                    let p3 = engine.camera.transformWorldToScreen(worldX: box.min.x + dx, worldY: box.max.y + dy, cam: cam)
-                    ImDrawListAddLine(drawList, ImVec2(x: p0.x, y: p0.y), ImVec2(x: p1.x, y: p1.y), color, lw)
-                    ImDrawListAddLine(drawList, ImVec2(x: p1.x, y: p1.y), ImVec2(x: p2.x, y: p2.y), color, lw)
-                    ImDrawListAddLine(drawList, ImVec2(x: p2.x, y: p2.y), ImVec2(x: p3.x, y: p3.y), color, lw)
-                    ImDrawListAddLine(drawList, ImVec2(x: p3.x, y: p3.y), ImVec2(x: p0.x, y: p0.y), color, lw)
-                }
+        func circlePoints(center: Vector3, radius: Double, segments: Int = 64) -> [Vector3] {
+            guard radius > 1e-12 else { return [] }
+            return (0..<segments).map { i in
+                let a = Double(i) * 2.0 * .pi / Double(segments)
+                return Vector3(x: center.x + cos(a) * radius, y: center.y + sin(a) * radius, z: center.z)
             }
-        } else {
-            // Complex: dashed bounding box
-            let color = makeImCol32(r: 255, g: 200, b: 64, a: 200)
-            let lw: Float = 2.0
+        }
 
-            var minX = Double.infinity, minY = Double.infinity
-            var maxX = -Double.infinity, maxY = -Double.infinity
-            for handle in engine.cadSelection.selectedHandles {
-                guard let entity = engine.document.entity(for: handle),
-                      let bb = entity.worldBoundingBox else { continue }
-                minX = min(minX, bb.min.x)
-                minY = min(minY, bb.min.y)
-                maxX = max(maxX, bb.max.x)
-                maxY = max(maxY, bb.max.y)
+        func arcPoints(center: Vector3, radius: Double, startAngle: Double, endAngle: Double, segments: Int = 32) -> [Vector3] {
+            guard radius > 1e-12 else { return [] }
+            var span = endAngle - startAngle
+            if span < 0 { span += 2.0 * .pi }
+            return (0...segments).map { i in
+                let t = Double(i) / Double(segments)
+                let a = startAngle + span * t
+                return Vector3(x: center.x + cos(a) * radius, y: center.y + sin(a) * radius, z: center.z)
             }
-            guard minX.isFinite else { return }
+        }
 
-            let corners: [(Double, Double)] = [
-                (minX + dx, minY + dy), (maxX + dx, minY + dy),
-                (maxX + dx, maxY + dy), (minX + dx, maxY + dy),
-            ]
-            let sc = corners.map {
-                engine.camera.transformWorldToScreen(worldX: $0.0, worldY: $0.1, cam: cam)
+        func ellipsePoints(center: Vector3, majorAxis: Vector3, minorRatio: Double, segments: Int = 64) -> [Vector3] {
+            let majorLen = majorAxis.magnitude
+            let minorLen = majorLen * minorRatio
+            guard majorLen > 1e-12, minorLen > 1e-12 else { return [] }
+            let rot = atan2(majorAxis.y, majorAxis.x)
+            let c = cos(rot)
+            let s = sin(rot)
+            return (0..<segments).map { i in
+                let t = Double(i) * 2.0 * .pi / Double(segments)
+                let px = cos(t) * majorLen
+                let py = sin(t) * minorLen
+                return Vector3(
+                    x: center.x + px * c - py * s,
+                    y: center.y + px * s + py * c,
+                    z: center.z)
             }
+        }
 
-            func dashedLine(_ p0: SDL_FPoint, _ p1: SDL_FPoint) {
-                let len = sqrtf((p1.x - p0.x) * (p1.x - p0.x) + (p1.y - p0.y) * (p1.y - p0.y))
-                guard len > 0 else { return }
-                let dash: Float = 8, gap: Float = 6
-                let step = dash + gap
-                let ux = (p1.x - p0.x) / len
-                let uy = (p1.y - p0.y) / len
-                var t: Float = 0
-                let drawList = igGetBackgroundDrawList(nil)
-                while t < len {
-                    let end = min(t + dash, len)
-                    ImDrawListAddLine(drawList,
-                        ImVec2(x: p0.x + ux * t, y: p0.y + uy * t),
-                        ImVec2(x: p0.x + ux * end, y: p0.y + uy * end),
-                        color, lw)
-                    t += step
-                }
+        switch primitive {
+        case .point(let position, _):
+            let p = movedWorld(position)
+            let sp = engine.camera.transformWorldToScreen(worldX: p.x, worldY: p.y, cam: cam)
+            ImDrawListAddLine(drawList, ImVec2(x: sp.x - 4, y: sp.y), ImVec2(x: sp.x + 4, y: sp.y), color, lineWidth)
+            ImDrawListAddLine(drawList, ImVec2(x: sp.x, y: sp.y - 4), ImVec2(x: sp.x, y: sp.y + 4), color, lineWidth)
+            remainingSegments -= 2
+
+        case .line(let start, let end, _):
+            drawPath([start, end], closed: false)
+
+        case .rect(let origin, let size, _),
+             .fillRect(let origin, let size, _):
+            drawPath([
+                origin,
+                Vector3(x: origin.x + size.x, y: origin.y, z: origin.z),
+                Vector3(x: origin.x + size.x, y: origin.y + size.y, z: origin.z),
+                Vector3(x: origin.x, y: origin.y + size.y, z: origin.z),
+            ], closed: true)
+
+        case .polygon(let points, _),
+             .fillPolygon(let points, _):
+            drawPath(points, closed: true)
+
+        case .fillComplexPolygon(let outer, let holes, _),
+             .gradient(let outer, let holes, _, _, _, _):
+            drawPath(outer, closed: true)
+            for hole in holes { drawPath(hole, closed: true) }
+
+        case .polyline(let path, _):
+            drawPath(path.tessellatedPoints(), closed: path.isClosed)
+
+        case .circle(let center, let radius, _):
+            drawPath(circlePoints(center: center, radius: radius), closed: true)
+
+        case .arc(let center, let radius, let startAngle, let endAngle, _):
+            drawPath(arcPoints(center: center, radius: radius, startAngle: startAngle, endAngle: endAngle), closed: false)
+
+        case .spline(let controlPoints, let knots, let degree, let weights, _):
+            guard controlPoints.count >= 2 else { return }
+            let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
+            let pts = NURBSEvaluator.evaluateByKnotSpans(
+                degree: degree,
+                knots: knots,
+                controlPoints: controlPoints,
+                weights: w,
+                segmentsPerSpan: 12)
+            drawPath(pts, closed: false)
+
+        case .text(let position, let text, let height, let rotation, _, let alignH, let alignV, let mtextWidth, _):
+            let bounds = CADEntity.estimateTextLocalBounds(
+                text: text,
+                height: height,
+                alignH: alignH,
+                alignV: alignV,
+                mtextWidth: mtextWidth)
+            let c = cos(rotation)
+            let s = sin(rotation)
+            func textPoint(_ x: Double, _ y: Double) -> Vector3 {
+                Vector3(
+                    x: position.x + x * c - y * s,
+                    y: position.y + x * s + y * c,
+                    z: position.z)
             }
+            drawPath([
+                textPoint(bounds.minX, bounds.minY),
+                textPoint(bounds.maxX, bounds.minY),
+                textPoint(bounds.maxX, bounds.maxY),
+                textPoint(bounds.minX, bounds.maxY),
+            ], closed: true)
 
-            for i in 0..<4 { dashedLine(sc[i], sc[(i + 1) % 4]) }
+        case .ellipse(let center, let majorAxis, let minorRatio, _):
+            drawPath(ellipsePoints(center: center, majorAxis: majorAxis, minorRatio: minorRatio), closed: true)
+
+        case .hatch(let boundary, _, _, _, _, _):
+            drawPath(boundary, closed: true)
+
+        case .ray(let start, let direction, _):
+            let end = Vector3(x: start.x + direction.x * 1000.0, y: start.y + direction.y * 1000.0, z: start.z + direction.z * 1000.0)
+            drawPath([start, end], closed: false)
+
+        case .image(let insertion, let uAxis, let vAxis, _, let clipBoundary, _):
+            if let clipBoundary, clipBoundary.count >= 2 {
+                drawPath(clipBoundary, closed: true)
+            } else {
+                drawPath([
+                    insertion,
+                    Vector3(x: insertion.x + uAxis.x, y: insertion.y + uAxis.y, z: insertion.z + uAxis.z),
+                    Vector3(x: insertion.x + uAxis.x + vAxis.x, y: insertion.y + uAxis.y + vAxis.y, z: insertion.z + uAxis.z + vAxis.z),
+                    Vector3(x: insertion.x + vAxis.x, y: insertion.y + vAxis.y, z: insertion.z + vAxis.z),
+                ], closed: true)
+            }
         }
     }
 
