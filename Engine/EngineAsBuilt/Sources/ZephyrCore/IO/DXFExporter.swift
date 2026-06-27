@@ -283,7 +283,7 @@ public enum DXFExporter {
         case .spline(_, _, _, _, let c): primColor = c
         case .text(_, _, _, _, _, _, _, _, let c): primColor = c
         case .ellipse(_, _, _, let c): primColor = c
-        case .hatch(_, _, _, _, let c): primColor = c
+        case .hatch(_, _, _, _, let c, _): primColor = c
         case .ray(_, _, let c): primColor = c
         case .image(_, _, _, _, _, let c): primColor = c
         }
@@ -676,7 +676,7 @@ public enum DXFExporter {
             output += " 41\r\n0.0\r\n"  // start parameter
             output += " 42\r\n\(dxfDouble(2.0 * .pi))\r\n"  // end parameter (full ellipse)
 
-        case .hatch(let boundary, let pattern, let hatchScale, let hatchAngle, _):
+        case .hatch(let boundary, let pattern, let hatchScale, let hatchAngle, _, let backgroundColor):
             let wBoundary = boundary.map { t.transformPoint($0) }
             guard wBoundary.count >= 3 else { break }
             output += "  0\r\nHATCH\r\n"
@@ -711,6 +711,15 @@ public enum DXFExporter {
             }
             if hatchAngle != 0 {
                 output += " 52\r\n\(dxfDouble(hatchAngle))\r\n"
+            }
+            // DXF group 63 = hatch background fill color (ACI index).
+            // Writes the 24-bit RGB as a negative DXF colour; positive ACI
+            // mapping requires a nearestACI utility (not yet implemented).
+            // Even without group 63, EAB roundtrip preserves backgroundColor
+            // via the CADPrimitive enum field.
+            if let bg = backgroundColor {
+                let rgb24 = Int32((Int32(bg.r) << 16) | (Int32(bg.g) << 8) | Int32(bg.b))
+                output += " 63\r\n\(-rgb24)\r\n"
             }
             output += " 98\r\n0\r\n"
 

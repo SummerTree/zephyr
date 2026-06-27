@@ -89,6 +89,17 @@ struct AppUI {
         // 6. Properties panel — shows selected entity details.
         PropertiesPanelUI.render(engine: engine)
 
+        // 6b. Hatch editing ribbon — appears when a hatch entity is selected
+        //     and no hatch creation command is active.
+        if engine.commandProcessor.activeFeatureCommand == nil,
+           engine.cadSelection.selectedCount == 1,
+           let handle = engine.cadSelection.lastSelectedHandle,
+           let entity = engine.document.entity(for: handle),
+           let localGeom = entity.localGeometry,
+           let firstPrim = localGeom.first {
+            renderHatchEditingRibbonIfNeeded(firstPrim: firstPrim, entity: entity, engine: engine)
+        }
+
         // 7. Block management panel — list/create/edit blocks.
         if engine.ui.blockPanelVisible {
             BlockPanelUI.render(engine: engine)
@@ -185,6 +196,49 @@ struct AppUI {
         // 12. Radial Navigation Tool (Artrage style)
         if engine.ui.radialNavVisible {
             RadialNavUI.render(engine: engine, dw: dw, dh: dh)
+        }
+    }
+
+    // MARK: - Hatch editing ribbon
+
+    /// When a single hatch entity is selected, show the same floating ribbon
+    /// used during creation so the user can edit properties inline.
+    private static func renderHatchEditingRibbonIfNeeded(
+        firstPrim: CADPrimitive, entity: CADEntity, engine: PhrostEngine
+    ) {
+        switch firstPrim {
+        case .hatch(_, let pattern, let scale, let angle, let color, let backgroundColor):
+            var settings = HatchRibbonUI.Settings(
+                fillType: (pattern.uppercased() == "SOLID" || pattern.isEmpty) ? 1 : 0,
+                patternName: pattern.isEmpty ? "SOLID" : pattern.uppercased(),
+                scale: Float(scale),
+                angle: Float(angle * 180.0 / .pi),
+                primaryColor: color,
+                backgroundColor: backgroundColor,
+                secondaryColor: nil,
+                selectionMode: 0,
+                showModeSection: false  // hide Pick Points / Select Boundary
+            )
+            HatchRibbonUI.render(&settings, engine: engine)
+            // Commit changes back to the entity
+            let newScale = Double(settings.scale)
+            let newAngle = Double(settings.angle) * .pi / 180.0
+            let newPattern = settings.fillType == 1 ? "SOLID" : settings.patternName.uppercased()
+            let newPrim = CADPrimitive.hatch(
+                boundary: entity.localGeometry?.first.map {
+                    if case .hatch(let b, _, _, _, _, _) = $0 { return b }
+                    return []  // fallback — should never reach here
+                } ?? [],
+                pattern: newPattern,
+                scale: newScale,
+                angle: newAngle,
+                color: settings.primaryColor,
+                backgroundColor: settings.backgroundColor)
+            engine.document.updateEntityGeometryLive(for: entity.handle, geometry: [newPrim])
+            engine.tabManager.markActiveDirty()
+
+        default:
+            break
         }
     }
 

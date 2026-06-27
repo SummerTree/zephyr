@@ -247,7 +247,7 @@ enum PDFPrimitives {
             subpath(pts, close: false, to: cb)
             cb.raw("S\n")
 
-        case .hatch(let boundary, let pat, let hatchScale, let hatchAngle, _):
+        case .hatch(let boundary, let pat, let hatchScale, let hatchAngle, _, _):
             guard boundary.count >= 3 else { break }
             if pat.uppercased() == "SOLID" || pat.isEmpty {
                 subpath(boundary, close: true, to: cb)
@@ -394,7 +394,7 @@ enum PDFPrimitives {
             return c
         case .text(_, _, _, _, _, _, _, _, let c):
             return c
-        case .hatch(_, _, _, _, let c):
+        case .hatch(_, _, _, _, let c, _):
             return c
         case .ray(_, _, let c):
             return c

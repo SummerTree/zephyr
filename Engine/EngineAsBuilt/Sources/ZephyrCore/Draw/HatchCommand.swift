@@ -7,41 +7,103 @@ import SwiftSDL
 // MARK: - HatchCommand
 // =========================================================================
 
-/// Interactive hatch: pick boundary points, double-click or Enter to fill.
-/// Creates a `.hatch` CADPrimitive with a closed boundary and solid fill.
+/// AutoCAD-style hatch creation with a floating contextual ribbon.
+///
+/// Supports two selection modes:
+///   - **Pick Points** — ray-cast + wall-follow boundary detection (default).
+///   - **Select Boundary** — click an existing closed entity to use its geometry.
+///
+/// The floating ribbon (rendered via `renderImGui`) lets the user choose fill type,
+/// pattern, angle, scale, colors, and selection mode *before* placing the hatch.
 @MainActor
 public final class HatchCommand: FeatureCommand {
 
-    private var boundaryPoints: [Vector3] = []
+    // MARK: - Selection mode
+
+    enum HatchSelectionMode { case pickPoints, selectBoundary }
+
+    // MARK: - Command state
+
+    private enum State {
+        case waitingForInternalPoint
+        case completed
+    }
+
+    private var state: State = .waitingForInternalPoint
     private var currentMouseWorldX: Double = 0
     private var currentMouseWorldY: Double = 0
 
+    // MARK: - Hatch settings (ribbon state)
+
+    /// 0 = Pattern, 1 = Solid, 2 = Gradient
+    private var fillType: Int32 = 1
+    private var patternName: String = "ANSI31"
+    private var hatchScale: Float = 1.0
+    private var hatchAngle: Float = 0.0
+    private var primaryColor: ColorRGBA? = nil       // nil = ByLayer
+    private var backgroundColor: ColorRGBA? = nil    // nil = None
+    private var secondaryColor: ColorRGBA? = nil     // for gradients
+    private var selectionMode: HatchSelectionMode = .pickPoints
+
     public init() {}
 
+    // MARK: - FeatureCommand conformance
+
     public func start(engine: PhrostEngine, processor: CADCommandProcessor) {
-        boundaryPoints.removeAll()
+        state = .waitingForInternalPoint
         currentMouseWorldX = 0
         currentMouseWorldY = 0
-        processor.commandPrompt = "Specify boundary point (Enter/Esc to fill when done)."
+        processor.commandPrompt = "HATCH: Click inside an enclosed area to fill (Esc to cancel)."
     }
 
     public func cancel(engine: PhrostEngine, processor: CADCommandProcessor) {
-        boundaryPoints.removeAll()
+        state = .completed
     }
 
-    public func getDrawingSnapPoints() -> [Vector3] { boundaryPoints }
+    public func getDrawingSnapPoints() -> [Vector3] { [] }
 
     public func handleMouseClick(
         worldX: Double, worldY: Double,
         engine: PhrostEngine, processor: CADCommandProcessor
     ) -> CommandResult {
-        boundaryPoints.append(Vector3(x: worldX, y: worldY, z: 0))
-        if boundaryPoints.count == 1 {
-            processor.commandPrompt = "Specify next boundary point (double-click or Enter/Esc to fill)."
-        } else {
-            processor.commandPrompt = "\(boundaryPoints.count) boundary points. Next point or double-click/Enter to fill."
+        guard case .waitingForInternalPoint = state else { return .finished }
+
+        // ── Select Boundary mode ──
+        if selectionMode == .selectBoundary {
+            let threshold = 6.0 / engine.camera.zoom
+            if let handle = engine.cadSelection.hitTest(
+                worldX: worldX, worldY: worldY,
+                document: engine.document,
+                threshold: threshold,
+                simplifyComplexBlocks: false),
+               let entity = engine.document.entity(for: handle),
+               let geometry = engine.document.resolvedGeometry(for: entity),
+               let firstPrim = geometry.first {
+
+                let worldPts = CADGeometryMath.worldPointsForPrimitive(
+                    firstPrim, transform: entity.transform)
+                if worldPts.count >= 3 {
+                    return commitHatch(boundary: worldPts,
+                                       engine: engine, processor: processor)
+                }
+            }
+            processor.commandPrompt = "No closed boundary found at click location."
+            return .continue
         }
-        return .continue
+
+        // ── Pick Points mode ──
+        if let polygon = CADBoundaryDetector.findEnclosingPolygon(
+            seedX: worldX, seedY: worldY,
+            document: engine.document,
+            maxEdgeCount: 2000
+        ) {
+            return commitHatch(boundary: polygon,
+                               engine: engine, processor: processor)
+        } else {
+            processor.commandPrompt =
+                "A closed boundary cannot be determined. Click inside a fully enclosed loop."
+            return .continue
+        }
     }
 
     public func handleMouseMotion(
@@ -56,83 +118,118 @@ public final class HatchCommand: FeatureCommand {
         scancode: SDL_Scancode, engine: PhrostEngine, processor: CADCommandProcessor
     ) -> CommandResult {
         switch scancode {
-        case SDL_SCANCODE_RETURN, SDL_SCANCODE_KP_ENTER, SDL_SCANCODE_ESCAPE:
-            return finalize(engine: engine, processor: processor)
+        case SDL_SCANCODE_ESCAPE, SDL_SCANCODE_RETURN, SDL_SCANCODE_KP_ENTER:
+            state = .completed
+            return .finished
         default:
             return .continue
         }
     }
 
-    private func finalize(engine: PhrostEngine, processor: CADCommandProcessor) -> CommandResult {
-        guard boundaryPoints.count >= 3 else {
-            processor.commandPrompt = "Need at least 3 boundary points."
-            return .continue
+    // MARK: - Commit
+
+    private func commitHatch(
+        boundary: [Vector3],
+        engine: PhrostEngine, processor: CADCommandProcessor
+    ) -> CommandResult {
+        let effectivePattern: String
+        let effectiveColor: ColorRGBA?
+        let effectiveBgColor: ColorRGBA?
+
+        switch fillType {
+        case 0:  // Pattern
+            effectivePattern = patternName.isEmpty ? "SOLID" : patternName
+            effectiveColor = primaryColor
+            effectiveBgColor = backgroundColor
+        case 1:  // Solid
+            effectivePattern = "SOLID"
+            effectiveColor = primaryColor
+            effectiveBgColor = nil
+        case 2:  // Gradient — store as fillComplexPolygon with gradient for now,
+                 // or fall back to solid with primary color.
+            effectivePattern = "SOLID"
+            effectiveColor = primaryColor ?? ColorRGBA(r: 128, g: 128, b: 128, a: 180)
+            effectiveBgColor = nil
+        default:
+            effectivePattern = "SOLID"
+            effectiveColor = nil
+            effectiveBgColor = nil
         }
-        // Close the boundary
-        var closed = boundaryPoints
-        if closed.first != closed.last {
-            closed.append(closed[0])
+
+        let scale = Double(hatchScale)
+        let angle = Double(hatchAngle)
+
+        let hatchPrim: CADPrimitive
+        if fillType == 2, let c1 = primaryColor {
+            // Gradient: build a gradient primitive with a fallback color2.
+            let c2 = secondaryColor ?? ColorRGBA(
+                r: min(255, c1.r + 60), g: min(255, c1.g + 60),
+                b: min(255, c1.b + 60))
+            hatchPrim = CADPrimitive.gradient(
+                outer: boundary, holes: [],
+                gradientName: "LINEAR", angle: angle, color1: c1, color2: c2)
+        } else {
+            hatchPrim = CADPrimitive.hatch(
+                boundary: boundary,
+                pattern: effectivePattern,
+                scale: scale,
+                angle: angle,
+                color: effectiveColor,
+                backgroundColor: effectiveBgColor
+            )
         }
-        let prim: CADPrimitive = .hatch(boundary: closed,
-                                         pattern: "SOLID",
-                                         scale: 1.0,
-                                         angle: 0.0,
-                                         color: ColorRGBA(r: 128, g: 128, b: 128, a: 180))
-        let entity = CADEntity(
-            layerID: engine.document.activeLayerID ?? UUID(),
-            localGeometry: [prim])
+
+        let layerID = engine.document.activeLayerID
+            ?? engine.document.allLayers.first?.handle
+            ?? UUID()
+        let entity = CADEntity(layerID: layerID, localGeometry: [hatchPrim])
+
         engine.document.addEntity(entity)
         engine.tabManager.markActiveDirty()
-        processor.commandPrompt = "Hatch created with \(boundaryPoints.count) boundary points."
+
+        processor.commandPrompt = "Hatch created (\(boundary.count) boundary vertices)."
+        state = .completed
         return .finished
     }
 
+    // MARK: - Overlay
+
     public func renderOverlay(cam: CameraTransform, engine: PhrostEngine) {
         let drawList = igGetForegroundDrawList_ViewportPtr(nil)
-        let edgeCol = makeCol32(0, 255, 128, 200)
-        let fillCol = makeCol32(0, 255, 128, 40)
+        let sc = EngineCameraManager.worldToScreen(
+            worldX: currentMouseWorldX, worldY: currentMouseWorldY, cam: cam)
+        let color = makeCol32(0, 255, 255, 150)
 
-        // Draw confirmed boundary edges
-        if boundaryPoints.count >= 2 {
-            for i in 0..<(boundaryPoints.count - 1) {
-                let p1 = EngineCameraManager.worldToScreen(worldX: boundaryPoints[i].x, worldY: boundaryPoints[i].y, cam: cam)
-                let p2 = EngineCameraManager.worldToScreen(worldX: boundaryPoints[i + 1].x, worldY: boundaryPoints[i + 1].y, cam: cam)
-                ImDrawListAddLine(drawList, ImVec2(x: p1.x, y: p1.y), ImVec2(x: p2.x, y: p2.y), edgeCol, 1.5)
-            }
-            // Close back to first point
-            let pFirst = EngineCameraManager.worldToScreen(worldX: boundaryPoints[0].x, worldY: boundaryPoints[0].y, cam: cam)
-            let pLast = EngineCameraManager.worldToScreen(worldX: boundaryPoints[boundaryPoints.count - 1].x,
-                                                     worldY: boundaryPoints[boundaryPoints.count - 1].y, cam: cam)
-            ImDrawListAddLine(drawList, ImVec2(x: pLast.x, y: pLast.y), ImVec2(x: pFirst.x, y: pFirst.y),
-                              makeCol32(0, 255, 128, 80), 1.0)
-        }
+        // Subtle crosshair circle — indicates the "pick point" tool is active.
+        ImDrawListAddCircle(drawList, ImVec2(x: sc.x, y: sc.y), 6.0, color, 0, 1.5)
+    }
 
-        // Rubber-band from last point to current mouse
-        if let last = boundaryPoints.last {
-            let p1 = EngineCameraManager.worldToScreen(worldX: last.x, worldY: last.y, cam: cam)
-            let p2 = EngineCameraManager.worldToScreen(worldX: currentMouseWorldX, worldY: currentMouseWorldY, cam: cam)
-            ImDrawListAddLine(drawList, ImVec2(x: p1.x, y: p1.y), ImVec2(x: p2.x, y: p2.y),
-                              makeCol32(0, 255, 128, 100), 1.0)
-        }
+    // MARK: - Contextual Ribbon (renderImGui)
 
-        // If we have >= 3 points, show a semi-transparent fill
-        if boundaryPoints.count >= 3 {
-            var fillPts: [ImVec2] = []
-            for pt in boundaryPoints {
-                let sp = EngineCameraManager.worldToScreen(worldX: pt.x, worldY: pt.y, cam: cam)
-                fillPts.append(ImVec2(x: sp.x, y: sp.y))
-            }
-            let fillCount = Int32(fillPts.count)
-            fillPts.withUnsafeMutableBufferPointer { buf in
-                ImDrawListAddConvexPolyFilled(drawList, buf.baseAddress, fillCount, fillCol)
-            }
-        }
+    public func renderImGui(engine: PhrostEngine) {
+        guard case .waitingForInternalPoint = state else { return }
 
-        // Vertex dots
-        let dotCol = makeCol32(0, 200, 100, 255)
-        for pt in boundaryPoints {
-            let sp = EngineCameraManager.worldToScreen(worldX: pt.x, worldY: pt.y, cam: cam)
-            ImDrawListAddCircleFilled(drawList, ImVec2(x: sp.x, y: sp.y), 3.0, dotCol, 0)
-        }
+        // Package command state into HatchRibbonUI.Settings
+        var ribSettings = HatchRibbonUI.Settings(
+            fillType: fillType,
+            patternName: patternName,
+            scale: hatchScale,
+            angle: hatchAngle,
+            primaryColor: primaryColor,
+            backgroundColor: backgroundColor,
+            secondaryColor: secondaryColor,
+            selectionMode: (selectionMode == .selectBoundary ? 1 : 0),
+            showModeSection: true
+        )
+        HatchRibbonUI.render(&ribSettings, engine: engine)
+        // Pull back changes
+        fillType = ribSettings.fillType
+        patternName = ribSettings.patternName
+        hatchScale = ribSettings.scale
+        hatchAngle = ribSettings.angle
+        primaryColor = ribSettings.primaryColor
+        backgroundColor = ribSettings.backgroundColor
+        secondaryColor = ribSettings.secondaryColor
+        selectionMode = ribSettings.selectionMode == 1 ? .selectBoundary : .pickPoints
     }
 }

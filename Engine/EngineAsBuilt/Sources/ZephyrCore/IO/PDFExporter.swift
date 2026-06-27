@@ -396,7 +396,7 @@ public enum PDFExporter {
                 let m = major.magnitude
                 grow(Vector3(x: c.x - m, y: c.y - m, z: c.z))
                 grow(Vector3(x: c.x + m, y: c.y + m, z: c.z))
-            case .hatch(let boundary, _, _, _, _):
+            case .hatch(let boundary, _, _, _, _, _):
                 for pt in boundary { grow(pt) }
             case .gradient(let outer, _, _, _, _, _):
                 for pt in outer { grow(pt) }

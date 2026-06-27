@@ -240,7 +240,7 @@ public enum CADPrimitiveGenerator {
         case .spline(_, _, _, _, let c): primColor = c
         case .text(_, _, _, _, _, _, _, _, let c): primColor = c
         case .ellipse(_, _, _, let c): primColor = c
-        case .hatch(_, _, _, _, let c): primColor = c
+        case .hatch(_, _, _, _, let c, _): primColor = c
         case .ray(_, _, let c): primColor = c
         case .image(_, _, _, _, _, let c): primColor = c
         }
@@ -686,11 +686,21 @@ public enum CADPrimitiveGenerator {
             }
             specs.append(contentsOf: makePathSpecs(points: pts, dashPattern: dashPattern, scale: lineTypeScale, weight: lineWeight, z: z, color: finalColor))
 
-        case .hatch(let boundary, let pattern, let hatchScale, let hatchAngle, _):
+        case .hatch(let boundary, let pattern, let hatchScale, let hatchAngle, _, let backgroundColor):
             guard boundary.count >= 3 else { break }
             let wp = boundary.map { p -> SDL_FPoint in
                 let t = transform.transformPoint(p)
                 return SDL_FPoint(x: Float(t.x), y: Float(t.y))
+            }
+            // Background fill — emitted first so pattern lines draw on top.
+            // Uses computeMultiLoopFillSpecs (Earcut) to handle hole topologies,
+            // not triangulatePolygon (simple ear-clipper) which would flood-fill islands.
+            if let bg = backgroundColor {
+                let bgColor = applyingOpacity(bg)
+                let bgSpec = CADTessellator.computeMultiLoopFillSpecs(
+                    outer: boundary, holes: [],
+                    transform: transform, color: bgColor, z: z)
+                specs.append(bgSpec)
             }
             if pattern.uppercased() == "SOLID" || pattern.isEmpty {
                 let tris = CADTessellator.triangulatePolygon(wp)

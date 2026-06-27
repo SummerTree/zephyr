@@ -305,6 +305,25 @@ public enum CADBoundaryDetector {
             case .ellipse(_, _, _, _):
                 break  // Ellipses are approximated later if needed.
 
+            case .spline(let controlPoints, let knots, let degree, let weights, _):
+                let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
+                // 12 segments per knot span matches the render path density — keeps edge count
+                // manageable so the wall-follower stays under maxEdgeCount even for complex splines.
+                let evaluated = NURBSEvaluator.evaluateByKnotSpans(
+                    degree: degree, knots: knots,
+                    controlPoints: controlPoints, weights: w, segmentsPerSpan: 12)
+                guard evaluated.count >= 2 else { break }
+                let wpts = evaluated.map { transform.transformPoint($0) }
+                for i in 0..<(wpts.count - 1) {
+                    edges.append(Edge(a: wpts[i], b: wpts[i + 1], entityHandle: handle))
+                }
+                // Only append closing edge if endpoints are not already coincident.
+                // Closed splines produce coincident start/end points via evaluateByKnotSpans;
+                // a zero-length edge would break the wall-follower's atan2 angle heuristic.
+                if let first = wpts.first, let last = wpts.last, first.distance(to: last) > 1e-6 {
+                    edges.append(Edge(a: last, b: first, entityHandle: handle))
+                }
+
             default:
                 break
             }

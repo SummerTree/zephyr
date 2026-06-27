@@ -241,13 +241,18 @@ public enum DXFEntityConverter {
                 var prims: [CADPrimitive] = []
                 // Store as .hatch primitives — line generation deferred to render time
                 // where zoom-aware adaptive spacing can prevent Over-generation.
+                // NOTE: DXF group 63 (hatch background fill color) is not
+                // exposed by the current dxfrw_bridge.h.  When the C++ bridge
+                // is updated to include `hatchBackgroundColor`, read it here
+                // and pass as `backgroundColor:` instead of nil.
                 for poly in loopPolygons {
                     prims.append(.hatch(
                         boundary: poly,
                         pattern: patternName.isEmpty ? "SOLID" : patternName,
                         scale: scale,
                         angle: angle,
-                        color: primColor))
+                        color: primColor,
+                        backgroundColor: nil))
                 }
                 return editableBoundaryPrims + prims
             }

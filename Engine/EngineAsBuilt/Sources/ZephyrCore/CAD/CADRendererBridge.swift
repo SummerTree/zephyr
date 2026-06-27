@@ -1086,7 +1086,7 @@ public final class CADRendererBridge {
                     }
                     return
 
-                case .hatch(let boundary, let pattern, let scale, let angle, let c):
+                case .hatch(let boundary, let pattern, let scale, let angle, let c, _):
                     var newWorldPts = pts
                     newWorldPts[localIdx].x += Double(dx)
                     newWorldPts[localIdx].y += Double(dy)
@@ -1095,7 +1095,7 @@ public final class CADRendererBridge {
                     let wp = newWorldPts[localIdx]
                     let moved = Vector3(x: wp.x, y: wp.y, z: 0)
                     newBoundary[localIdx] = invTransform.transformPoint(moved)
-                    writeLiveGeometry(.hatch(boundary: newBoundary, pattern: pattern, scale: scale, angle: angle, color: c))
+                    writeLiveGeometry(.hatch(boundary: newBoundary, pattern: pattern, scale: scale, angle: angle, color: c, backgroundColor: nil))
                     if let rp = rpForCurrentPrimitive(), localIdx < rp.points.count {
                         rp.points[localIdx].x += dx
                         rp.points[localIdx].y += dy
@@ -1240,9 +1240,9 @@ public final class CADRendererBridge {
                 }
             }
 
-        case .hatch(let boundary, let pattern, let scale, let angle, let color):
+        case .hatch(let boundary, let pattern, let scale, let angle, let color, _):
             if editLoopIndex == 0 {
-                result[visibleIndex] = .hatch(boundary: moveNearestPoint(in: boundary), pattern: pattern, scale: scale, angle: angle, color: color)
+                result[visibleIndex] = .hatch(boundary: moveNearestPoint(in: boundary), pattern: pattern, scale: scale, angle: angle, color: color, backgroundColor: nil)
             }
 
         default:

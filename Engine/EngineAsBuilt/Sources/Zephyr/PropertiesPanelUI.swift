@@ -356,6 +356,9 @@ struct PropertiesPanelUI {
         // Section 6 (continued): Geometry tree — delegates to GeometryPanelUI for resolved primitives
         GeometryPanelUI.render(geometry: geometry)
 
+        // Section 6b: Hatch / Gradient properties
+        renderHatchSection(entity: entity, engine: engine, geometry: geometry)
+
         // Section 7: Remaining XData entries not shown in the overrides section
         let shownOverrideKeys: Set<String> = [
             "dxf.lineType", "dxf.lineWeight", "dxf.lineTypeScale",
@@ -375,6 +378,83 @@ struct PropertiesPanelUI {
                     ImGuiTextV("\(key): \(valStr)")
                 }
                 igSeparator()
+            }
+        }
+    }
+
+    // MARK: - Hatch / Gradient properties
+
+    /// Render Hatch / Gradient properties for the selected entity.
+    private static func renderHatchSection(entity: CADEntity, engine: PhrostEngine, geometry: [CADPrimitive]) {
+        for prim in geometry {
+            switch prim {
+            case .hatch(let boundary, let pattern, let scale, let angle, let color, let backgroundColor):
+                guard ImGuiCollapsingHeader("Hatch", Int32(ImGuiTreeNodeFlags_DefaultOpen.rawValue)) else { continue }
+
+                ImGuiTextV("Pattern")
+                ImGuiSameLine(0, 8)
+                let pats = ["SOLID"] + DXFHatchGenerator.predefinedPatterns.keys.sorted()
+                var currentPat = pattern.isEmpty ? "SOLID" : pattern.uppercased()
+                ImGuiPushItemWidth(ImGuiGetFontSize() * 8)
+                if ImGuiBeginCombo("##PropsHatchPat", currentPat, 0) {
+                    for pn in pats {
+                        let selected = pn == currentPat
+                        if ImGuiSelectable(pn, selected, 0, ImVec2(x: 0, y: 0)) {
+                            let newPrim = CADPrimitive.hatch(
+                                boundary: boundary, pattern: pn == "SOLID" ? "SOLID" : pn,
+                                scale: scale, angle: angle, color: color, backgroundColor: backgroundColor)
+                            engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                            engine.tabManager.markActiveDirty()
+                        }
+                        if selected { ImGuiSetItemDefaultFocus() }
+                    }
+                    ImGuiEndCombo()
+                }
+                ImGuiPopItemWidth()
+
+                var angleDeg = Float(angle * 180.0 / .pi)
+                ImGuiTextV("Angle")
+                ImGuiSameLine(0, 8)
+                ImGuiPushItemWidth(ImGuiGetFontSize() * 5)
+                if ImGuiSliderAngle("##PropsHatchAngle", &angleDeg, -180, 180, "%.0f", ImGuiSliderFlags(0)) {
+                    let newPrim = CADPrimitive.hatch(boundary: boundary, pattern: pattern, scale: scale, angle: Double(angleDeg), color: color, backgroundColor: backgroundColor)
+                    engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                    engine.tabManager.markActiveDirty()
+                }
+                ImGuiPopItemWidth()
+
+                var scl = Float(scale)
+                ImGuiTextV("Scale")
+                ImGuiSameLine(0, 8)
+                ImGuiPushItemWidth(ImGuiGetFontSize() * 5)
+                if ImGuiInputFloat("##PropsHatchScale", &scl, 0.1, 1.0, "%.2f", 0) {
+                    let newPrim = CADPrimitive.hatch(boundary: boundary, pattern: pattern, scale: Double(scl), angle: angle, color: color, backgroundColor: backgroundColor)
+                    engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                    engine.tabManager.markActiveDirty()
+                }
+                ImGuiPopItemWidth()
+
+                igSeparator()
+
+            case .gradient(let outer, _, let name, let gradAngle, let c1, let c2):
+                guard ImGuiCollapsingHeader("Gradient", Int32(ImGuiTreeNodeFlags_DefaultOpen.rawValue)) else { continue }
+                ImGuiTextV("Type: \(name)")
+
+                var angleDeg = Float(gradAngle * 180.0 / .pi)
+                ImGuiTextV("Angle")
+                ImGuiSameLine(0, 8)
+                ImGuiPushItemWidth(ImGuiGetFontSize() * 5)
+                if ImGuiSliderAngle("##PropsGradAngle", &angleDeg, -180, 180, "%.0f", ImGuiSliderFlags(0)) {
+                    let newPrim = CADPrimitive.gradient(outer: outer, holes: [], gradientName: name, angle: Double(angleDeg), color1: c1, color2: c2)
+                    engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                    engine.tabManager.markActiveDirty()
+                }
+                ImGuiPopItemWidth()
+
+                igSeparator()
+
+            default:
+                break
             }
         }
     }
