@@ -6,46 +6,38 @@ import SwiftSDL
 // MARK: - JoinCommand
 // =========================================================================
 
-/// JOIN — Merge connected line entities into polyline entities.
+/// JOIN — Merge connected entities into polyline or spline entities.
 ///
 /// **Workflow (AutoCAD-style):**
-///   1. Select line entities.
+///   1. Select entities.
 ///   2. Type `JOIN` (or `J`).
 ///   3. The command executes immediately — no interactive steps.
 ///
-/// **Algorithm:**
-///   - Collects world-space line segments from selected entities containing
-///     `.line` and/or open `.polyline` primitives. Polylines are expanded into
-///     their constituent segments for endpoint graph construction.
+/// **Dispatch:**
+///   - If ALL selected entities are single-spline entities → spline join path.
+///   - If ALL selected are lines/open polylines → line/polyline join path.
+///   - Mixed selection → rejected with message.
+///
+/// **Spline join algorithm:**
+///   - Collects all selected spline targets via `SplineJoiner`.
+///   - Repeatedly finds endpoint-matching pairs (greedy) and joins them
+///     into a single spline until no more pairs match.
+///   - Unmatched splines are kept as-is.
+///   - Uses `SplineJoiner` shared helpers for extraction/join/entity creation.
+///
+/// **Line/polyline algorithm (unchanged):**
+///   - Collects world-space line segments from selected `.line` and open
+///     `.polyline` primitives.
 ///   - Groups segment endpoints by spatial proximity into clusters (tolerance
 ///     = 0.001 world units).
-///   - Builds an adjacency graph: each cluster is a node, each segment is an
-///     edge connecting two clusters.
-///   - Walks the graph greedily to extract maximal non-branching chains:
-///     starts from degree-1 nodes first (open chains), then processes
-///     remaining edges (closed loops). Chains stop at branch points.
-///   - For each chain:
-///     * **Closed** (first and last endpoints match within tolerance, ≥3
-///       points) → single `.polygon(points:)` primitive with
-///       `xdata["dxf.closed"] = .bool(true)`.
-///     * **Open** → one `.polyline(points:)` primitive.
+///   - Builds an adjacency graph and walks to extract maximal non-branching
+///     chains.
 ///   - Creates one `CADEntity` per chain (identity transform, world-space
 ///     geometry), deletes all original entities, and selects the new ones.
 ///
-/// **Edge cases:**
-///   - Entities with block references: skipped.
-///   - Entities with unsupported primitives (circle, spline, etc.): skipped.
-///   - Single-line entity with no matching neighbours: passed through as-is
-///     (one open chain with one segment).
-///   - Branching chains (three lines meeting at one point): split at the
-///     branch point into separate chains.
-///   - Zero-segment chains: silently skipped.
-///   - Lines on different layers: each chain inherits the layer of its first
-///     segment.
-///
 /// **Undo:** `start()` calls `document.replaceEntities(remove:add:)` which
 /// pushes a single undo snapshot before mutating the entity registry.
-/// Reverting restores all original entities and removes the joined polyline(s)
+/// Reverting restores all original entities and removes the joined ones
 /// in one undo step.
 @MainActor
 public final class JoinCommand: FeatureCommand {
@@ -61,14 +53,128 @@ public final class JoinCommand: FeatureCommand {
 
     /// Does all the work immediately. The command finishes on return.
     public func start(engine: PhrostEngine, processor: CADCommandProcessor) {
-        let doc = engine.document
-        let selection = engine.cadSelection
+        let selected = engine.cadSelection.selectedHandles
 
-        guard selection.hasSelection else {
-            processor.commandPrompt = "Select lines to join, then run JOIN."
+        guard !selected.isEmpty else {
+            processor.commandPrompt = "Select objects to join, then run JOIN."
             processor.finishFeatureCommand(engine: engine)
             return
         }
+
+        // ── Classify selection ──
+        let splineTargets = selected.compactMap { handle -> SplineJoinTarget? in
+            guard let entity = engine.document.entity(for: handle) else { return nil }
+            return SplineJoiner.extractSingleSplineTarget(entity: entity, handle: handle)
+        }
+
+        if splineTargets.count == selected.count {
+            // All splines
+            joinSelectedSplines(engine: engine, processor: processor, targets: splineTargets)
+            processor.finishFeatureCommand(engine: engine)
+            return
+        }
+
+        if !splineTargets.isEmpty {
+            processor.commandPrompt = "JOIN does not support mixing splines with other entity types yet."
+            processor.finishFeatureCommand(engine: engine)
+            return
+        }
+
+        // No splines — fall through to line/polyline join
+        joinSelectedLinesAndPolylines(engine: engine, processor: processor)
+        processor.finishFeatureCommand(engine: engine)
+    }
+
+    // MARK: - Spline Join
+
+    private func joinSelectedSplines(
+        engine: PhrostEngine,
+        processor: CADCommandProcessor,
+        targets: [SplineJoinTarget]
+    ) {
+        guard targets.count >= 2 else {
+            processor.commandPrompt = "Select at least 2 splines to join."
+            return
+        }
+
+        let originalHandles = Set(targets.map { $0.handle })
+        var pending = targets
+        var removedHandles = Set<UUID>()
+        var changed = true
+
+        while changed {
+            changed = false
+
+            outer: for i in pending.indices {
+                for j in pending.indices where i != j {
+                    let wsA = SplineJoiner.worldSpaceCurve(from: pending[i])
+                    let wsB = SplineJoiner.worldSpaceCurve(from: pending[j])
+
+                    if case .success(let joined) = NURBSEvaluator.joinSameDegree(
+                        wsA, wsB, matchTolerance: Self.endpointTolerance
+                    ) {
+                        let newEntity = SplineJoiner.makeJoinedSplineEntity(
+                            from: joined, firstTarget: pending[i]
+                        )
+                        let syntheticTarget = SplineJoinTarget(
+                            entity: newEntity, handle: newEntity.handle,
+                            curve: NURBSCurveComponents(
+                                controlPoints: joined.controlPoints,
+                                knots: joined.knots,
+                                degree: joined.degree,
+                                weights: joined.weights,
+                                isRational: joined.isRational
+                            ),
+                            color: pending[i].color
+                        )
+
+                        removedHandles.insert(pending[i].handle)
+                        removedHandles.insert(pending[j].handle)
+
+                        let high = max(i, j)
+                        let low  = min(i, j)
+                        pending.remove(at: high)
+                        pending.remove(at: low)
+                        pending.append(syntheticTarget)
+                        changed = true
+                        break outer
+                    }
+                }
+            }
+        }
+
+        // ── Build final result entities ──
+        // Only add entities whose handles are NOT in the original set.
+        // Original unmatched splines stay in the document untouched.
+        var newEntities: [CADEntity] = []
+        for target in pending {
+            if !originalHandles.contains(target.handle) {
+                newEntities.append(target.entity)
+            }
+        }
+
+        // ── Atomic replace ──
+        engine.document.replaceEntities(remove: removedHandles, add: newEntities)
+
+        engine.cadSelection.clearSelection()
+        for entity in newEntities {
+            engine.cadSelection.addToSelection(entity.handle)
+        }
+        engine.tabManager.markActiveDirty()
+
+        let msg = "Joined \(removedHandles.count) splines into \(newEntities.count) spline(s)."
+        print("[JOIN] \(msg)")
+        processor.commandPrompt = msg
+    }
+
+    // MARK: - Line / Polyline Join (unchanged logic, extracted from start())
+
+    private func joinSelectedLinesAndPolylines(
+        engine: PhrostEngine,
+        processor: CADCommandProcessor
+    ) {
+        let doc = engine.document
+        let selection = engine.cadSelection
 
         // ---- Step 1: Collect world-space line segments from selected entities ----
 
@@ -89,7 +195,6 @@ public final class JoinCommand: FeatureCommand {
         for handle in selection.selectedHandles {
             guard let entity = doc.entity(for: handle) else { continue }
 
-            // Skip block references — they don't have local line geometry.
             if entity.blockID != nil {
                 skippedBlockRefs += 1
                 continue
@@ -100,8 +205,6 @@ public final class JoinCommand: FeatureCommand {
                 continue
             }
 
-            // Lines and open polylines can share the same endpoint graph.
-            // Reject only geometry that cannot be represented as an open chain.
             let hasUnsupportedPrimitive = geometry.contains { prim in
                 switch prim {
                 case .line, .polyline:
@@ -158,13 +261,12 @@ public final class JoinCommand: FeatureCommand {
                 reason = "No line entities selected."
             }
             processor.commandPrompt = reason
-            processor.finishFeatureCommand(engine: engine)
             return
         }
 
         // ---- Step 2: Cluster endpoints by proximity ----
 
-        var endpointClusters: [Vector3] = []  // representative point per cluster
+        var endpointClusters: [Vector3] = []
 
         func findOrCreateCluster(for point: Vector3) -> Int {
             for (i, cluster) in endpointClusters.enumerated() {
@@ -176,7 +278,7 @@ public final class JoinCommand: FeatureCommand {
             return endpointClusters.count - 1
         }
 
-        var segClusters: [(s: Int, e: Int)] = []  // (startClusterIndex, endClusterIndex)
+        var segClusters: [(s: Int, e: Int)] = []
         segClusters.reserveCapacity(segments.count)
 
         for seg in segments {
@@ -198,11 +300,8 @@ public final class JoinCommand: FeatureCommand {
         // ---- Step 4: Extract maximal non-branching chains ----
 
         var usedSegments = Set<Int>()
-        var chains: [[Int]] = []  // each chain is a list of segment indices (order TBD)
+        var chains: [[Int]] = []
 
-        /// Follow a chain starting from `cluster` with initial segment
-        /// `firstSeg`. Traverses until a dead end or branch. Returns the
-        /// ordered list of segment indices visited.
         func followChain(from cluster: Int, firstSeg: Int) -> [Int] {
             var chain: [Int] = [firstSeg]
             usedSegments.insert(firstSeg)
@@ -211,13 +310,12 @@ public final class JoinCommand: FeatureCommand {
             var seg = firstSeg
 
             while true {
-                // Advance to the other endpoint of the current segment.
                 let (si, ei) = segClusters[seg]
                 cur = (si == cur) ? ei : si
 
                 let candidates = clusterSegments[cur].filter { !usedSegments.contains($0) }
-                if candidates.isEmpty { break }          // dead end
-                if candidates.count > 1 { break }        // branch point — stop
+                if candidates.isEmpty { break }
+                if candidates.count > 1 { break }
 
                 seg = candidates[0]
                 chain.append(seg)
@@ -226,7 +324,6 @@ public final class JoinCommand: FeatureCommand {
             return chain
         }
 
-        // Phase A: walk from degree-1 nodes (open chains).
         for clusterIdx in 0..<endpointClusters.count {
             let candidates = clusterSegments[clusterIdx].filter { !usedSegments.contains($0) }
             guard candidates.count == 1 else { continue }
@@ -234,7 +331,6 @@ public final class JoinCommand: FeatureCommand {
             if !chain.isEmpty { chains.append(chain) }
         }
 
-        // Phase B: pick up remaining edges (closed loops).
         for segIdx in 0..<segments.count {
             guard !usedSegments.contains(segIdx) else { continue }
             let (si, _) = segClusters[segIdx]
@@ -244,8 +340,6 @@ public final class JoinCommand: FeatureCommand {
 
         // ---- Step 5: Order each chain's segments and produce polyline geometry ----
 
-        /// Given a set of segment indices that form a non-branching chain,
-        /// return the ordered world-space vertex list.
         func orderPoints(chain: Set<Int>) -> [Vector3] {
             guard !chain.isEmpty else { return [] }
             if chain.count == 1 {
@@ -254,7 +348,6 @@ public final class JoinCommand: FeatureCommand {
                 return [endpointClusters[si], endpointClusters[ei]]
             }
 
-            // Build local cluster→segment map restricted to this chain.
             var clusterToSegs: [Int: [Int]] = [:]
             for segIdx in chain {
                 let (si, ei) = segClusters[segIdx]
@@ -262,7 +355,6 @@ public final class JoinCommand: FeatureCommand {
                 clusterToSegs[ei, default: []].append(segIdx)
             }
 
-            // Start from a degree-1 node if any, otherwise any node (closed loop).
             let degree1 = clusterToSegs.filter { $0.value.count == 1 }
             var cur: Int
             if let first = degree1.first {
@@ -287,7 +379,7 @@ public final class JoinCommand: FeatureCommand {
             return ordered
         }
 
-        // ---- Step 6: Create new polyline entities and collect originals for removal ----
+        // ---- Step 6: Create new polyline entities ----
 
         var removedHandles = Set<UUID>()
         var newEntities: [CADEntity] = []
@@ -318,7 +410,6 @@ public final class JoinCommand: FeatureCommand {
             let chainSet = Set(chain)
             let rawPoints = orderPoints(chain: chainSet)
 
-            // Remove consecutive near-duplicates.
             var deduped: [Vector3] = []
             for pt in rawPoints {
                 if let last = deduped.last, last.distance(to: pt) < Self.endpointTolerance {
@@ -328,7 +419,6 @@ public final class JoinCommand: FeatureCommand {
             }
             guard deduped.count >= 2 else { continue }
 
-            // Determine if closed: first and last points coincide AND ≥3 points.
             let isClosed = deduped.count >= 3
                 && deduped.first!.distance(to: deduped.last!) < Self.endpointTolerance
 
@@ -336,13 +426,12 @@ public final class JoinCommand: FeatureCommand {
             let color = segments[chain[0]].color
             if isClosed {
                 var closedPoints = deduped
-                closedPoints.removeLast()  // the closing point duplicates the first
+                closedPoints.removeLast()
                 primitives = [.polygon(points: closedPoints, color: color)]
             } else {
                 primitives = [.polyline(points: deduped, color: color)]
             }
 
-            // Use the first segment's layer; fall back to active layer.
             let firstSegIdx = chain[0]
             let layerID = segments[firstSegIdx].layerID
 
@@ -356,23 +445,20 @@ public final class JoinCommand: FeatureCommand {
                 entity.xdata["dxf.closed"] = .bool(true)
             }
 
-            // Carry over non-geometric xdata from the first segment.
             let xd = segments[firstSegIdx].xdata
             if let v = xd["dxf.lineType"]   { entity.xdata["dxf.lineType"]   = v }
             if let v = xd["dxf.color"]      { entity.xdata["dxf.color"]      = v }
             if let v = xd["dxf.lineWeight"] { entity.xdata["dxf.lineWeight"] = v }
-            // drawOrder is now a first-class property, not xdata
             entity.drawOrder = doc.entity(for: segments[firstSegIdx].entityHandle)?.drawOrder ?? Int.max
 
             newEntities.append(entity)
 
-            // Collect original entity handles for removal.
             for segIdx in chain {
                 removedHandles.insert(segments[segIdx].entityHandle)
             }
         }
 
-        // ---- Step 7: Atomic replace (one undo step) and select new entities ----
+        // ---- Step 7: Atomic replace ----
 
         doc.replaceEntities(remove: removedHandles, add: newEntities)
 
@@ -382,8 +468,6 @@ public final class JoinCommand: FeatureCommand {
         }
 
         engine.tabManager.markActiveDirty()
-
-        // ---- Report ----
 
         var closedCount = 0
         for entity in newEntities {
@@ -398,13 +482,11 @@ public final class JoinCommand: FeatureCommand {
             + "."
         print("[JOIN] \(msg)")
         processor.commandPrompt = msg
-
-        processor.finishFeatureCommand(engine: engine)
     }
 
-    public func cancel(engine: PhrostEngine, processor: CADCommandProcessor) {
-        // No cleanup needed — start() finishes before returning.
-    }
+    // MARK: - Remaining FeatureCommand conformance
+
+    public func cancel(engine: PhrostEngine, processor: CADCommandProcessor) {}
 
     public func handleMouseClick(
         worldX: Double, worldY: Double,

@@ -240,9 +240,9 @@ enum PDFPrimitives {
             cb.raw("S Q\n")
 
         case .spline(let cps, let knots, let deg, let weights, _):
-            let pts = NURBSEvaluator.evaluate(
+            let pts = NURBSEvaluator.evaluateByKnotSpans(
                 degree: deg, knots: knots, controlPoints: cps,
-                weights: weights ?? Array(repeating: 1.0, count: cps.count), segments: 48)
+                weights: weights ?? Array(repeating: 1.0, count: cps.count), segmentsPerSpan: 12)
             guard pts.count >= 2 else { break }
             subpath(pts, close: false, to: cb)
             cb.raw("S\n")

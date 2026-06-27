@@ -760,9 +760,9 @@ public enum EABWriter {
             case .spline(let controlPoints, let knots, let degree, let weights, let color):
                 let c = color ?? .white
                 let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
-                let evaluated = NURBSEvaluator.evaluate(
+                let evaluated = NURBSEvaluator.evaluateByKnotSpans(
                     degree: degree, knots: knots,
-                    controlPoints: controlPoints, weights: w, segments: 48)
+                    controlPoints: controlPoints, weights: w, segmentsPerSpan: 12)
                 for pt in evaluated {
                     verts.append(PVAVertex(position: pt, color: c))
                 }

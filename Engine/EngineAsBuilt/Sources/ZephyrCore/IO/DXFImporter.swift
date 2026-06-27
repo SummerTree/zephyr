@@ -979,12 +979,12 @@ public enum DXFImporter {
 
             case let .spline(controlPoints, knots, degree, weights, color):
                 let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
-                let evaluated = NURBSEvaluator.evaluate(
+                let evaluated = NURBSEvaluator.evaluateByKnotSpans(
                     degree: degree,
                     knots: knots,
                     controlPoints: controlPoints,
                     weights: w,
-                    segments: 48)
+                    segmentsPerSpan: 12)
                 guard evaluated.count >= 2 else { out.append(prim); continue }
                 appendDashes(path: evaluated, pattern: pattern, scale: scale, color: color, into: &out)
 

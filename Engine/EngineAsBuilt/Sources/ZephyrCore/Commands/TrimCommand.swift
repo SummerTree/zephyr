@@ -153,12 +153,12 @@ public final class TrimCommand: FeatureCommand {
             // geometry for intersections, not merely display geometry.
             let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
             let segmentCount = min(4096, max(512, controlPoints.count * 128))
-            let evaluated = NURBSEvaluator.evaluate(
+            let evaluated = NURBSEvaluator.evaluateByKnotSpans(
                 degree: degree,
                 knots: knots,
                 controlPoints: controlPoints,
                 weights: w,
-                segments: segmentCount)
+                segmentsPerSpan: max(4, segmentCount / 8))
             if evaluated.count >= 2 {
                 for i in 0..<(evaluated.count - 1) {
                     segs.append((t.transformPoint(evaluated[i]), t.transformPoint(evaluated[i+1])))

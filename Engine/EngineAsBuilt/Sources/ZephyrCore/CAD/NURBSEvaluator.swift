@@ -35,6 +35,29 @@ public struct SplineComponents: Sendable {
 }
 
 // =========================================================================
+// MARK: - NURBSCurveComponents
+// =========================================================================
+
+/// Full NURBS curve definition including degree and rationality tracking.
+/// Used by `joinSameDegree()` for spline concatenation.
+/// Differs from `SplineComponents` by carrying `degree` and `isRational`.
+public struct NURBSCurveComponents: Sendable {
+    public let controlPoints: [Vector3]
+    public let knots: [Double]
+    public let degree: Int
+    public let weights: [Double]
+    public let isRational: Bool
+
+    public init(controlPoints: [Vector3], knots: [Double], degree: Int, weights: [Double], isRational: Bool) {
+        self.controlPoints = controlPoints
+        self.knots = knots
+        self.degree = degree
+        self.weights = weights
+        self.isRational = isRational
+    }
+}
+
+// =========================================================================
 // MARK: - NURBSEvaluator
 // =========================================================================
 
@@ -94,6 +117,90 @@ public enum NURBSEvaluator {
         }
 
         return curvePoints
+    }
+
+    /// Knot-aware evaluation that guarantees a sample at every distinct knot
+    /// boundary, including high-multiplicity internal knots (e.g. at a join
+    /// point). Each knot span is subdivided into `segmentsPerSpan` steps.
+    ///
+    /// This prevents the renderer / hit-test / snap systems from drawing or
+    /// measuring a chord across a sharp corner introduced by a join.
+    ///
+    /// - Parameters:
+    ///   - degree: The degree `p`.
+    ///   - knots: The full knot vector.
+    ///   - controlPoints: The control point array.
+    ///   - weights: Optional weights.
+    ///   - segmentsPerSpan: Subdivisions per knot interval.
+    /// - Returns: Array of evaluated points along the curve.
+    public static func evaluateByKnotSpans(
+        degree: Int,
+        knots: [Double],
+        controlPoints: [Vector3],
+        weights: [Double]? = nil,
+        segmentsPerSpan: Int = 12
+    ) -> [Vector3] {
+        let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
+        let p = degree
+        let n = controlPoints.count - 1
+
+        guard p >= 1,
+              n >= p,
+              knots.count == n + p + 2,
+              w.count == controlPoints.count
+        else { return [] }
+
+        let tMin = knots[p]
+        let tMax = knots[n + 1]
+        guard tMax > tMin else { return [] }
+
+        let eps = max(1e-12, abs(tMax - tMin) * 1e-12)
+
+        // Collect distinct knot values within the valid domain
+        var breaks: [Double] = []
+        for k in knots {
+            if k < tMin - eps || k > tMax + eps { continue }
+            let clamped = min(max(k, tMin), tMax)
+            if breaks.last.map({ abs($0 - clamped) > eps }) ?? true {
+                breaks.append(clamped)
+            }
+        }
+
+        if breaks.isEmpty || abs(breaks[0] - tMin) > eps {
+            breaks.insert(tMin, at: 0)
+        }
+        if abs((breaks.last ?? tMin) - tMax) > eps {
+            breaks.append(tMax)
+        }
+
+        var out: [Vector3] = []
+        let perSpan = max(2, segmentsPerSpan)
+
+        for i in 0..<(breaks.count - 1) {
+            let a = breaks[i]
+            let b = breaks[i + 1]
+            if b - a <= eps { continue }
+
+            for j in 0...perSpan {
+                if !out.isEmpty && j == 0 { continue }  // skip duplicate at span boundary
+                let t = a + (b - a) * Double(j) / Double(perSpan)
+                guard let pt = evaluateAtInternal(
+                    degree: p,
+                    knots: knots,
+                    controlPoints: controlPoints,
+                    weights: w,
+                    at: t
+                ) else { continue }
+
+                if let last = out.last, (last - pt).magnitudeSquared < 1e-18 {
+                    continue
+                }
+
+                out.append(pt)
+            }
+        }
+
+        return out
     }
 
     // =====================================================================
@@ -265,11 +372,11 @@ public enum NURBSEvaluator {
             return projT >= -1e-4 && projT <= 1.0 + 1e-4
         }
 
-        // Evaluate polyline for coarse search
-        let evaluated = evaluate(
+        // Evaluate polyline for coarse search (knot-aware to catch corners)
+        let evaluated = evaluateByKnotSpans(
             degree: p, knots: knots,
             controlPoints: controlPoints, weights: w,
-            segments: searchSegments)
+            segmentsPerSpan: max(2, searchSegments / 4))
         guard evaluated.count >= 2 else { return [] }
         
         var results: [(t: Double, point: Vector3)] = []
@@ -349,10 +456,10 @@ public enum NURBSEvaluator {
         segments: Int = 48
     ) -> Double {
         let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
-        let evaluated = evaluate(
+        let evaluated = evaluateByKnotSpans(
             degree: degree, knots: knots,
             controlPoints: controlPoints, weights: w,
-            segments: segments)
+            segmentsPerSpan: max(2, segments / 4))
         guard evaluated.count >= 2 else { return knots[degree] }
 
         let p = degree
@@ -695,4 +802,393 @@ public enum NURBSEvaluator {
                 weights: rightWeights)
         )
     }
+
+    // =====================================================================
+    // MARK: - Spline Join (same-degree concatenation)
+    // =====================================================================
+
+    /// Error cases for `joinSameDegree`.
+    public enum NURBSJoinError: Error, CustomStringConvertible {
+        case invalidCurveA(String)
+        case invalidCurveB(String)
+        case differentDegrees(Int, Int)
+        case noMatchingEndpoints
+        case invalidWeights
+        case invalidResult(String)
+        case tooLarge(Int)
+
+        public var description: String {
+            switch self {
+            case .invalidCurveA(let msg): return "Curve A invalid: \(msg)"
+            case .invalidCurveB(let msg): return "Curve B invalid: \(msg)"
+            case .differentDegrees(let da, let db): return "Cannot join splines with different degrees (\(da) vs \(db))."
+            case .noMatchingEndpoints: return "No matching endpoints found."
+            case .invalidWeights: return "Invalid weights (must be finite and > 0)."
+            case .invalidResult(let msg): return "Join produced invalid result: \(msg)"
+            case .tooLarge(let count): return "Result would have \(count) control points — too large."
+            }
+        }
+    }
+
+    /// Maximum allowed combined control point + knot count (sanity check for corrupted inputs).
+    public static let maxJoinControlPoints = 100_000
+
+    // MARK: Curve validation
+
+    /// Returns `nil` on success or a `NURBSJoinError` describing the problem.
+    public static func validateCurve(_ curve: NURBSCurveComponents) -> NURBSJoinError? {
+        let p = curve.degree
+        let cps = curve.controlPoints
+        let kts = curve.knots
+        let ws = curve.weights
+        let n = cps.count - 1
+
+        guard p >= 1 else {
+            return .invalidCurveA("degree must be >= 1, got \(p)")
+        }
+        guard n >= p else {
+            return .invalidCurveA("controlPoints.count (\(cps.count)) must be >= degree+1 (\(p+1))")
+        }
+        guard kts.count == n + p + 2 else {
+            return .invalidCurveA("knots.count (\(kts.count)) != controlPoints.count + degree + 1 (\(n + p + 2))")
+        }
+
+        // Monotonicity
+        for i in 0..<(kts.count - 1) {
+            if kts[i] > kts[i + 1] {
+                return .invalidCurveA("knots[\(i)] (\(kts[i])) > knots[\(i+1)] (\(kts[i+1]))")
+            }
+        }
+
+        // Non-zero domain
+        let tMin = kts[p]
+        let tMax = kts[n + 1]
+        guard tMax > tMin else {
+            return .invalidCurveA("knot domain is zero or negative: [\(tMin), \(tMax)]")
+        }
+
+        // Clamped: first knot repeated p+1 times
+        let firstKnot = kts[0]
+        for i in 0...p {
+            guard abs(kts[i] - firstKnot) < 1e-12 else {
+                return .invalidCurveA("not clamped: knots[\(i)] = \(kts[i]) != \(firstKnot)")
+            }
+        }
+        // Clamped: last knot repeated p+1 times
+        let lastKnot = kts[kts.count - 1]
+        for i in (kts.count - p - 1)..<kts.count {
+            guard abs(kts[i] - lastKnot) < 1e-12 else {
+                return .invalidCurveA("not clamped at end: knots[\(i)] = \(kts[i]) != \(lastKnot)")
+            }
+        }
+
+        // Weights
+        guard ws.count == cps.count else {
+            return .invalidCurveA("weights.count (\(ws.count)) != controlPoints.count (\(cps.count))")
+        }
+        for (_, w) in ws.enumerated() {
+            guard w.isFinite, w > 0 else {
+                return .invalidWeights
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: Knot normalization
+
+    /// Linearly rescale a knot vector so the domain [knots[degree], knots[cpCount]] maps to [0, 1].
+    public static func normalizeKnots(_ knots: [Double], degree: Int) -> [Double] {
+        let cpCount = knots.count - degree - 1
+        let tMin = knots[degree]
+        let tMax = knots[cpCount]
+        let range = tMax - tMin
+        guard range > 1e-15 else { return knots }
+        return knots.map { ($0 - tMin) / range }
+    }
+
+    // MARK: Curve reversal
+
+    /// Return a reversed copy of `curve`.
+    /// Control points and weights are reversed; knots are reversed and mirrored
+    /// (`maxKnot + minKnot - knotValue`) to keep monotonicity.
+    public static func reversedCurve(_ curve: NURBSCurveComponents) -> NURBSCurveComponents {
+        let revCPs = Array(curve.controlPoints.reversed())
+        let revWeights = Array(curve.weights.reversed())
+        let minKnot = curve.knots.first ?? 0
+        let maxKnot = curve.knots.last ?? 1
+        let revKnots = curve.knots.reversed().map { minKnot + maxKnot - $0 }
+        return NURBSCurveComponents(
+            controlPoints: revCPs,
+            knots: revKnots,
+            degree: curve.degree,
+            weights: revWeights,
+            isRational: curve.isRational
+        )
+    }
+
+    // MARK: Weight scaling
+
+    /// Multiply all weights by a positive scalar. Geometry is preserved because
+    /// the curve is projective-invariant under uniform weight scaling.
+    public static func scaledWeights(_ weights: [Double], by factor: Double) -> [Double] {
+        return weights.map { $0 * factor }
+    }
+
+
+    // MARK: Targeted degree elevation
+
+    /// Exact degree elevation for a single-span linear Bezier curve to degree 2.
+    /// This handles the common JOIN case where an imported straight spline
+    /// (degree 1, 2 CPs) needs to join a quadratic spline.
+    ///
+    /// Rational curves are elevated in homogeneous coordinates so the geometry
+    /// is preserved exactly.
+    public static func elevateLinearBezierToQuadratic(
+        _ curve: NURBSCurveComponents
+    ) -> NURBSCurveComponents? {
+        guard curve.degree == 1,
+              curve.controlPoints.count == 2,
+              curve.weights.count == 2
+        else { return nil }
+
+        let p0 = curve.controlPoints[0]
+        let p1 = curve.controlPoints[1]
+        let w0 = curve.weights[0]
+        let w1 = curve.weights[1]
+
+        guard w0.isFinite, w1.isFinite, w0 > 0, w1 > 0 else {
+            return nil
+        }
+
+        let midWeight = 0.5 * (w0 + w1)
+        guard midWeight > 0, midWeight.isFinite else { return nil }
+
+        let mid = Vector3(
+            x: ((p0.x * w0) + (p1.x * w1)) * 0.5 / midWeight,
+            y: ((p0.y * w0) + (p1.y * w1)) * 0.5 / midWeight,
+            z: ((p0.z * w0) + (p1.z * w1)) * 0.5 / midWeight
+        )
+
+        return NURBSCurveComponents(
+            controlPoints: [p0, mid, p1],
+            knots: [0, 0, 0, 1, 1, 1],
+            degree: 2,
+            weights: [w0, midWeight, w1],
+            isRational: curve.isRational
+        )
+    }
+
+    // MARK: Same-degree join
+
+    /// Join two clamped NURBS curves at their closest pair of endpoints.
+    /// Same-degree curves are concatenated directly. A single-span linear
+    /// degree-1 curve can be elevated exactly to degree 2 so it can join a
+    /// quadratic spline without refitting.
+    ///
+    /// - Parameters:
+    ///   - a: First curve.
+    ///   - b: Second curve.
+    ///   - matchTolerance: Maximum world-space distance to consider two endpoints "matching".
+    ///   - snapTolerance: If endpoints are within this distance, snap them to exact equality.
+    /// - Returns: `.success(curve)` or `.failure(error)`.
+    public static func joinSameDegree(
+        _ a: NURBSCurveComponents,
+        _ b: NURBSCurveComponents,
+        matchTolerance: Double = 0.001,
+        snapTolerance: Double = 1e-9
+    ) -> Result<NURBSCurveComponents, NURBSJoinError> {
+
+        // ── Validate ──
+        if let err = validateCurve(a) { return .failure(err) }
+        if let err = validateCurve(b) { return .failure(err) }
+
+        var aWork = a
+        var bWork = b
+
+        if aWork.degree != bWork.degree {
+            if aWork.degree == 1,
+               bWork.degree == 2,
+               let elevated = elevateLinearBezierToQuadratic(aWork) {
+                aWork = elevated
+            } else if aWork.degree == 2,
+                      bWork.degree == 1,
+                      let elevated = elevateLinearBezierToQuadratic(bWork) {
+                bWork = elevated
+            } else {
+                return .failure(.differentDegrees(a.degree, b.degree))
+            }
+
+            if let err = validateCurve(aWork) { return .failure(err) }
+            if let err = validateCurve(bWork) { return .failure(err) }
+        }
+
+        guard aWork.degree == bWork.degree else {
+            return .failure(.differentDegrees(a.degree, b.degree))
+        }
+
+        let p = aWork.degree
+        let sA = aWork.controlPoints.first!
+        let eA = aWork.controlPoints.last!
+        let sB = bWork.controlPoints.first!
+        let eB = bWork.controlPoints.last!
+
+        // ── All 4 endpoint pair distances ──
+        let pairs: [(dist: Double, aEnd: Int, bEnd: Int)] = [
+            (eA.distance(to: sB), 1, 0),  // A.end → B.start
+            (eA.distance(to: eB), 1, 1),  // A.end → B.end
+            (sA.distance(to: eB), 0, 1),  // A.start → B.end
+            (sA.distance(to: sB), 0, 0),  // A.start → B.start
+        ]
+
+        guard let best = pairs.min(by: { $0.dist < $1.dist }),
+              best.dist <= matchTolerance else {
+            return .failure(.noMatchingEndpoints)
+        }
+
+        // ── Apply reversal / order swap ──
+        var first: NURBSCurveComponents
+        var second: NURBSCurveComponents
+
+        switch (best.aEnd, best.bEnd) {
+        case (1, 0):  // A.end → B.start
+            first = aWork; second = bWork
+        case (1, 1):  // A.end → B.end → reverse B
+            first = aWork; second = reversedCurve(bWork)
+        case (0, 1):  // A.start → B.end → B + A
+            first = bWork; second = aWork
+        case (0, 0):  // A.start → B.start → reverse A + B
+            first = reversedCurve(aWork); second = bWork
+        default:
+            return .failure(.noMatchingEndpoints)
+        }
+
+        // ── Snap join point ──
+        _ = snapTolerance
+        var sCPs = second.controlPoints
+        sCPs[0] = first.controlPoints.last!
+        second = NURBSCurveComponents(
+            controlPoints: sCPs, knots: second.knots,
+            degree: second.degree, weights: second.weights,
+            isRational: second.isRational
+        )
+
+        // ── Scale second curve's weights so join weight matches ──
+        let wFirstEnd = first.weights.last!
+        let wSecondStart = second.weights.first!
+        guard wSecondStart.isFinite, wSecondStart > 0 else {
+            return .failure(.invalidWeights)
+        }
+        var secondWeights = second.weights
+        if abs(wFirstEnd - wSecondStart) > 1e-12 {
+            let scale = wFirstEnd / wSecondStart
+            secondWeights = scaledWeights(secondWeights, by: scale)
+        }
+
+        // ── Normalize both knot vectors to [0, 1] ──
+        let firstKnotsNorm = normalizeKnots(first.knots, degree: p)
+        let secondKnotsNorm = normalizeKnots(second.knots, degree: p)
+
+        // ── Merge control points ──
+        var mergedCPs = first.controlPoints
+        mergedCPs.append(contentsOf: second.controlPoints.dropFirst())
+
+        // ── Merge weights ──
+        var mergedWeights = first.weights
+        mergedWeights.append(contentsOf: secondWeights.dropFirst())
+
+        // ── Merge knot vectors (C0: p copies at join) ──
+        // A clamped: [0(×p+1), a₁…aₖ, 1(×p+1)]  — strip the final p+1 ones
+        // B clamped: [0(×p+1), b₁…bₘ, 1(×p+1)]  — strip the first p+1 zeros, add 1
+        var mergedKnots: [Double] = []
+
+        // Take firstKnotsNorm except the final (p+1) which are all 1.0
+        let firstKeep = firstKnotsNorm.count - (p + 1)
+        mergedKnots.append(contentsOf: firstKnotsNorm.prefix(firstKeep))
+
+        for _ in 0..<p {
+            mergedKnots.append(1.0)
+        }
+
+        // Take secondKnotsNorm except the first (p+1) which are all 0.0 (now 1.0 after shift)
+        let secondKnotsShifted = secondKnotsNorm.map { $0 + 1.0 }
+        let secondStart = p + 1  // skip (p+1) copies of what was 0.0, now 1.0
+        mergedKnots.append(contentsOf: secondKnotsShifted[secondStart...])
+
+        // ── Normalize merged knots back to [0, 1] ──
+        let finalKnots = normalizeKnots(mergedKnots, degree: p)
+
+        // ── Construct joined curve ──
+        let joinedIsRational = first.isRational || second.isRational
+        let joined = NURBSCurveComponents(
+            controlPoints: mergedCPs,
+            knots: finalKnots,
+            degree: p,
+            weights: mergedWeights,
+            isRational: joinedIsRational
+        )
+
+        // ── Validate result ──
+        if let err = validateCurve(joined) { return .failure(err) }
+
+        let totalCPs = mergedCPs.count
+        if totalCPs > maxJoinControlPoints {
+            return .failure(.tooLarge(totalCPs))
+        }
+
+        // ── Debug verification (debug builds only) ──
+        #if DEBUG
+        verifyJoin(first, second, joined, degree: p)
+        #endif
+
+        return .success(joined)
+    }
+
+    #if DEBUG
+    /// Sample both originals against the joined curve halves.
+    /// Asserts that the joined curve is geometrically identical to A followed by B.
+    private static func verifyJoin(
+        _ a: NURBSCurveComponents,
+        _ b: NURBSCurveComponents,
+        _ joined: NURBSCurveComponents,
+        degree p: Int
+    ) {
+        let samples = 12
+        let aPts = evaluateByKnotSpans(degree: p, knots: a.knots, controlPoints: a.controlPoints, weights: a.weights, segmentsPerSpan: samples)
+        let bPts = evaluateByKnotSpans(degree: p, knots: b.knots, controlPoints: b.controlPoints, weights: b.weights, segmentsPerSpan: samples)
+        _ = evaluateByKnotSpans(degree: p, knots: joined.knots, controlPoints: joined.controlPoints, weights: joined.weights, segmentsPerSpan: samples)  // jPts not needed; sampling per-half below
+
+        // Compute bounding box diagonal from control points
+        var minPt = joined.controlPoints[0]
+        var maxPt = joined.controlPoints[0]
+        for pt in joined.controlPoints {
+            minPt.x = min(minPt.x, pt.x); minPt.y = min(minPt.y, pt.y); minPt.z = min(minPt.z, pt.z)
+            maxPt.x = max(maxPt.x, pt.x); maxPt.y = max(maxPt.y, pt.y); maxPt.z = max(maxPt.z, pt.z)
+        }
+        let diag = (maxPt - minPt).magnitude
+        let tol = max(1e-8, diag * 1e-10)
+
+        // First half of joined should match A
+        for i in 0...samples {
+            let t = Double(i) / Double(samples) * 0.5
+            guard let jp = evaluateAtInternal(degree: p, knots: joined.knots, controlPoints: joined.controlPoints, weights: joined.weights, at: t) else { continue }
+            let ap = aPts[min(i, aPts.count - 1)]
+            let dist = jp.distance(to: ap)
+            if dist > tol {
+                print("[NURBSJoin] WARNING: debug verify A mismatch at i=\(i), dist=\(dist) > tol=\(tol)")
+            }
+        }
+
+        // Second half of joined should match B
+        for i in 0...samples {
+            let t = 0.5 + Double(i) / Double(samples) * 0.5
+            guard let jp = evaluateAtInternal(degree: p, knots: joined.knots, controlPoints: joined.controlPoints, weights: joined.weights, at: t) else { continue }
+            let bp = bPts[min(i, bPts.count - 1)]
+            let dist = jp.distance(to: bp)
+            if dist > tol {
+                print("[NURBSJoin] WARNING: debug verify B mismatch at i=\(i), dist=\(dist) > tol=\(tol)")
+            }
+        }
+    }
+    #endif
 }

@@ -105,9 +105,9 @@ public final class SplineCommand: FeatureCommand {
             let degree = min(3, controlPoints.count - 1)
             let knots = generateUniformKnots(controlPointCount: controlPoints.count, degree: degree)
             let w = Array(repeating: 1.0, count: controlPoints.count)
-            let evaluated = NURBSEvaluator.evaluate(
+            let evaluated = NURBSEvaluator.evaluateByKnotSpans(
                 degree: degree, knots: knots,
-                controlPoints: controlPoints, weights: w, segments: 48)
+                controlPoints: controlPoints, weights: w, segmentsPerSpan: 12)
 
             if evaluated.count >= 2 {
                 var pts: [ImVec2] = []

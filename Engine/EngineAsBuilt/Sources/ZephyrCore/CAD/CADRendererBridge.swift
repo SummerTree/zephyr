@@ -1004,7 +1004,7 @@ public final class CADRendererBridge {
                     let newWP = Vector3(x: wp.x + Double(dx), y: wp.y + Double(dy), z: wp.z)
                     newLocalCPs[localIdx] = invTransform.transformPoint(newWP)
                     let w = weights ?? Array(repeating: 1.0, count: newLocalCPs.count)
-                    let evaluated = NURBSEvaluator.evaluate(degree: degree, knots: knots, controlPoints: newLocalCPs, weights: w, segments: 48)
+                    let evaluated = NURBSEvaluator.evaluateByKnotSpans(degree: degree, knots: knots, controlPoints: newLocalCPs, weights: w, segmentsPerSpan: 12)
                     if let rp = rpForCurrentPrimitive() {
                         rp.points = evaluated.map {
                             let twp = entity.transform.transformPoint($0)

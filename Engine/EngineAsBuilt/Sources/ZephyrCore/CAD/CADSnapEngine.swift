@@ -484,10 +484,10 @@ public final class SnapEngine {
                         break
                     }
                     let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
-                    let sampled = NURBSEvaluator.evaluate(
+                    let sampled = NURBSEvaluator.evaluateByKnotSpans(
                         degree: degree, knots: knots,
                         controlPoints: controlPoints, weights: w,
-                        segments: splineSnapSegments)
+                        segmentsPerSpan: max(4, splineSnapSegments / 4))
                     localNearest = CADGeometryMath.nearestPointOnPolyline(
                         to: localCursor, points: sampled)
 

@@ -16,12 +16,16 @@ public final class SplineEditCommand: FeatureCommand {
         case menuOpen
         case insertingKnot
         case promptingPrecision
+        case selectingSecondForJoin
         case finished
     }
 
     private var state: State = .selecting
     private var targetHandle: UUID?
     private var splineIndex: Int = 0
+
+    // Join state
+    private var firstJoinTarget: SplineJoinTarget? = nil
 
     // UI state
     private var openMenuNextFrame = false
@@ -134,6 +138,43 @@ public final class SplineEditCommand: FeatureCommand {
             return .continue
         }
         
+        if state == .selectingSecondForJoin {
+            guard let first = firstJoinTarget else {
+                processor.commandPrompt = "Join target lost. Start Join again."
+                state = .finished
+                return .finished
+            }
+
+            guard let handle = hitTestSplineExcluding(
+                worldX: worldX,
+                worldY: worldY,
+                excluding: first.handle,
+                engine: engine
+            ) else {
+                processor.commandPrompt = "Select second spline to join to."
+                return .continue
+            }
+
+            let (secondTarget, secondError) = SplineJoiner.extractSingleSplineTarget(engine: engine, handle: handle)
+            guard let second = secondTarget else {
+                processor.commandPrompt = secondError ?? "Cannot join this spline."
+                return .continue
+            }
+
+            guard first.curve.degree == second.curve.degree else {
+                processor.commandPrompt =
+                    "Cannot join splines with different degrees (\(first.curve.degree) vs \(second.curve.degree))."
+                return .continue
+            }
+
+            if applyJoin(engine: engine, first: first, second: second) {
+                state = .finished
+                return .finished
+            }
+
+            return .continue
+        }
+
         if state == .finished {
             return .finished
         }
@@ -153,6 +194,10 @@ public final class SplineEditCommand: FeatureCommand {
             if state == .insertingKnot {
                 processor.commandPrompt = "Knot insertion complete."
             }
+            if state == .selectingSecondForJoin {
+                processor.commandPrompt = "Join cancelled."
+                firstJoinTarget = nil
+            }
             engine.cadSelection.clearSelection()
             state = .finished
             return .finished
@@ -160,6 +205,13 @@ public final class SplineEditCommand: FeatureCommand {
         if scancode == SDL_SCANCODE_RETURN || scancode == SDL_SCANCODE_KP_ENTER {
             if state == .insertingKnot {
                 processor.commandPrompt = "Knot insertion complete."
+                engine.cadSelection.clearSelection()
+                state = .finished
+                return .finished
+            }
+            if state == .selectingSecondForJoin {
+                processor.commandPrompt = "Join cancelled."
+                firstJoinTarget = nil
                 engine.cadSelection.clearSelection()
                 state = .finished
                 return .finished
@@ -189,10 +241,20 @@ public final class SplineEditCommand: FeatureCommand {
                 engine.cadSelection.clearSelection()
                 state = .finished
             }
-            if ImGuiButton("Join (Stub)", ImVec2(x: 150, y: 0)) {
-                ImGuiCloseCurrentPopup()
-                engine.cadSelection.clearSelection()
-                state = .finished
+            if ImGuiButton("Join", ImVec2(x: 150, y: 0)) {
+                if let handle = targetHandle {
+                    let (target, error) = SplineJoiner.extractSingleSplineTarget(engine: engine, handle: handle)
+                    if let t = target {
+                        firstJoinTarget = t
+                        ImGuiCloseCurrentPopup()
+                        state = .selectingSecondForJoin
+                        engine.commandProcessor.commandPrompt = "Select second spline to join to (Esc to cancel)."
+                    } else {
+                        engine.commandProcessor.commandPrompt = error ?? "Cannot join this spline."
+                        ImGuiCloseCurrentPopup()
+                        state = .finished
+                    }
+                }
             }
             if ImGuiButton("Fit Data (Stub)", ImVec2(x: 150, y: 0)) {
                 ImGuiCloseCurrentPopup()
@@ -273,6 +335,105 @@ public final class SplineEditCommand: FeatureCommand {
         }
     }
 
+    // MARK: - Join Spline Helpers
+
+    /// Perform the join using shared `SplineJoiner` helpers.
+    /// Returns `true` on success, `false` on failure (error already set on prompt).
+    @discardableResult
+    private func applyJoin(
+        engine: PhrostEngine,
+        first: SplineJoinTarget,
+        second: SplineJoinTarget
+    ) -> Bool {
+        let wsA = SplineJoiner.worldSpaceCurve(from: first)
+        let wsB = SplineJoiner.worldSpaceCurve(from: second)
+
+        let result = NURBSEvaluator.joinSameDegree(wsA, wsB)
+        switch result {
+        case .success(let joined):
+            let newEntity = SplineJoiner.makeJoinedSplineEntity(from: joined, firstTarget: first)
+            let removeSet: Set<UUID> = [first.handle, second.handle]
+            engine.document.replaceEntities(remove: removeSet, add: [newEntity])
+            engine.cadSelection.clearSelection()
+            engine.cadSelection.addToSelection(newEntity.handle)
+            engine.tabManager.markActiveDirty()
+            engine.commandProcessor.commandPrompt = "Splines joined."
+            return true
+
+        case .failure(let error):
+            engine.commandProcessor.commandPrompt = error.description
+            return false
+        }
+    }
+
+    /// Hit-test that finds the nearest spline entity under the cursor, **excluding**
+    /// the given handle. Used to prevent re-selecting the first spline at a shared
+    /// endpoint where both splines overlap.
+    private func hitTestSplineExcluding(
+        worldX: Double,
+        worldY: Double,
+        excluding excludedHandle: UUID,
+        engine: PhrostEngine
+    ) -> UUID? {
+        let point = Vector3(x: worldX, y: worldY, z: 0)
+        let threshold = 12.0 / engine.camera.zoom
+        let t2 = threshold * threshold
+
+        var bestHandle: UUID?
+        var bestDrawOrder: Int = .min
+        var bestArea: Double = .infinity
+        var bestDist: Double = .infinity
+
+        for entity in engine.document.entitiesView {
+            guard entity.handle != excludedHandle else { continue }
+            guard entity.blockID == nil else { continue }
+            guard let layer = engine.document.layer(for: entity.layerID), layer.isVisible else { continue }
+            guard let geom = entity.localGeometry else { continue }
+
+            var minDist = Double.infinity
+            var hasSpline = false
+
+            for prim in geom {
+                guard case .spline = prim else { continue }
+                hasSpline = true
+
+                if let d = CADHitTesting.distanceSqToPrimitive(
+                    prim,
+                    point: point,
+                    transform: entity.transform,
+                    t2: t2
+                ) {
+                    minDist = min(minDist, d)
+                }
+            }
+
+            guard hasSpline, minDist <= t2 else { continue }
+
+            let area = entity.worldBoundingBox?.area ?? 0.0
+            let order = entity.drawOrder
+
+            var replace = false
+            if order > bestDrawOrder {
+                replace = true
+            } else if order == bestDrawOrder {
+                if area < bestArea - 1e-3 {
+                    replace = true
+                } else if abs(area - bestArea) <= 1e-3 && minDist < bestDist {
+                    replace = true
+                }
+            }
+
+            if replace {
+                bestDrawOrder = order
+                bestArea = area
+                bestDist = minDist
+                bestHandle = entity.handle
+            }
+        }
+
+        return bestHandle
+    }
+
     // MARK: - Actions
 
     private func applyReverse(engine: PhrostEngine) {
@@ -309,12 +470,12 @@ public final class SplineEditCommand: FeatureCommand {
         
         for i in 0..<newGeom.count {
             if case let .spline(cps, knots, degree, weights, color) = newGeom[i] {
-                let pts = NURBSEvaluator.evaluate(
+                let pts = NURBSEvaluator.evaluateByKnotSpans(
                     degree: degree,
                     knots: knots,
                     controlPoints: cps,
                     weights: weights,
-                    segments: Int(precisionSegments)
+                    segmentsPerSpan: Int(precisionSegments)
                 )
                 
                 if pts.count >= 2 {

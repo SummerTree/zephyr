@@ -187,9 +187,9 @@ public enum CADRectSelect {
 
         case .spline(let controlPoints, let knots, let degree, let weights, _):
             let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
-            let evaluated = NURBSEvaluator.evaluate(
+            let evaluated = NURBSEvaluator.evaluateByKnotSpans(
                 degree: degree, knots: knots,
-                controlPoints: controlPoints, weights: w, segments: 24)
+                controlPoints: controlPoints, weights: w, segmentsPerSpan: 6)
             guard evaluated.count >= 2 else { return false }
             for i in 0..<(evaluated.count - 1) {
                 let p1 = transform.transformPoint(evaluated[i])
