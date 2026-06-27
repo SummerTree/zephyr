@@ -69,7 +69,7 @@ struct TabBarUI {
                     let tab = tabs[i]
                     let isActive = (i == activeIdx)
                     let hasUnsaved = tab.document.hasUnsavedChanges
-                    let label = hasUnsaved ? "\(tab.displayName)*" : tab.displayName
+                    let label = tab.displayName
 
                     var tabFlags: Int32 = 0
                     if isActive && shouldForceSelection {
