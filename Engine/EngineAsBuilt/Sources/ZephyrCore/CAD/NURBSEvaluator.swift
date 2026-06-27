@@ -979,12 +979,138 @@ public enum NURBSEvaluator {
         )
     }
 
+    public static func elevateBezierChainByOneDegree(
+        _ curve: NURBSCurveComponents
+    ) -> NURBSCurveComponents? {
+        guard validateCurve(curve) == nil else { return nil }
+
+        let p = curve.degree
+        let q = p + 1
+        let cps = curve.controlPoints
+        let weights = curve.weights
+
+        guard p >= 1, cps.count == weights.count else { return nil }
+
+        let tMin = curve.knots[p]
+        let tMax = curve.knots[cps.count]
+        guard tMax > tMin else { return nil }
+
+        var internalBreaks: [Double] = []
+        var i = p + 1
+        let end = curve.knots.count - p - 1
+        while i < end {
+            let value = curve.knots[i]
+            var multiplicity = 1
+            var j = i + 1
+            while j < end && abs(curve.knots[j] - value) < 1e-12 {
+                multiplicity += 1
+                j += 1
+            }
+
+            guard value > tMin + 1e-12, value < tMax - 1e-12 else {
+                i = j
+                continue
+            }
+
+            guard multiplicity == p else { return nil }
+            internalBreaks.append(value)
+            i = j
+        }
+
+        let spanCount = internalBreaks.count + 1
+        guard cps.count == spanCount * p + 1 else { return nil }
+
+        var outCPs: [Vector3] = []
+        var outWeights: [Double] = []
+        outCPs.reserveCapacity(spanCount * q + 1)
+        outWeights.reserveCapacity(spanCount * q + 1)
+
+        for span in 0..<spanCount {
+            let start = span * p
+            var hp: [(x: Double, y: Double, z: Double, w: Double)] = []
+            hp.reserveCapacity(p + 1)
+
+            for local in 0...p {
+                let idx = start + local
+                let w = weights[idx]
+                guard w.isFinite, w > 0 else { return nil }
+                let pt = cps[idx]
+                hp.append((pt.x * w, pt.y * w, pt.z * w, w))
+            }
+
+            var elevated: [(x: Double, y: Double, z: Double, w: Double)] = []
+            elevated.reserveCapacity(q + 1)
+            elevated.append(hp[0])
+
+            if p >= 1 {
+                for k in 1...p {
+                    let alpha = Double(k) / Double(q)
+                    let beta = 1.0 - alpha
+                    let a = hp[k - 1]
+                    let b = hp[k]
+                    elevated.append((
+                        a.x * alpha + b.x * beta,
+                        a.y * alpha + b.y * beta,
+                        a.z * alpha + b.z * beta,
+                        a.w * alpha + b.w * beta
+                    ))
+                }
+            }
+
+            elevated.append(hp[p])
+
+            let firstLocal = span == 0 ? 0 : 1
+            for local in firstLocal..<elevated.count {
+                let h = elevated[local]
+                guard h.w.isFinite, h.w > 0 else { return nil }
+                outCPs.append(Vector3(x: h.x / h.w, y: h.y / h.w, z: h.z / h.w))
+                outWeights.append(h.w)
+            }
+        }
+
+        var knots: [Double] = []
+        knots.reserveCapacity(outCPs.count + q + 1)
+        for _ in 0...q { knots.append(0.0) }
+        if spanCount > 1 {
+            for span in 1..<spanCount {
+                for _ in 0..<q { knots.append(Double(span)) }
+            }
+        }
+        for _ in 0...q { knots.append(Double(spanCount)) }
+
+        let elevated = NURBSCurveComponents(
+            controlPoints: outCPs,
+            knots: normalizeKnots(knots, degree: q),
+            degree: q,
+            weights: outWeights,
+            isRational: curve.isRational
+        )
+
+        guard validateCurve(elevated) == nil else { return nil }
+        return elevated
+    }
+
+    public static func elevateBezierChain(
+        _ curve: NURBSCurveComponents,
+        toDegree targetDegree: Int
+    ) -> NURBSCurveComponents? {
+        guard targetDegree >= curve.degree else { return nil }
+        if targetDegree == curve.degree { return curve }
+
+        var work = curve
+        while work.degree < targetDegree {
+            guard let elevated = elevateBezierChainByOneDegree(work) else { return nil }
+            work = elevated
+        }
+        return work
+    }
+
     // MARK: Same-degree join
 
     /// Join two clamped NURBS curves at their closest pair of endpoints.
-    /// Same-degree curves are concatenated directly. A single-span linear
-    /// degree-1 curve can be elevated exactly to degree 2 so it can join a
-    /// quadratic spline without refitting.
+    /// Same-degree curves are concatenated directly. Degree-1 and degree-2
+    /// Bezier-chain curves can be elevated exactly up to degree 3 so lines and
+    /// circular arcs can join cubic splines without refitting.
     ///
     /// - Parameters:
     ///   - a: First curve.
@@ -1007,17 +1133,17 @@ public enum NURBSEvaluator {
         var bWork = b
 
         if aWork.degree != bWork.degree {
-            if aWork.degree == 1,
-               bWork.degree == 2,
-               let elevated = elevateLinearBezierToQuadratic(aWork) {
-                aWork = elevated
-            } else if aWork.degree == 2,
-                      bWork.degree == 1,
-                      let elevated = elevateLinearBezierToQuadratic(bWork) {
-                bWork = elevated
-            } else {
+            let targetDegree = max(aWork.degree, bWork.degree)
+
+            guard targetDegree <= 3,
+                  let elevatedA = elevateBezierChain(aWork, toDegree: targetDegree),
+                  let elevatedB = elevateBezierChain(bWork, toDegree: targetDegree)
+            else {
                 return .failure(.differentDegrees(a.degree, b.degree))
             }
+
+            aWork = elevatedA
+            bWork = elevatedB
 
             if let err = validateCurve(aWork) { return .failure(err) }
             if let err = validateCurve(bWork) { return .failure(err) }
