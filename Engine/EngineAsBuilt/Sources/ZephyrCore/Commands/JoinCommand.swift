@@ -14,9 +14,10 @@ import SwiftSDL
 ///   3. The command executes immediately — no interactive steps.
 ///
 /// **Dispatch:**
-///   - If ALL selected entities are single-spline entities → spline join path.
+///   - If ALL selected entities are single-spline, single-line, or single-arc
+///     entities → spline join path (lines/arcs convert on-the-fly to NURBS).
 ///   - If ALL selected are lines/open polylines → line/polyline join path.
-///   - Mixed selection → rejected with message.
+///   - Mixed selection (splines/arcs + polylines/unsupported) → rejected.
 ///
 /// **Spline join algorithm:**
 ///   - Collects all selected spline targets via `SplineJoiner`.
@@ -62,25 +63,27 @@ public final class JoinCommand: FeatureCommand {
         }
 
         // ── Classify selection ──
-        let splineTargets = selected.compactMap { handle -> SplineJoinTarget? in
+        let targets = selected.compactMap { handle -> SplineJoinTarget? in
             guard let entity = engine.document.entity(for: handle) else { return nil }
-            return SplineJoiner.extractSingleSplineTarget(entity: entity, handle: handle)
+            return SplineJoiner.extractOrConvertTarget(entity: entity, handle: handle)
         }
 
-        if splineTargets.count == selected.count {
-            // All splines
-            joinSelectedSplines(engine: engine, processor: processor, targets: splineTargets)
+        let hasAnySplineConvertible = !targets.isEmpty
+        let allSplineConvertible = targets.count == selected.count
+
+        if allSplineConvertible {
+            joinSelectedSplines(engine: engine, processor: processor, targets: targets)
             processor.finishFeatureCommand(engine: engine)
             return
         }
 
-        if !splineTargets.isEmpty {
-            processor.commandPrompt = "JOIN does not support mixing splines with other entity types yet."
+        if hasAnySplineConvertible {
+            processor.commandPrompt = "JOIN selection includes unsupported or invalid objects."
             processor.finishFeatureCommand(engine: engine)
             return
         }
 
-        // No splines — fall through to line/polyline join
+        // No spline-convertible entities — fall through to line/polyline join
         joinSelectedLinesAndPolylines(engine: engine, processor: processor)
         processor.finishFeatureCommand(engine: engine)
     }
@@ -141,6 +144,12 @@ public final class JoinCommand: FeatureCommand {
                     }
                 }
             }
+        }
+
+        // ── No-op guard: if nothing was joined, don't mutate the document ──
+        guard !removedHandles.isEmpty else {
+            processor.commandPrompt = "No matching endpoints found."
+            return
         }
 
         // ── Build final result entities ──
