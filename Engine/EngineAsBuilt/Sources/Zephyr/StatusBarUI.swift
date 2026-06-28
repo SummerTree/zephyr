@@ -54,6 +54,7 @@ struct StatusBarUI {
             || engine._lastPolarEnabled != engine.snap.polarTrackingEnabled
             || engine._lastOTrackEnabled != engine.snap.objectSnapTrackingEnabled
             || engine._lastExtEnabled != engine.snap.extensionSnapEnabled
+            || engine._lastOrthoEnabled != engine.snap.orthoEnabled
         {
             let tabName = engine.tabManager.activeTab?.displayName ?? "Untitled"
             let dirtyMark = engine.tabManager.activeIsDirty ? " *" : ""
@@ -75,6 +76,9 @@ struct StatusBarUI {
             if engine.snap.extensionSnapEnabled {
                 trackingParts.append("EXT")
             }
+            if engine.snap.orthoEnabled {
+                trackingParts.append("ORTHO")
+            }
             let trackingStr = trackingParts.isEmpty ? "" : "  ·  " + trackingParts.joined(separator: "  ·  ")
 
             // New mockup format: filename · Layer 0 · Entities: 967 · POLAR(45°)
@@ -88,6 +92,7 @@ struct StatusBarUI {
             engine._lastPolarEnabled = engine.snap.polarTrackingEnabled
             engine._lastOTrackEnabled = engine.snap.objectSnapTrackingEnabled
             engine._lastExtEnabled = engine.snap.extensionSnapEnabled
+            engine._lastOrthoEnabled = engine.snap.orthoEnabled
             engine._lastHadSaveState = false
         }
 

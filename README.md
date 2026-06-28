@@ -113,11 +113,13 @@ SELECT, MOVE, ROTATE, SCALE, PAN, ZOOM
 center, vertex, midpoint, insertion point, quadrant, nearest, perpendicular, tangent, intersection
 
 ### Tracking
+- **Ortho mode (F8)** — Hard-constrain cursor to cardinal axes (0°/90°/180°/270°) from the reference point. Works with direct distance entry — type a number during MOVE to move precisely along the ortho axis.
 - **Polar tracking** at configurable angle increments (`POLARANG`)
-- **Object snap tracking (OTRACK)** from acquired points
+- **Object snap tracking (OTRACK)** from acquired points (500ms dwell)
 - **Extension snapping** along existing geometry
 - **Snap angle** (`SNAPANG`) sets crosshair and ortho rotation angle
-- Toggle via `POLAR`, `OTRACK`, `EXTENSION` commands
+- **Direct distance entry** — during MOVE/COPY, type a distance and press Enter to move exactly that far along the current direction. Works with ortho, polar, OTRACK, and extension snaps — the ghost preview and tracking line always follow the active snap direction.
+- Toggle via `POLAR`, `OTRACK`, `EXTENSION`, `ORTHO` commands or `F8` (ortho)
 
 ### Grips
 Per-vertex grips on polylines and polygons. Corner, center, midpoint, and rotation grips on selection bounding boxes. Configurable limits: `SETTINGSGRIPOBJECTMAX` (entity count threshold, default 100) and `SETTINGSGRIPMAX` (total grip squares drawn, default 1000).

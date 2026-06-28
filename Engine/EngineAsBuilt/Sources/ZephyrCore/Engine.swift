@@ -161,6 +161,8 @@ public final class PhrostEngine {
     public var _lastOTrackEnabled: Bool = false
     /// Status bar cache: last extension snap state.
     public var _lastExtEnabled: Bool = false
+    /// Status bar cache: last ortho state.
+    public var _lastOrthoEnabled: Bool = false
     /// Track whether we were showing save progress last frame (to detect transition to idle).
     public var _lastHadSaveState: Bool = false
 

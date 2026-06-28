@@ -402,5 +402,19 @@ extension EngineRenderer {
                 ImVec2(x: screenPos.x, y: screenPos.y - size),
                 ImVec2(x: screenPos.x, y: screenPos.y + size), markerColor, 1.5)
         }
+
+        // 6. Render pending distance entry tooltip (direct distance during MOVE)
+        if !engine.commandProcessor.pendingDistanceBuffer.isEmpty,
+           let ref = engine.commandProcessor.commandRefPoint,
+           engine.commandProcessor.activeCommand == "MOVE" {
+            let ghostX = engine.commandProcessor._moveGhostWorldX
+            let ghostY = engine.commandProcessor._moveGhostWorldY
+            let screenPos = engine.camera.transformWorldToScreen(worldX: ghostX, worldY: ghostY, cam: cam)
+            let distText = engine.commandProcessor.pendingDistanceBuffer
+            let tipCol = igGetColorU32_Vec4(ImVec4(x: 1.0, y: 0.84, z: 0.0, w: 1.0))
+            let tipX = screenPos.x + 14
+            let tipY = screenPos.y - 28
+            ImDrawListAddText(drawList, ImVec2(x: tipX, y: tipY), tipCol, distText, nil)
+        }
     }
 }

@@ -287,6 +287,7 @@ internal final class EngineInputHandler {
                     engine.snap.lockedSnap = nil
                     engine.snap.snapTrackingEngine.clear()
                     engine.snap.lastPolarResult = nil
+                    engine.commandProcessor.pendingDistanceBuffer = ""
                     // Feature command already got Esc above; only reach here if
                     // it returned .continue (didn't handle it) or no command active.
                     if engine.commandProcessor.activeCommand != nil {
@@ -298,7 +299,14 @@ internal final class EngineInputHandler {
                         engine.cadSelection.clearSelection()
                     }
                 case SDL_SCANCODE_DELETE, SDL_SCANCODE_BACKSPACE:
-                    engine.deleteSelected()
+                    if !engine.commandProcessor.pendingDistanceBuffer.isEmpty {
+                        _ = engine.commandProcessor.pendingDistanceBuffer.removeLast()
+                    } else {
+                        engine.deleteSelected()
+                    }
+                case SDL_SCANCODE_F8:
+                    engine.snap.orthoEnabled.toggle()
+                    print("[CAD] Ortho: \(engine.snap.orthoEnabled ? "ON" : "OFF")")
                 case SDL_SCANCODE_UP:
                     handleArrowUp()
                 case SDL_SCANCODE_DOWN:
@@ -322,14 +330,41 @@ internal final class EngineInputHandler {
                 case SDL_SCANCODE_EQUALS, SDL_SCANCODE_KP_PLUS:
                     engine.camera.zoomView(factor: 1.375, screenX: engine.interaction.lastMouseX, screenY: engine.interaction.lastMouseY, windowWidth: engine.windowWidth, windowHeight: engine.windowHeight)
                 case SDL_SCANCODE_MINUS, SDL_SCANCODE_KP_MINUS:
-                    engine.camera.zoomView(factor: 1.0 / 1.375, screenX: engine.interaction.lastMouseX, screenY: engine.interaction.lastMouseY, windowWidth: engine.windowWidth, windowHeight: engine.windowHeight)
+                    if engine.commandProcessor.activeCommand == "MOVE", engine.commandProcessor.commandRefPoint != nil {
+                        appendDistanceChar("-")
+                    } else {
+                        engine.camera.zoomView(factor: 1.0 / 1.375, screenX: engine.interaction.lastMouseX, screenY: engine.interaction.lastMouseY, windowWidth: engine.windowWidth, windowHeight: engine.windowHeight)
+                    }
                 case SDL_SCANCODE_0:
-                    engine.camera.zoom = 1.0
-                    engine.camera.offset = (0, 0)
+                    if engine.commandProcessor.activeCommand == "MOVE", engine.commandProcessor.commandRefPoint != nil {
+                        appendDistanceChar("0")
+                    } else {
+                        engine.camera.zoom = 1.0
+                        engine.camera.offset = (0, 0)
+                    }
+                case SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4,
+                     SDL_SCANCODE_5, SDL_SCANCODE_6, SDL_SCANCODE_7, SDL_SCANCODE_8, SDL_SCANCODE_9,
+                     SDL_SCANCODE_KP_1, SDL_SCANCODE_KP_2, SDL_SCANCODE_KP_3, SDL_SCANCODE_KP_4,
+                     SDL_SCANCODE_KP_5, SDL_SCANCODE_KP_6, SDL_SCANCODE_KP_7, SDL_SCANCODE_KP_8,
+                     SDL_SCANCODE_KP_9:
+                    if engine.commandProcessor.activeCommand == "MOVE", engine.commandProcessor.commandRefPoint != nil {
+                        appendDistanceChar(scancodeToDigit(e.key.scancode))
+                    }
+                case SDL_SCANCODE_KP_0:
+                    if engine.commandProcessor.activeCommand == "MOVE", engine.commandProcessor.commandRefPoint != nil {
+                        appendDistanceChar("0")
+                    }
+                case SDL_SCANCODE_PERIOD, SDL_SCANCODE_KP_PERIOD:
+                    if engine.commandProcessor.activeCommand == "MOVE", engine.commandProcessor.commandRefPoint != nil {
+                        appendDistanceChar(".")
+                    }
                 default:
                     // No feature command active — typing a letter opens the command line.
+                    // Also allow during MOVE with refPoint for direct distance entry.
+                    let canOpenCommandLine = engine.commandProcessor.activeCommand == nil
+                        || (engine.commandProcessor.activeCommand == "MOVE" && engine.commandProcessor.commandRefPoint != nil)
                     if !engine.commandProcessor.commandLineActive
-                                && engine.commandProcessor.activeCommand == nil
+                                && canOpenCommandLine
                                 && engine.commandProcessor.activeFeatureCommand == nil {
                         let char = keycodeToChar(e.key.key)
                         if !char.isEmpty {
@@ -344,7 +379,7 @@ internal final class EngineInputHandler {
             }
         }
 
-        // Enter key: confirm layer-move popup.
+        // Enter key: confirm layer-move popup OR apply direct distance entry.
         // (Feature command already received Enter via the hoisted routing above.)
         if e.key.scancode == SDL_SCANCODE_RETURN || e.key.scancode == SDL_SCANCODE_KP_ENTER {
             if engine.ui.layerMoveActive {
@@ -357,6 +392,10 @@ internal final class EngineInputHandler {
                 engine.ui.layerMoveActive = false
                 engine.ui.layerMoveBuffer = ""
                 engine.ui.layerMoveMatches = []
+            } else if !engine.commandProcessor.pendingDistanceBuffer.isEmpty {
+                // Apply the accumulated distance.
+                engine.commandProcessor.executeCommand(engine.commandProcessor.pendingDistanceBuffer)
+                engine.commandProcessor.pendingDistanceBuffer = ""
             }
         }
     }
@@ -414,6 +453,28 @@ internal final class EngineInputHandler {
             return String(Character(UnicodeScalar(ascii)))
         }
         return ""
+    }
+
+    /// Append a character to the direct distance entry buffer during MOVE.
+    /// Does NOT open the command line — the value is displayed as a tooltip.
+    private func appendDistanceChar(_ char: String) {
+        engine.commandProcessor.pendingDistanceBuffer += char
+    }
+
+    /// Map numeric scancodes to their digit character.
+    private func scancodeToDigit(_ sc: SDL_Scancode) -> String {
+        switch sc {
+        case SDL_SCANCODE_1, SDL_SCANCODE_KP_1: return "1"
+        case SDL_SCANCODE_2, SDL_SCANCODE_KP_2: return "2"
+        case SDL_SCANCODE_3, SDL_SCANCODE_KP_3: return "3"
+        case SDL_SCANCODE_4, SDL_SCANCODE_KP_4: return "4"
+        case SDL_SCANCODE_5, SDL_SCANCODE_KP_5: return "5"
+        case SDL_SCANCODE_6, SDL_SCANCODE_KP_6: return "6"
+        case SDL_SCANCODE_7, SDL_SCANCODE_KP_7: return "7"
+        case SDL_SCANCODE_8, SDL_SCANCODE_KP_8: return "8"
+        case SDL_SCANCODE_9, SDL_SCANCODE_KP_9: return "9"
+        default: return ""
+        }
     }
 
     // MARK: - Mouse Motion

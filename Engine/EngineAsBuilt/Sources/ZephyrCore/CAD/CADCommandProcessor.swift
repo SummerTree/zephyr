@@ -227,6 +227,7 @@ public struct CommandDescriptor: Sendable {
         CommandDescriptor(canonicalName: "POLARANG",        aliases: [],                category: .settings, syntax: "<degrees>", description: "Set polar angle increment (e.g. 15, 30, 45, 90)"),
         CommandDescriptor(canonicalName: "OTRACK",          aliases: [],                category: .settings, syntax: "", description: "Toggle object snap tracking on/off"),
         CommandDescriptor(canonicalName: "EXTENSION",       aliases: ["EXT"],           category: .settings, syntax: "", description: "Toggle extension snapping on/off"),
+        CommandDescriptor(canonicalName: "ORTHO",          aliases: [],                category: .settings, syntax: "", description: "Toggle ortho mode (F8) — constrain cursor to cardinal axes"),
     ]
 }
 
@@ -279,6 +280,20 @@ public final class CADCommandProcessor {
     /// World-space mouse position during MOVE command (for ghost preview).
     public internal(set) var _moveGhostWorldX: Double = 0
     public internal(set) var _moveGhostWorldY: Double = 0
+    private var _moveCursorWorldX: Double = 0
+    private var _moveCursorWorldY: Double = 0
+
+    // MARK: Direct Distance Entry State
+    /// Buffer accumulating digit keystrokes during MOVE for direct distance entry.
+    /// When non-empty, the renderer displays the value near the cursor and
+    /// Enter applies the distance without opening the command line.
+    public var pendingDistanceBuffer: String = "" {
+        didSet {
+            if activeCommand == "MOVE", commandRefPoint != nil {
+                updateMoveGhostPreview()
+            }
+        }
+    }
 
     // MARK: Feature Command State
 
@@ -346,6 +361,30 @@ public final class CADCommandProcessor {
         lastExecutedCommand = text
 
         if handleDrawingViewCommand(text) {
+            clearCommand()
+            return
+        }
+
+        // Direct distance entry: during MOVE (after base point), a number = distance along current direction.
+        if let engine = engine,
+           activeCommand == "MOVE",
+           commandRefPoint != nil,
+           let distance = Double(upper),
+           distance != 0 {
+            updateMoveGhostPreview(directDistanceOverride: distance)
+            let (refX, refY) = commandRefPoint!
+            let offsetX = _moveGhostWorldX - refX
+            let offsetY = _moveGhostWorldY - refY
+            let dist = sqrt(offsetX * offsetX + offsetY * offsetY)
+            let ux = dist > 1e-9 ? offsetX / dist : 1.0
+            let uy = dist > 1e-9 ? offsetY / dist : 0.0
+            print("[CAD] MOVE direct distance: \(distance) units along (\(String(format: "%.4f", ux)), \(String(format: "%.4f", uy)))")
+            engine.cadBridge.movePrimitivesDirect(
+                handles: engine.cadSelection.selectedHandles,
+                by: (offsetX, offsetY), in: engine.geometryManager,
+                spriteManager: engine.spriteManager)
+            engine.cadSelection.moveAllSelected(by: Vector3(x: offsetX, y: offsetY, z: 0), document: engine.document)
+            engine.interaction.cachedGripGeneration = -1
             clearCommand()
             return
         }
@@ -958,6 +997,11 @@ public final class CADCommandProcessor {
             engine.snap.extensionSnapEnabled.toggle()
             print("[CAD] Extension Snap: \(engine.snap.extensionSnapEnabled ? "ON" : "OFF")")
             clearCommand()
+        case "ORTHO":
+            guard let engine = engine else { clearCommand(); return }
+            engine.snap.orthoEnabled.toggle()
+            print("[CAD] Ortho: \(engine.snap.orthoEnabled ? "ON" : "OFF")")
+            clearCommand()
         case "LM", "LAYMOVE", "LAYERMOVE":
             // Layer Move: reassign selected entities with autocomplete popup
             guard let engine = engine else { clearCommand(); return }
@@ -1092,11 +1136,14 @@ public final class CADCommandProcessor {
         commandRefPoint = nil
         commandLineActive = false
         commandBuffer = ""
+        pendingDistanceBuffer = ""
         commandSelectionIndex = 0
         _lastMatchInput = ""
         _cachedMatches = []
         _moveGhostWorldX = 0
         _moveGhostWorldY = 0
+        _moveCursorWorldX = 0
+        _moveCursorWorldY = 0
     }
 
     // MARK: - Command Helpers
@@ -1107,11 +1154,14 @@ public final class CADCommandProcessor {
         commandRefPoint = nil
         commandLineActive = false
         commandBuffer = ""
+        pendingDistanceBuffer = ""
         commandSelectionIndex = 0
         _lastMatchInput = ""
         _cachedMatches = []
         _moveGhostWorldX = 0
         _moveGhostWorldY = 0
+        _moveCursorWorldX = 0
+        _moveCursorWorldY = 0
     }
 
     // MARK: - Autocomplete Matching
@@ -1156,12 +1206,15 @@ public final class CADCommandProcessor {
             }
             if commandRefPoint == nil {
                 commandRefPoint = (worldX, worldY)
+                _moveCursorWorldX = worldX
+                _moveCursorWorldY = worldY
                 _moveGhostWorldX = worldX
                 _moveGhostWorldY = worldY
                 commandPrompt = "Select destination point"
             } else {
-                let dx = worldX - commandRefPoint!.0
-                let dy = worldY - commandRefPoint!.1
+                updateMoveGhostPreview(cursorWorldX: worldX, cursorWorldY: worldY)
+                let dx = _moveGhostWorldX - commandRefPoint!.0
+                let dy = _moveGhostWorldY - commandRefPoint!.1
                 // Update GPU geometry immediately so grips/selection update
                 engine.cadBridge.movePrimitivesDirect(
                     handles: engine.cadSelection.selectedHandles,
@@ -1217,10 +1270,8 @@ public final class CADCommandProcessor {
     internal func handleCommandMotion(worldX: Double, worldY: Double) {
         guard let engine = engine else { return }
 
-        // Track mouse position for MOVE ghost preview
         if activeCommand == "MOVE" && commandRefPoint != nil {
-            _moveGhostWorldX = worldX
-            _moveGhostWorldY = worldY
+            updateMoveGhostPreview(cursorWorldX: worldX, cursorWorldY: worldY)
         }
 
         guard let cmd = activeCommand, engine.interaction.dragActive else { return }
@@ -1247,6 +1298,70 @@ public final class CADCommandProcessor {
         default:
             break
         }
+    }
+
+    private func updateMoveGhostPreview(
+        cursorWorldX: Double? = nil,
+        cursorWorldY: Double? = nil,
+        directDistanceOverride: Double? = nil
+    ) {
+        guard activeCommand == "MOVE", let base = commandRefPoint else { return }
+
+        if let cursorWorldX {
+            _moveCursorWorldX = cursorWorldX
+        }
+        if let cursorWorldY {
+            _moveCursorWorldY = cursorWorldY
+        }
+
+        var targetX = _moveCursorWorldX
+        var targetY = _moveCursorWorldY
+
+        if let engine = engine,
+           !engine.snap.orthoEnabled {
+            if let snap = engine.snap.currentSnapResult,
+               snap.entityHandle != PhrostEngine.drawingSnapSentinel {
+                targetX = snap.worldPos.x
+                targetY = snap.worldPos.y
+            } else if let polar = engine.snap.lastPolarResult {
+                targetX = polar.worldPos.x
+                targetY = polar.worldPos.y
+            }
+        }
+
+        var dx = targetX - base.0
+        var dy = targetY - base.1
+
+        if engine?.snap.orthoEnabled == true {
+            let absDx = abs(dx)
+            let absDy = abs(dy)
+            if absDx < 1e-9 && absDy < 1e-9 {
+                dx = 1.0
+                dy = 0.0
+            } else if absDx >= absDy {
+                dx = dx >= 0 ? absDx : -absDx
+                dy = 0.0
+                engine?.snap.orthoLastWasHorizontal = true
+                engine?.snap.orthoLastWasVertical = false
+            } else {
+                dx = 0.0
+                dy = dy >= 0 ? absDy : -absDy
+                engine?.snap.orthoLastWasHorizontal = false
+                engine?.snap.orthoLastWasVertical = true
+            }
+        }
+
+        let directDistance = directDistanceOverride ?? Double(pendingDistanceBuffer)
+        if let directDistance {
+            let length = sqrt(dx * dx + dy * dy)
+            let ux = length > 1e-9 ? dx / length : 1.0
+            let uy = length > 1e-9 ? dy / length : 0.0
+            dx = ux * directDistance
+            dy = uy * directDistance
+        }
+
+        _moveGhostWorldX = base.0 + dx
+        _moveGhostWorldY = base.1 + dy
     }
 
     // MARK: - Clipboard Helpers

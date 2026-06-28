@@ -116,7 +116,9 @@ public final class EngineLoopController {
 
         if engine.commandProcessor.activeCommand != nil {
             snapMgr.lockedSnap = nil
-            if let snap = snapMgr.currentSnapResult {
+            if engine.commandProcessor.activeCommand == "MOVE" {
+                engine.commandProcessor.handleCommandClick(worldX: wx, worldY: wy)
+            } else if let snap = snapMgr.currentSnapResult {
                 engine.commandProcessor.handleCommandClick(worldX: snap.worldPos.x, worldY: snap.worldPos.y)
             } else {
                 engine.commandProcessor.handleCommandClick(worldX: wx, worldY: wy)
@@ -343,7 +345,11 @@ public final class EngineLoopController {
         let snapWY = engine.snap.currentSnapResult?.worldPos.y ?? wy
 
         if engine.commandProcessor.activeCommand != nil {
-            engine.commandProcessor.handleCommandMotion(worldX: snapWX, worldY: snapWY)
+            if engine.commandProcessor.activeCommand == "MOVE" {
+                engine.commandProcessor.handleCommandMotion(worldX: wx, worldY: wy)
+            } else {
+                engine.commandProcessor.handleCommandMotion(worldX: snapWX, worldY: snapWY)
+            }
         }
 
         if interaction.dragActive {
@@ -486,6 +492,9 @@ public final class EngineLoopController {
         let now = SDL_GetTicks()
         let cursorWorld = Vector3(x: worldX, y: worldY, z: 0)
 
+        snapMgr.currentSnapResult = nil
+        snapMgr.lastPolarResult = nil
+
         if let locked = snapMgr.lockedSnap {
             if !snapMgr.shouldStickyLock(locked) {
                 snapMgr.lockedSnap = nil
@@ -558,8 +567,57 @@ public final class EngineLoopController {
                 wiggleThresholdWorld: wiggleWorld,
                 nowTicks: now)
 
+            // Ortho constraint: hard-lock cursor to nearest cardinal axis from reference point.
+            // Runs here (after OTRACK, before wide extension snap) so ortho gets priority.
+            if snapMgr.orthoEnabled,
+               snapMgr.currentSnapResult == nil {
+                var orthoRef: Vector3? = nil
+                if let mref = engine.commandProcessor.commandRefPoint, engine.commandProcessor.activeCommand == "MOVE" {
+                    orthoRef = Vector3(x: mref.0, y: mref.1, z: 0)
+                } else if let refPt = getLastReferencePoint() {
+                    orthoRef = refPt
+                }
+                if let oref = orthoRef {
+                    let dx = worldX - oref.x
+                    let dy = worldY - oref.y
+                    let absDx = abs(dx), absDy = abs(dy)
+                    let bias: Double = 1.0 - 1e-4
+                    let lockHorizontal: Bool
+                    if snapMgr.orthoLastWasHorizontal && absDx >= absDy * bias {
+                        lockHorizontal = true
+                    } else if snapMgr.orthoLastWasVertical && absDy >= absDx * bias {
+                        lockHorizontal = false
+                    } else if absDx >= absDy {
+                        lockHorizontal = true
+                        snapMgr.orthoLastWasHorizontal = true
+                        snapMgr.orthoLastWasVertical = false
+                    } else {
+                        lockHorizontal = false
+                        snapMgr.orthoLastWasHorizontal = false
+                        snapMgr.orthoLastWasVertical = true
+                    }
+                    var constrainedX = lockHorizontal ? worldX : oref.x
+                    var constrainedY = lockHorizontal ? oref.y : worldY
+                    if engine.snap.gridSnapEnabled {
+                        let spacing = engine.snap.effectiveGridSpacing(windowWidth: engine.windowWidth, cameraZoom: engine.camera.zoom)
+                        let gx = round((worldX - engine.snap.gridOriginX) / spacing) * spacing + engine.snap.gridOriginX
+                        let gy = round((worldY - engine.snap.gridOriginY) / spacing) * spacing + engine.snap.gridOriginY
+                        if lockHorizontal { constrainedX = gx } else { constrainedY = gy }
+                    }
+                    let angleDeg: Double = lockHorizontal ? (dx >= 0 ? 0.0 : 180.0) : (dy >= 0 ? 90.0 : 270.0)
+                    let constrainedDist = sqrt((constrainedX - oref.x) * (constrainedX - oref.x) + (constrainedY - oref.y) * (constrainedY - oref.y))
+                    snapMgr.currentSnapResult = SnapResult(
+                        entityHandle: PhrostEngine.drawingSnapSentinel,
+                        anchor: .nearest(localPosition: Vector3(x: constrainedX, y: constrainedY, z: 0)),
+                        worldPos: Vector3(x: constrainedX, y: constrainedY, z: 0))
+                    snapMgr.lastPolarResult = PolarTrackingResult(
+                        worldPos: Vector3(x: constrainedX, y: constrainedY, z: 0),
+                        angleDeg: angleDeg, distance: constrainedDist, reference: oref)
+                }
+            }
 
-
+            // Only compute wide extension snaps if ortho didn't constrain the cursor.
+            if snapMgr.currentSnapResult == nil {
             snapMgr.currentSnapResult = engine.snap.snapEngine.nearestSnap(
                 worldX: worldX, worldY: worldY,
                 entities: Array(visibleEntities),
@@ -618,6 +676,7 @@ public final class EngineLoopController {
                 snapMgr.applyStickyLockIfNeeded(snap)
                 return
             }
+            } // end if snapMgr.currentSnapResult == nil (wide extension snap wrapper)
 
             var bestTrackingSnap: SnapResult? = nil
             var bestTrackingDist = acquireThreshold
@@ -651,12 +710,12 @@ public final class EngineLoopController {
             }
 
 
-
             var bestPolarSnap: SnapResult? = nil
             var bestPolarDist = acquireThreshold
             var bestPolarInfo: PolarTrackingResult? = nil
 
-            if snapMgr.polarTrackingEnabled {
+            // Polar tracking: ortho already ran earlier and set currentSnapResult if applicable.
+            if snapMgr.polarTrackingEnabled && snapMgr.currentSnapResult == nil {
                 var polarRefs: [Vector3] = []
                 if let refPt = getLastReferencePoint() {
                     polarRefs.append(refPt)
@@ -693,9 +752,9 @@ public final class EngineLoopController {
             } else if let polarSnap = bestPolarSnap {
                 snapMgr.currentSnapResult = polarSnap
                 snapMgr.lastPolarResult = bestPolarInfo
-            } else {
-                snapMgr.lastPolarResult = nil
             }
+            // If neither tracking nor polar fired, leave lastPolarResult as-is
+            // (it may have been set by ortho constraint above).
 
             if let snap = snapMgr.currentSnapResult {
                 snapMgr.applyStickyLockIfNeeded(snap)
@@ -817,8 +876,54 @@ public final class EngineLoopController {
                 snapMgr.lastPolarResult = trajectory
             }
 
+            // Ortho constraint: hard-lock cursor to nearest cardinal axis from reference point.
+            if snapMgr.currentSnapResult == nil, snapMgr.orthoEnabled {
+                var orthoRef: Vector3? = nil
+                if let mref = engine.commandProcessor.commandRefPoint, engine.commandProcessor.activeCommand == "MOVE" {
+                    orthoRef = Vector3(x: mref.0, y: mref.1, z: 0)
+                } else if let refPt = getLastReferencePoint() {
+                    orthoRef = refPt
+                }
+                if let oref = orthoRef {
+                    let dx = worldX - oref.x
+                    let dy = worldY - oref.y
+                    let absDx = abs(dx), absDy = abs(dy)
+                    let bias: Double = 1.0 - 1e-4
+                    let lockHorizontal: Bool
+                    if snapMgr.orthoLastWasHorizontal && absDx >= absDy * bias {
+                        lockHorizontal = true
+                    } else if snapMgr.orthoLastWasVertical && absDy >= absDx * bias {
+                        lockHorizontal = false
+                    } else if absDx >= absDy {
+                        lockHorizontal = true
+                        snapMgr.orthoLastWasHorizontal = true
+                        snapMgr.orthoLastWasVertical = false
+                    } else {
+                        lockHorizontal = false
+                        snapMgr.orthoLastWasHorizontal = false
+                        snapMgr.orthoLastWasVertical = true
+                    }
+                    var constrainedX = lockHorizontal ? worldX : oref.x
+                    var constrainedY = lockHorizontal ? oref.y : worldY
+                    if engine.snap.gridSnapEnabled {
+                        let spacing = engine.snap.effectiveGridSpacing(windowWidth: engine.windowWidth, cameraZoom: engine.camera.zoom)
+                        let gx = round((worldX - engine.snap.gridOriginX) / spacing) * spacing + engine.snap.gridOriginX
+                        let gy = round((worldY - engine.snap.gridOriginY) / spacing) * spacing + engine.snap.gridOriginY
+                        if lockHorizontal { constrainedX = gx } else { constrainedY = gy }
+                    }
+                    let angleDeg: Double = lockHorizontal ? (dx >= 0 ? 0.0 : 180.0) : (dy >= 0 ? 90.0 : 270.0)
+                    let constrainedDist = sqrt((constrainedX - oref.x) * (constrainedX - oref.x) + (constrainedY - oref.y) * (constrainedY - oref.y))
+                    snapMgr.currentSnapResult = SnapResult(
+                        entityHandle: PhrostEngine.drawingSnapSentinel,
+                        anchor: .nearest(localPosition: Vector3(x: constrainedX, y: constrainedY, z: 0)),
+                        worldPos: Vector3(x: constrainedX, y: constrainedY, z: 0))
+                    snapMgr.lastPolarResult = PolarTrackingResult(
+                        worldPos: Vector3(x: constrainedX, y: constrainedY, z: 0),
+                        angleDeg: angleDeg, distance: constrainedDist, reference: oref)
+                }
+            }
 
-
+            // Grid snap: only fires if no ortho result was produced (ortho already integrated grid snap).
             if snapMgr.currentSnapResult == nil, engine.snap.gridSnapEnabled {
                 snapMgr.currentSnapResult = SnapEngine.nearestGridSnap(
                     worldX: worldX, worldY: worldY,
@@ -827,7 +932,8 @@ public final class EngineLoopController {
                     threshold: acquireThreshold)
             }
 
-            if snapMgr.currentSnapResult == nil, snapMgr.polarTrackingEnabled {
+            // Polar tracking: skipped when ortho is active (ortho takes priority).
+            if snapMgr.currentSnapResult == nil, snapMgr.polarTrackingEnabled, !snapMgr.orthoEnabled {
                 var polarRefs: [Vector3] = []
                 if let refPt = getLastReferencePoint() {
                     polarRefs.append(refPt)
