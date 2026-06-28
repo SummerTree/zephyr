@@ -139,11 +139,20 @@ public enum EABWriter {
 
         try data.write(to: tmpURL, options: .atomic)
 
+#if os(Windows)
+        // replaceItemAt is not implemented in Foundation on Windows.
+        // Fall back to remove-then-move (not atomic, but safe).
+        if FileManager.default.fileExists(atPath: targetURL.path) {
+            try FileManager.default.removeItem(at: targetURL)
+        }
+        try FileManager.default.moveItem(at: tmpURL, to: targetURL)
+#else
         if FileManager.default.fileExists(atPath: targetURL.path) {
             _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: tmpURL)
         } else {
             try FileManager.default.moveItem(at: tmpURL, to: targetURL)
         }
+#endif
     }
 
     // MARK: - Serialization
