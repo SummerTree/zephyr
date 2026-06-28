@@ -345,7 +345,7 @@ public enum CADHitTesting {
             }
             return best <= t2 ? best : nil
 
-        case .hatch(let boundary, _, _, _, _):
+        case .hatch(let boundary, _, _, _, _, _):
             let corners = boundary.map { transform.transformPoint($0) }
             if pointInConvexPolygon(point, corners) { return 0 }
             return minEdgeDistSq(point, corners)

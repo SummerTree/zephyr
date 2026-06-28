@@ -12,6 +12,16 @@ import SwiftSDL
 
 public enum CADBoundaryDetector {
 
+    public struct BoundaryRegion: Sendable {
+        public let outer: [Vector3]
+        public let holes: [[Vector3]]
+
+        public init(outer: [Vector3], holes: [[Vector3]] = []) {
+            self.outer = outer
+            self.holes = holes
+        }
+    }
+
     // MARK: - Edge representation
 
     private struct Edge: Hashable, Sendable {
@@ -80,7 +90,44 @@ public enum CADBoundaryDetector {
         timeoutMs: UInt64 = 200,
         epsilonSq: Double = 1e-6
     ) -> [Vector3]? {
+        findEnclosingRegion(
+            seedX: seedX, seedY: seedY,
+            document: document,
+            maxEdgeCount: maxEdgeCount,
+            timeoutMs: timeoutMs,
+            epsilonSq: epsilonSq
+        )?.outer
+    }
+
+    public static func findEnclosingRegion(
+        seedX: Double, seedY: Double,
+        document: CADDocument,
+        maxEdgeCount: Int = 500,
+        timeoutMs: UInt64 = 200,
+        epsilonSq: Double = 1e-6
+    ) -> BoundaryRegion? {
         let seed = Vector3(x: seedX, y: seedY, z: 0)
+        guard let outer = findOuterEnclosingPolygon(
+            seed: seed,
+            document: document,
+            maxEdgeCount: maxEdgeCount,
+            timeoutMs: timeoutMs,
+            epsilonSq: epsilonSq
+        ) else {
+            return nil
+        }
+
+        let holes = findHoleLoops(inside: outer, seed: seed, document: document, epsilonSq: epsilonSq)
+        return BoundaryRegion(outer: outer, holes: holes)
+    }
+
+    private static func findOuterEnclosingPolygon(
+        seed: Vector3,
+        document: CADDocument,
+        maxEdgeCount: Int,
+        timeoutMs: UInt64,
+        epsilonSq: Double
+    ) -> [Vector3]? {
         let startTime = SDL_GetTicks()
 
         // ----- Phase 1: Ray-cast to find the first edge -----
@@ -234,6 +281,232 @@ public enum CADBoundaryDetector {
 
     // MARK: - Helpers
 
+    private static func findHoleLoops(
+        inside outer: [Vector3],
+        seed: Vector3,
+        document: CADDocument,
+        epsilonSq: Double
+    ) -> [[Vector3]] {
+        guard outer.count >= 3 else { return [] }
+
+        let bbox = boundingBox(for: outer)
+        let candidates = document.entityHandlesInWorldRect(
+            minX: bbox.minX,
+            minY: bbox.minY,
+            maxX: bbox.maxX,
+            maxY: bbox.maxY
+        ) ?? Array(document.entitiesView.map { $0.handle })
+
+        var holes: [[Vector3]] = []
+        for handle in candidates {
+            guard let entity = document.entity(for: handle) else { continue }
+            guard let layer = document.layer(for: entity.layerID), layer.isVisible else { continue }
+            guard let geometry = document.resolvedGeometry(for: entity) else { continue }
+
+            for loop in collectClosedWorldLoops(from: geometry, transform: entity.transform) {
+                let clean = cleanLoop(loop, epsilonSq: epsilonSq)
+                guard clean.count >= 3 else { continue }
+
+                let area = shoelaceArea(polygon: clean)
+                guard area > 1e-9 else { continue }
+
+                let sample = interiorSamplePoint(for: clean)
+                guard pointInPolygon(sample, polygon: outer) else { continue }
+                guard !pointInPolygon(seed, polygon: clean) else { continue }
+                guard !holes.contains(where: { loopsNearlyEqual($0, clean, epsilonSq: epsilonSq) }) else { continue }
+
+                holes.append(clean)
+            }
+        }
+
+        holes.sort { shoelaceArea(polygon: $0) > shoelaceArea(polygon: $1) }
+        return holes
+    }
+
+    private static func collectClosedWorldLoops(
+        from geometry: [CADPrimitive], transform: Transform3D
+    ) -> [[Vector3]] {
+        var loops: [[Vector3]] = []
+
+        func transformed(_ pts: [Vector3]) -> [Vector3] {
+            pts.map { transform.transformPoint($0) }
+        }
+
+        func appendLoop(_ pts: [Vector3]) {
+            let clean = cleanLoop(pts, epsilonSq: 1e-12)
+            if clean.count >= 3 { loops.append(clean) }
+        }
+
+        func ellipseLoop(center: Vector3, majorAxis: Vector3, minorRatio: Double) -> [Vector3] {
+            let majorLen = majorAxis.magnitude
+            let minorLen = majorLen * minorRatio
+            guard majorLen > 1e-12, minorLen > 1e-12 else { return [] }
+            let rot = atan2(majorAxis.y, majorAxis.x)
+            let c = cos(rot)
+            let s = sin(rot)
+            return (0..<64).map { i in
+                let t = Double(i) * 2.0 * .pi / 64.0
+                let px = cos(t) * majorLen
+                let py = sin(t) * minorLen
+                return Vector3(
+                    x: center.x + px * c - py * s,
+                    y: center.y + px * s + py * c,
+                    z: center.z
+                )
+            }
+        }
+
+        for prim in geometry {
+            switch prim {
+            case .rect(let origin, let size, _),
+                 .fillRect(let origin, let size, _):
+                appendLoop(transformed([
+                    origin,
+                    Vector3(x: origin.x + size.x, y: origin.y, z: origin.z),
+                    Vector3(x: origin.x + size.x, y: origin.y + size.y, z: origin.z),
+                    Vector3(x: origin.x, y: origin.y + size.y, z: origin.z),
+                ]))
+
+            case .polygon(let pts, _),
+                 .fillPolygon(let pts, _):
+                appendLoop(transformed(pts))
+
+            case .fillComplexPolygon(let outer, let holes, _):
+                appendLoop(transformed(outer))
+                for hole in holes { appendLoop(transformed(hole)) }
+
+            case .gradient(let outer, let holes, _, _, _, _):
+                appendLoop(transformed(outer))
+                for hole in holes { appendLoop(transformed(hole)) }
+
+            case .circle(let center, let radius, _):
+                guard radius > 1e-12 else { break }
+                let pts = (0..<64).map { i -> Vector3 in
+                    let t = Double(i) * 2.0 * .pi / 64.0
+                    return Vector3(
+                        x: center.x + cos(t) * radius,
+                        y: center.y + sin(t) * radius,
+                        z: center.z
+                    )
+                }
+                appendLoop(transformed(pts))
+
+            case .ellipse(let center, let majorAxis, let minorRatio, _):
+                appendLoop(transformed(ellipseLoop(center: center, majorAxis: majorAxis, minorRatio: minorRatio)))
+
+            case .polyline(let path, _):
+                let pts = path.tessellatedPoints()
+                if path.isClosed || endpointsCoincident(pts, epsilonSq: 1e-8) {
+                    appendLoop(transformed(pts))
+                }
+
+            case .spline(let controlPoints, let knots, let degree, let weights, _):
+                guard controlPoints.count >= 2 else { break }
+                let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
+                let pts = NURBSEvaluator.evaluateByKnotSpans(
+                    degree: degree,
+                    knots: knots,
+                    controlPoints: controlPoints,
+                    weights: w,
+                    segmentsPerSpan: 12
+                )
+                if endpointsCoincident(pts, epsilonSq: 1e-8) {
+                    appendLoop(transformed(pts))
+                }
+
+            default:
+                break
+            }
+        }
+
+        return loops
+    }
+
+    private static func cleanLoop(_ loop: [Vector3], epsilonSq: Double) -> [Vector3] {
+        var out: [Vector3] = []
+        out.reserveCapacity(loop.count)
+
+        for p in loop {
+            if let last = out.last, (p - last).magnitudeSquared <= epsilonSq { continue }
+            out.append(Vector3(x: p.x, y: p.y, z: 0))
+        }
+
+        if out.count > 1,
+           let first = out.first,
+           let last = out.last,
+           (first - last).magnitudeSquared <= epsilonSq {
+            out.removeLast()
+        }
+
+        return out
+    }
+
+    private static func endpointsCoincident(_ pts: [Vector3], epsilonSq: Double) -> Bool {
+        guard let first = pts.first, let last = pts.last else { return false }
+        return (first - last).magnitudeSquared <= epsilonSq
+    }
+
+    private static func boundingBox(for pts: [Vector3]) -> (minX: Double, minY: Double, maxX: Double, maxY: Double) {
+        var minX = Double.infinity
+        var minY = Double.infinity
+        var maxX = -Double.infinity
+        var maxY = -Double.infinity
+
+        for p in pts {
+            minX = min(minX, p.x)
+            minY = min(minY, p.y)
+            maxX = max(maxX, p.x)
+            maxY = max(maxY, p.y)
+        }
+
+        return (minX, minY, maxX, maxY)
+    }
+
+    private static func interiorSamplePoint(for loop: [Vector3]) -> Vector3 {
+        var sx = 0.0
+        var sy = 0.0
+        for p in loop {
+            sx += p.x
+            sy += p.y
+        }
+        return Vector3(x: sx / Double(loop.count), y: sy / Double(loop.count), z: 0)
+    }
+
+    private static func pointInPolygon(_ point: Vector3, polygon: [Vector3]) -> Bool {
+        guard polygon.count >= 3 else { return false }
+
+        var inside = false
+        var j = polygon.count - 1
+        for i in 0..<polygon.count {
+            let pi = polygon[i]
+            let pj = polygon[j]
+            if ((pi.y > point.y) != (pj.y > point.y)) {
+                let denom = pj.y - pi.y
+                if abs(denom) > 1e-12 {
+                    let x = (pj.x - pi.x) * (point.y - pi.y) / denom + pi.x
+                    if point.x < x { inside.toggle() }
+                }
+            }
+            j = i
+        }
+        return inside
+    }
+
+    private static func loopsNearlyEqual(_ a: [Vector3], _ b: [Vector3], epsilonSq: Double) -> Bool {
+        guard a.count >= 3, b.count >= 3 else { return false }
+        let areaA = shoelaceArea(polygon: a)
+        let areaB = shoelaceArea(polygon: b)
+        guard abs(areaA - areaB) <= max(1e-7, max(areaA, areaB) * 1e-5) else { return false }
+
+        let boxA = boundingBox(for: a)
+        let boxB = boundingBox(for: b)
+        let tol = max(sqrt(epsilonSq) * 10.0, 1e-5)
+        return abs(boxA.minX - boxB.minX) <= tol
+            && abs(boxA.minY - boxB.minY) <= tol
+            && abs(boxA.maxX - boxB.maxX) <= tol
+            && abs(boxA.maxY - boxB.maxY) <= tol
+    }
+
     /// Collect all world-space line segments from primitive geometry.
     private static func collectWorldEdges(
         from geometry: [CADPrimitive], transform: Transform3D, handle: UUID
@@ -304,6 +577,25 @@ public enum CADBoundaryDetector {
 
             case .ellipse(_, _, _, _):
                 break  // Ellipses are approximated later if needed.
+
+            case .spline(let controlPoints, let knots, let degree, let weights, _):
+                let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
+                // 12 segments per knot span matches the render path density — keeps edge count
+                // manageable so the wall-follower stays under maxEdgeCount even for complex splines.
+                let evaluated = NURBSEvaluator.evaluateByKnotSpans(
+                    degree: degree, knots: knots,
+                    controlPoints: controlPoints, weights: w, segmentsPerSpan: 12)
+                guard evaluated.count >= 2 else { break }
+                let wpts = evaluated.map { transform.transformPoint($0) }
+                for i in 0..<(wpts.count - 1) {
+                    edges.append(Edge(a: wpts[i], b: wpts[i + 1], entityHandle: handle))
+                }
+                // Only append closing edge if endpoints are not already coincident.
+                // Closed splines produce coincident start/end points via evaluateByKnotSpans;
+                // a zero-length edge would break the wall-follower's atan2 angle heuristic.
+                if let first = wpts.first, let last = wpts.last, first.distance(to: last) > 1e-6 {
+                    edges.append(Edge(a: last, b: first, entityHandle: handle))
+                }
 
             default:
                 break

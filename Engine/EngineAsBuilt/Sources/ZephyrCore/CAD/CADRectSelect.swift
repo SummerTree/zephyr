@@ -254,7 +254,7 @@ public enum CADRectSelect {
             }
             return false
 
-        case .hatch(let boundary, _, _, _, _):
+        case .hatch(let boundary, _, _, _, _, _):
             let wpts = boundary.map { transform.transformPoint($0) }
             guard wpts.count >= 3 else { return false }
             for i in 0..<wpts.count {

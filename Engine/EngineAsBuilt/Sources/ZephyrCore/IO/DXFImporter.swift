@@ -838,8 +838,8 @@ public enum DXFImporter {
                                    degree: degree, weights: weights, color: color))
             case let .ellipse(center, majorAxis, minorRatio, color):
                 out.append(.ellipse(center: tp(center), majorAxis: tp(majorAxis), minorRatio: minorRatio, color: color))
-            case let .hatch(boundary, pattern, scale, angle, color):
-                out.append(.hatch(boundary: boundary.map(tp), pattern: pattern, scale: scale, angle: angle + rot, color: color))
+            case let .hatch(boundary, pattern, scale, angle, color, backgroundColor):
+                out.append(.hatch(boundary: boundary.map(tp), pattern: pattern, scale: scale, angle: angle + rot, color: color, backgroundColor: backgroundColor))
             case let .ray(start, direction, color):
                 out.append(.ray(start: tp(start), direction: tp(direction), color: color))
             case let .image(insertion, uAxis, vAxis, imageName, clipBoundary, tint):

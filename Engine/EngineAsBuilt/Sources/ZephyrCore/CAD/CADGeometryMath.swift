@@ -400,6 +400,15 @@ public enum CADGeometryMath {
 
 
 
+    /// Determines if a primitive spline can be treated as a closed perimeter boundary.
+    /// Checks whether the first and last control points are coincident within the given tolerance.
+    public static func isSplineClosed(controlPoints: [Vector3], tolerance: Double = 1e-6) -> Bool {
+        guard controlPoints.count >= 3,
+              let first = controlPoints.first,
+              let last = controlPoints.last else { return false }
+        return first.distance(to: last) <= tolerance
+    }
+
     /// Regenerate tessellated circle points from local parameters + world transform.
     public static func regenCirclePoints(
         rp: RenderPrimitive, center: Vector3, radius: Double, transform: Transform3D
@@ -552,7 +561,7 @@ public enum CADGeometryMath {
                 Vector3(x: wc.x - sin(rot) * halfMinor, y: wc.y + cos(rot) * halfMinor, z: wc.z),
                 Vector3(x: wc.x + sin(rot) * halfMinor, y: wc.y - cos(rot) * halfMinor, z: wc.z),
             ]
-        case .hatch(let boundary, _, _, _, _):
+        case .hatch(let boundary, _, _, _, _, _):
             return boundary.map { transform.transformPoint($0) }
         case .ray(let start, let direction, _):
             let ws = transform.transformPoint(start)
@@ -654,8 +663,8 @@ public enum CADGeometryMath {
                                    degree: degree, weights: weights, color: color))
             case let .ellipse(center, majorAxis, minorRatio, color):
                 out.append(.ellipse(center: tp(center), majorAxis: tp(majorAxis), minorRatio: minorRatio, color: color))
-            case let .hatch(boundary, pattern, scale, angle, color):
-                out.append(.hatch(boundary: boundary.map(tp), pattern: pattern, scale: scale, angle: angle + rot, color: color))
+            case let .hatch(boundary, pattern, scale, angle, color, backgroundColor):
+                out.append(.hatch(boundary: boundary.map(tp), pattern: pattern, scale: scale, angle: angle + rot, color: color, backgroundColor: backgroundColor))
             case let .ray(start, direction, color):
                 out.append(.ray(start: tp(start), direction: tp(direction), color: color))
             case let .image(insertion, uAxis, vAxis, imageName, clipBoundary, tint):

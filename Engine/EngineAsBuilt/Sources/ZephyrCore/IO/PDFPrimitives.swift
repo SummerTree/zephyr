@@ -247,7 +247,7 @@ enum PDFPrimitives {
             subpath(pts, close: false, to: cb)
             cb.raw("S\n")
 
-        case .hatch(let boundary, let pat, let hatchScale, let hatchAngle, _):
+        case .hatch(let boundary, let pat, let hatchScale, let hatchAngle, _, _):
             guard boundary.count >= 3 else { break }
             if pat.uppercased() == "SOLID" || pat.isEmpty {
                 subpath(boundary, close: true, to: cb)
@@ -256,11 +256,14 @@ enum PDFPrimitives {
                 // Patterned hatch: use the same AutoCAD-style pattern registry
                 // as the renderer so ANSI31-ANSI38, scale, angle, and dash segments
                 // match the screen path.
+                let diag = (boundary.map { $0.x }.max()! - boundary.map { $0.x }.min()!) +
+                           (boundary.map { $0.y }.max()! - boundary.map { $0.y }.min()!)
                 let hatchLines = DXFHatchGenerator.generatePatternHatch(
                     polygon: boundary,
                     patternName: pat,
                     scale: hatchScale,
-                    angleDegrees: hatchAngle
+                    angleDegrees: hatchAngle * 180.0 / .pi,
+                    minimumSpacing: max(diag / 200.0, 1.0)
                 )
                 for hline in hatchLines {
                     switch hline {
@@ -394,7 +397,7 @@ enum PDFPrimitives {
             return c
         case .text(_, _, _, _, _, _, _, _, let c):
             return c
-        case .hatch(_, _, _, _, let c):
+        case .hatch(_, _, _, _, let c, _):
             return c
         case .ray(_, _, let c):
             return c

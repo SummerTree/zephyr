@@ -89,6 +89,17 @@ struct AppUI {
         // 6. Properties panel — shows selected entity details.
         PropertiesPanelUI.render(engine: engine)
 
+        // 6b. Hatch editing ribbon — appears when a hatch entity is selected
+        //     and no hatch creation command is active.
+        if engine.commandProcessor.activeFeatureCommand == nil,
+           engine.cadSelection.selectedCount == 1,
+           let handle = engine.cadSelection.lastSelectedHandle,
+           let entity = engine.document.entity(for: handle),
+           let localGeom = entity.localGeometry,
+           let firstPrim = localGeom.first {
+            renderHatchEditingRibbonIfNeeded(firstPrim: firstPrim, entity: entity, engine: engine)
+        }
+
         // 7. Block management panel — list/create/edit blocks.
         if engine.ui.blockPanelVisible {
             BlockPanelUI.render(engine: engine)
@@ -185,6 +196,129 @@ struct AppUI {
         // 12. Radial Navigation Tool (Artrage style)
         if engine.ui.radialNavVisible {
             RadialNavUI.render(engine: engine, dw: dw, dh: dh)
+        }
+    }
+
+    // MARK: - Hatch editing ribbon
+
+    /// When a single hatch entity is selected, show the same floating ribbon
+    /// used during creation so the user can edit properties inline.
+    private static func renderHatchEditingRibbonIfNeeded(
+        firstPrim: CADPrimitive, entity: CADEntity, engine: PhrostEngine
+    ) {
+        let pattern: String
+        let scale: Double
+        let angle: Double
+        let color: ColorRGBA?
+        let backgroundColor: ColorRGBA?
+        let gradientColor2: ColorRGBA?
+        let outerBoundary: [Vector3]
+        let holes: [[Vector3]]
+
+        switch firstPrim {
+        case .hatch(let b, let p, let s, let a, let c, let bg):
+            outerBoundary = b
+            holes = []
+            pattern = p
+            scale = s
+            angle = a
+            color = c
+            backgroundColor = bg
+            gradientColor2 = nil
+        case .gradient(let outer, let h, _, let a, let c1, let c2):
+            outerBoundary = outer
+            holes = h
+            pattern = "GRADIENT"
+            scale = 1.0
+            angle = a
+            color = c1
+            backgroundColor = nil
+            gradientColor2 = c2
+        default:
+            return
+        }
+
+        var settings = HatchRibbonUI.Settings(
+            fillType: {
+                if case .gradient = firstPrim { return 2 }
+                let p = pattern.uppercased()
+                if p == "USER" { return 3 }
+                if p == "SOLID" || p.isEmpty { return 1 }
+                return 0
+            }(),
+            patternName: {
+                if let xdataPat = entity.xdata["dxf.hatchPatternName"], case .string(let s) = xdataPat, !s.isEmpty, s != "SOLID", s != "GRADIENT", s != "USER" {
+                    return s
+                }
+                return "ANSI31"
+            }(),
+            gradientName: {
+                if case .gradient(_, _, let gName, _, _, _) = firstPrim {
+                    return gName
+                }
+                return "LINEAR"
+            }(),
+            scale: Float(scale),
+            angle: Float(angle), // angle is already radians
+            primaryColor: color,
+            backgroundColor: backgroundColor,
+            secondaryColor: gradientColor2,
+            selectionMode: 0,
+            showModeSection: false  // hide Pick Points / Select Boundary
+        )
+        let oldSettings = settings
+        HatchRibbonUI.render(&settings, engine: engine)
+        
+        // Commit changes back to the entity
+        let newScale = Double(settings.scale)
+        let newAngle = Double(settings.angle) // angle from ImGuiSliderAngle is radians
+        
+        let newPattern: String
+        switch settings.fillType {
+        case 1: newPattern = "SOLID"
+        case 2: newPattern = "GRADIENT"
+        case 3: newPattern = "USER"
+        default: newPattern = settings.patternName.uppercased()
+        }
+        
+        let newPrim: CADPrimitive
+        if settings.fillType == 2 {
+            let gName = settings.gradientName
+            newPrim = .gradient(
+                outer: outerBoundary,
+                holes: holes,
+                gradientName: gName,
+                angle: Double(settings.angle),
+                color1: settings.primaryColor ?? ColorRGBA(r: 255, g: 255, b: 255, a: 255),
+                color2: settings.secondaryColor ?? ColorRGBA(r: 255, g: 255, b: 255, a: 255)
+            )
+        } else {
+            newPrim = .hatch(
+                boundary: outerBoundary,
+                pattern: newPattern,
+                scale: newScale,
+                angle: newAngle,
+                color: settings.primaryColor,
+                backgroundColor: settings.backgroundColor
+            )
+        }
+            
+        if settings.closeRequested {
+            if settings != oldSettings {
+                var newEntity = entity
+                newEntity.xdata["dxf.hatchPatternName"] = .string(newPattern)
+                newEntity.localGeometry = [newPrim]
+                engine.document.updateEntity(newEntity)
+            }
+            engine.cadSelection.clearSelection()
+        } else {
+            if settings != oldSettings {
+                var newEntity = entity
+                newEntity.xdata["dxf.hatchPatternName"] = .string(newPattern)
+                newEntity.localGeometry = [newPrim]
+                engine.document.updateEntityLive(newEntity)
+                engine.tabManager.markActiveDirty()
+            }
         }
     }
 

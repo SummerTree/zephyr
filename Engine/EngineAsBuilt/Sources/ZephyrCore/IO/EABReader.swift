@@ -939,7 +939,7 @@ public enum EABReader {
                 let scale = r.readFloat64()
                 let angle = r.readFloat64()
                 let color = readColor()
-                prims.append(.hatch(boundary: boundary, pattern: pattern, scale: scale, angle: angle, color: color))
+                prims.append(.hatch(boundary: boundary, pattern: pattern, scale: scale, angle: angle, color: color, backgroundColor: nil))
             case 14: // ray
                 let start = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
                 let direction = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())

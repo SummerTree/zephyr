@@ -160,8 +160,8 @@ public final class CADVertexEditor {
                     let newMinorRatio = halfMajor > 1e-9 ? halfMinor / halfMajor : minorRatio
                     prim = .ellipse(center: newCenter, majorAxis: newMajorAxis, minorRatio: newMinorRatio, color: c)
                 }
-            case .hatch(_, let pattern, let scale, let angle, let c):
-                prim = .hatch(boundary: localPts, pattern: pattern, scale: scale, angle: angle, color: c)
+            case .hatch(_, let pattern, let scale, let angle, let c, _):
+                prim = .hatch(boundary: localPts, pattern: pattern, scale: scale, angle: angle, color: c, backgroundColor: nil)
             case .ray(_, _, let c):
                 if localPts.count >= 2 {
                     let dir = Vector3(x: localPts[1].x - localPts[0].x, y: localPts[1].y - localPts[0].y, z: 0)

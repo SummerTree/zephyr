@@ -241,7 +241,7 @@ public enum CADPrimitive: Hashable, Sendable {
         color: ColorRGBA? = nil
     )
     case ellipse(center: Vector3, majorAxis: Vector3, minorRatio: Double, color: ColorRGBA? = nil)
-    case hatch(boundary: [Vector3], pattern: String, scale: Double, angle: Double, color: ColorRGBA? = nil)
+    case hatch(boundary: [Vector3], pattern: String, scale: Double, angle: Double, color: ColorRGBA? = nil, backgroundColor: ColorRGBA? = nil)
     case ray(start: Vector3, direction: Vector3, color: ColorRGBA? = nil)
     case image(
         insertion: Vector3,
@@ -408,7 +408,7 @@ public struct CADBlock: Hashable, Sendable {
                 let extentY = sqrt(halfMajor * halfMajor * sinA * sinA + halfMinor * halfMinor * cosA * cosA)
                 points.append(Vector3(x: center.x - extentX, y: center.y - extentY, z: center.z))
                 points.append(Vector3(x: center.x + extentX, y: center.y + extentY, z: center.z))
-            case .hatch(let boundary, _, _, _, _):
+            case .hatch(let boundary, _, _, _, _, _):
                 points.append(contentsOf: boundary)
             case .ray(let start, _, _):
                 points.append(start)
@@ -790,7 +790,7 @@ public struct CADEntity: Entity, Snappable, AttributeAttachable, Hashable, Senda
                 pts.append(.quadrant(localPosition: Vector3(
                     x: center.x - perp.x * halfMinor, y: center.y - perp.y * halfMinor, z: center.z), index: 3))
 
-            case .hatch(let boundary, _, _, _, _):
+            case .hatch(let boundary, _, _, _, _, _):
                 addChain(boundary, closed: true)
 
             case .ray(let start, _, _):
@@ -833,7 +833,7 @@ public struct CADEntity: Entity, Snappable, AttributeAttachable, Hashable, Senda
         }
     }
 
-    internal static func computeLocalBoundingBox(
+    public static func computeLocalBoundingBox(
         blockID: UUID?, localGeometry: [CADPrimitive]?) -> BoundingBox3D? {
         if let geom = localGeometry, !geom.isEmpty {
             return CADBlock.computeBoundingBox(from: geom)

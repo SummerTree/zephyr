@@ -494,7 +494,7 @@ public final class SnapEngine {
                 case .text(let position, _, _, _, _, _, _, _, _):
                     localNearest = position
 
-                case .hatch(let boundary, _, _, _, _):
+                case .hatch(let boundary, _, _, _, _, _):
                     localNearest = CADGeometryMath.nearestPointOnPolyline(
                         to: localCursor, points: boundary, closed: true)
 

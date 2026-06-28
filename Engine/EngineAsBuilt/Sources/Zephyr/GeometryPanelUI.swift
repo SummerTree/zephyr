@@ -164,7 +164,7 @@ struct GeometryPanelUI {
                 "center (\(String(format: "%.2f", center.x)), \(String(format: "%.2f", center.y)))  major=\(String(format: "%.2f", majorLen))  ratio=\(String(format: "%.3f", minorRatio))  rot=\(String(format: "%.1f", rot))\u{00B0}  \(color.map { UIFormatting.colorStr($0) } ?? "\u{2014}")"
             )
 
-        case .hatch(let boundary, let pattern, let scale, let angle, let color):
+        case .hatch(let boundary, let pattern, let scale, let angle, let color, _):
             return (
                 "Hatch #\(i)",
                 "boundary: \(boundary.count) pts  pattern=\(pattern.isEmpty ? "SOLID" : pattern)  scale=\(String(format: "%.2f", scale))  angle=\(String(format: "%.1f", angle))\u{00B0}  \(color.map { UIFormatting.colorStr($0) } ?? "\u{2014}")"

@@ -779,7 +779,7 @@ public enum EABWriter {
                         y: center.y + cos(t) * majorLen * sin(rot) + sin(t) * minorLen * cos(rot),
                         z: center.z), color: c))
                 }
-            case .hatch(let boundary, _, _, _, let color):
+            case .hatch(let boundary, _, _, _, let color, _):
                 let c = color ?? .white
                 for pt in boundary { verts.append(PVAVertex(position: pt, color: c)) }
             case .ray(let start, let direction, let color):
@@ -1125,7 +1125,7 @@ public enum EABWriter {
                 w.writeFloat64(majorAxis.x); w.writeFloat64(majorAxis.y); w.writeFloat64(majorAxis.z)
                 w.writeFloat64(minorRatio)
                 writeColor(color)
-            case .hatch(let boundary, let pattern, let scale, let angle, let color):
+            case .hatch(let boundary, let pattern, let scale, let angle, let color, _):
                 w.writeUInt8(13)
                 w.writeUInt32(UInt32(boundary.count))
                 for pt in boundary {
