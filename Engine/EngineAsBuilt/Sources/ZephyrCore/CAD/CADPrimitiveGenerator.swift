@@ -702,23 +702,26 @@ public enum CADPrimitiveGenerator {
 
         case .hatch(let boundary, let pattern, let hatchScale, let hatchAngle, _, let backgroundColor):
             guard boundary.count >= 3 else { break }
-            let wp = boundary.map { p -> SDL_FPoint in
-                let t = transform.transformPoint(p)
-                return SDL_FPoint(x: Float(t.x), y: Float(t.y))
-            }
+            let hatchLoops = splitConnectedHatchBoundary(boundary)
             let backgroundZ = z - 0.001
             let foregroundZ = z
 
             if let bg = backgroundColor {
                 let bgColor = applyingOpacity(bg)
-                let tris = CADTessellator.triangulatePolygon(wp)
-                let bgSpec = PrimitiveSpec(type: .fillRect, points: [], rects: [], corners: tris, z: backgroundZ, color: bgColor)
-                specs.append(bgSpec)
+                specs.append(CADTessellator.computeMultiLoopFillSpecs(
+                    outer: hatchLoops.outer,
+                    holes: hatchLoops.holes,
+                    transform: transform,
+                    color: bgColor,
+                    z: backgroundZ))
             }
             if pattern.uppercased() == "SOLID" || pattern.isEmpty {
-                let tris = CADTessellator.triangulatePolygon(wp)
-                let s = PrimitiveSpec(type: .fillRect, points: [], rects: [], corners: tris, z: foregroundZ, color: finalColor)
-                specs.append(s)
+                specs.append(CADTessellator.computeMultiLoopFillSpecs(
+                    outer: hatchLoops.outer,
+                    holes: hatchLoops.holes,
+                    transform: transform,
+                    color: finalColor,
+                    z: foregroundZ))
             } else {
                 // Patterned hatch: generate line pattern with zoom-aware adaptive spacing.
                 // When zoomed out, scale up spacing so hatch lines don't explode primitive count
@@ -796,6 +799,65 @@ public enum CADPrimitiveGenerator {
             break
         }
         return specs
+    }
+
+
+    private static func splitConnectedHatchBoundary(_ boundary: [Vector3]) -> (outer: [Vector3], holes: [[Vector3]]) {
+        var points = normalizedLoop(boundary)
+        var holes: [[Vector3]] = []
+
+        while points.count >= 7 {
+            var foundBridge: (start: Int, close: Int)? = nil
+
+            if points.count > 4 {
+                outerLoop: for start in 1..<(points.count - 2) {
+                    let minClose = start + 3
+                    guard minClose < points.count - 1 else { continue }
+                    for close in minClose..<(points.count - 1) {
+                        if nearlyEqual(points[start], points[close])
+                            && nearlyEqual(points[start - 1], points[close + 1]) {
+                            foundBridge = (start, close)
+                            break outerLoop
+                        }
+                    }
+                }
+            }
+
+            guard let bridge = foundBridge else { break }
+
+            let hole = normalizedLoop(Array(points[bridge.start..<bridge.close]))
+            if hole.count >= 3 { holes.append(hole) }
+            points.removeSubrange(bridge.start...(bridge.close + 1))
+            points = removeConsecutiveDuplicates(points)
+        }
+
+        let outer = normalizedLoop(removeConsecutiveDuplicates(points))
+        if outer.count >= 3 { return (outer, holes) }
+        return (normalizedLoop(boundary), holes)
+    }
+
+    private static func normalizedLoop(_ loop: [Vector3]) -> [Vector3] {
+        var points = removeConsecutiveDuplicates(loop)
+        if points.count > 1, let first = points.first, let last = points.last, nearlyEqual(first, last) {
+            points.removeLast()
+        }
+        return points
+    }
+
+    private static func removeConsecutiveDuplicates(_ loop: [Vector3]) -> [Vector3] {
+        var result: [Vector3] = []
+        for point in loop {
+            if let last = result.last, nearlyEqual(last, point) { continue }
+            result.append(point)
+        }
+        return result
+    }
+
+    private static func nearlyEqual(_ a: Vector3, _ b: Vector3) -> Bool {
+        let dx = a.x - b.x
+        let dy = a.y - b.y
+        let dz = a.z - b.z
+        return dx * dx + dy * dy + dz * dz < 1e-12
     }
 
     /// Compute an ImageSpec from a .image CADPrimitive and entity transform.

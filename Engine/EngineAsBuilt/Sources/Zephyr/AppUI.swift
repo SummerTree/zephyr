@@ -94,10 +94,8 @@ struct AppUI {
         if engine.commandProcessor.activeFeatureCommand == nil,
            engine.cadSelection.selectedCount == 1,
            let handle = engine.cadSelection.lastSelectedHandle,
-           let entity = engine.document.entity(for: handle),
-           let localGeom = entity.localGeometry,
-           let firstPrim = localGeom.first {
-            renderHatchEditingRibbonIfNeeded(firstPrim: firstPrim, entity: entity, engine: engine)
+           let entity = engine.document.entity(for: handle) {
+            renderHatchEditingRibbonIfNeeded(entity: entity, engine: engine)
         }
 
         // 7. Block management panel — list/create/edit blocks.
@@ -201,125 +199,292 @@ struct AppUI {
 
     // MARK: - Hatch editing ribbon
 
-    /// When a single hatch entity is selected, show the same floating ribbon
-    /// used during creation so the user can edit properties inline.
-    private static func renderHatchEditingRibbonIfNeeded(
-        firstPrim: CADPrimitive, entity: CADEntity, engine: PhrostEngine
-    ) {
-        let pattern: String
-        let scale: Double
-        let angle: Double
-        let color: ColorRGBA?
-        let backgroundColor: ColorRGBA?
-        let gradientColor2: ColorRGBA?
-        let outerBoundary: [Vector3]
-        let holes: [[Vector3]]
+    private struct HatchEditPayload {
+        var fillType: Int32
+        var patternName: String
+        var gradientName: String
+        var scale: Double
+        var angle: Double
+        var primaryColor: ColorRGBA?
+        var backgroundColor: ColorRGBA?
+        var secondaryColor: ColorRGBA?
+        var outer: [Vector3]
+        var holes: [[Vector3]]
+    }
 
-        switch firstPrim {
-        case .hatch(let b, let p, let s, let a, let c, let bg):
-            outerBoundary = b
-            holes = []
-            pattern = p
-            scale = s
-            angle = a
-            color = c
-            backgroundColor = bg
-            gradientColor2 = nil
-        case .gradient(let outer, let h, _, let a, let c1, let c2):
-            outerBoundary = outer
-            holes = h
-            pattern = "GRADIENT"
-            scale = 1.0
-            angle = a
-            color = c1
-            backgroundColor = nil
-            gradientColor2 = c2
-        default:
-            return
-        }
+    private static func renderHatchEditingRibbonIfNeeded(entity: CADEntity, engine: PhrostEngine) {
+        guard let payload = hatchEditPayload(from: entity) else { return }
 
         var settings = HatchRibbonUI.Settings(
-            fillType: {
-                if case .gradient = firstPrim { return 2 }
-                let p = pattern.uppercased()
-                if p == "USER" { return 3 }
-                if p == "SOLID" || p.isEmpty { return 1 }
-                return 0
-            }(),
-            patternName: {
-                if let xdataPat = entity.xdata["dxf.hatchPatternName"], case .string(let s) = xdataPat, !s.isEmpty, s != "SOLID", s != "GRADIENT", s != "USER" {
-                    return s
-                }
-                return "ANSI31"
-            }(),
-            gradientName: {
-                if case .gradient(_, _, let gName, _, _, _) = firstPrim {
-                    return gName
-                }
-                return "LINEAR"
-            }(),
-            scale: Float(scale),
-            angle: Float(angle), // angle is already radians
-            primaryColor: color,
-            backgroundColor: backgroundColor,
-            secondaryColor: gradientColor2,
+            fillType: payload.fillType,
+            patternName: payload.patternName,
+            gradientName: payload.gradientName,
+            scale: Float(payload.scale),
+            angle: Float(payload.angle),
+            primaryColor: payload.primaryColor,
+            backgroundColor: payload.backgroundColor,
+            secondaryColor: payload.secondaryColor,
             selectionMode: 0,
-            showModeSection: false  // hide Pick Points / Select Boundary
+            showModeSection: false
         )
         let oldSettings = settings
         HatchRibbonUI.render(&settings, engine: engine)
-        
-        // Commit changes back to the entity
-        let newScale = Double(settings.scale)
-        let newAngle = Double(settings.angle) // angle from ImGuiSliderAngle is radians
-        
-        let newPattern: String
-        switch settings.fillType {
-        case 1: newPattern = "SOLID"
-        case 2: newPattern = "GRADIENT"
-        case 3: newPattern = "USER"
-        default: newPattern = settings.patternName.uppercased()
-        }
-        
-        let newPrim: CADPrimitive
-        if settings.fillType == 2 {
-            let gName = settings.gradientName
-            newPrim = .gradient(
-                outer: outerBoundary,
-                holes: holes,
-                gradientName: gName,
-                angle: Double(settings.angle),
-                color1: settings.primaryColor ?? ColorRGBA(r: 255, g: 255, b: 255, a: 255),
-                color2: settings.secondaryColor ?? ColorRGBA(r: 255, g: 255, b: 255, a: 255)
-            )
-        } else {
-            newPrim = .hatch(
-                boundary: outerBoundary,
-                pattern: newPattern,
-                scale: newScale,
-                angle: newAngle,
-                color: settings.primaryColor,
-                backgroundColor: settings.backgroundColor
-            )
-        }
-            
+
+        guard settings.closeRequested || settings != oldSettings else { return }
+
+        let newPattern = hatchPatternName(from: settings)
+        let newGeometry = buildHatchGeometry(
+            outer: payload.outer,
+            holes: payload.holes,
+            settings: settings,
+            patternName: newPattern)
+
+        var newEntity = entity
+        newEntity.xdata["dxf.hatchPatternName"] = .string(newPattern)
+        newEntity.xdata["dxf.hatchPatternType"] = .string(DXFHatchGenerator.patternKindName(for: newPattern))
+        newEntity.xdata["dxf.hatchScale"] = .double(Double(settings.scale))
+        newEntity.xdata["dxf.hatchAngle"] = .double(Double(settings.angle))
+        newEntity.xdata["dxf.hatchSpacing"] = .double(DXFHatchGenerator.effectiveSpacing(patternName: newPattern, scale: Double(settings.scale)))
+        newEntity.localGeometry = newGeometry
+
         if settings.closeRequested {
-            if settings != oldSettings {
-                var newEntity = entity
-                newEntity.xdata["dxf.hatchPatternName"] = .string(newPattern)
-                newEntity.localGeometry = [newPrim]
-                engine.document.updateEntity(newEntity)
-            }
+            engine.document.updateEntity(newEntity)
             engine.cadSelection.clearSelection()
         } else {
-            if settings != oldSettings {
-                var newEntity = entity
-                newEntity.xdata["dxf.hatchPatternName"] = .string(newPattern)
-                newEntity.localGeometry = [newPrim]
-                engine.document.updateEntityLive(newEntity)
-                engine.tabManager.markActiveDirty()
-            }
+            engine.document.updateEntityLive(newEntity)
+            engine.tabManager.markActiveDirty()
         }
+    }
+
+    private static func hatchEditPayload(from entity: CADEntity) -> HatchEditPayload? {
+        guard let geometry = entity.localGeometry else { return nil }
+
+        if let gradient = geometry.compactMap({ prim -> HatchEditPayload? in
+            guard case .gradient(let outer, let holes, let name, let angle, let c1, let c2) = prim else { return nil }
+            return HatchEditPayload(
+                fillType: 2,
+                patternName: editablePatternNameFromXData(entity) ?? "ANSI31",
+                gradientName: name,
+                scale: 1.0,
+                angle: angle,
+                primaryColor: c1,
+                backgroundColor: nil,
+                secondaryColor: c2,
+                outer: normalizedLoop(outer),
+                holes: holes.map { normalizedLoop($0) }.filter { $0.count >= 3 })
+        }).first {
+            return gradient
+        }
+
+        let hatch = geometry.compactMap { prim -> (boundary: [Vector3], pattern: String, scale: Double, angle: Double, color: ColorRGBA?, background: ColorRGBA?)? in
+            guard case .hatch(let boundary, let pattern, let scale, let angle, let color, let background) = prim else { return nil }
+            return (boundary, pattern, scale, angle, color, background)
+        }.first
+
+        let complex = geometry.compactMap { prim -> (outer: [Vector3], holes: [[Vector3]], color: ColorRGBA?)? in
+            guard case .fillComplexPolygon(let outer, let holes, let color) = prim else { return nil }
+            return (outer, holes, color)
+        }.first
+
+        let transparentLoops = geometry.compactMap { prim -> [Vector3]? in
+            guard case .polygon(let points, let color) = prim, color?.a == 0 else { return nil }
+            return normalizedLoop(points)
+        }.filter { $0.count >= 3 }
+
+        let loops: (outer: [Vector3], holes: [[Vector3]])
+        if let complex {
+            loops = (normalizedLoop(complex.outer), complex.holes.map { normalizedLoop($0) }.filter { $0.count >= 3 })
+        } else if !transparentLoops.isEmpty {
+            loops = classifyLoops(transparentLoops)
+        } else if let hatch {
+            loops = splitConnectedHatchBoundary(hatch.boundary)
+        } else {
+            return nil
+        }
+
+        guard loops.outer.count >= 3 else { return nil }
+
+        if let hatch {
+            let rawPattern = patternNameFromXData(entity) ?? hatch.pattern
+            let pattern = rawPattern.isEmpty ? "SOLID" : rawPattern.uppercased()
+            let fillType: Int32 = {
+                if pattern == "USER" { return 3 }
+                if pattern == "SOLID" { return 1 }
+                return 0
+            }()
+            return HatchEditPayload(
+                fillType: fillType,
+                patternName: pattern == "SOLID" || pattern == "GRADIENT" || pattern == "USER" ? "ANSI31" : pattern,
+                gradientName: "LINEAR",
+                scale: hatch.scale,
+                angle: hatch.angle,
+                primaryColor: hatch.color,
+                backgroundColor: complex?.color ?? hatch.background,
+                secondaryColor: nil,
+                outer: loops.outer,
+                holes: loops.holes)
+        }
+
+        guard complex != nil || isHatchEntityByXData(entity) else { return nil }
+        return HatchEditPayload(
+            fillType: 1,
+            patternName: editablePatternNameFromXData(entity) ?? "ANSI31",
+            gradientName: "LINEAR",
+            scale: 1.0,
+            angle: 0.0,
+            primaryColor: complex?.color,
+            backgroundColor: nil,
+            secondaryColor: nil,
+            outer: loops.outer,
+            holes: loops.holes)
+    }
+
+    private static func buildHatchGeometry(
+        outer: [Vector3],
+        holes: [[Vector3]],
+        settings: HatchRibbonUI.Settings,
+        patternName: String
+    ) -> [CADPrimitive] {
+        let cleanOuter = normalizedLoop(outer)
+        let cleanHoles = holes.map { normalizedLoop($0) }.filter { $0.count >= 3 }
+        let scale = Double(settings.scale)
+        let angle = Double(settings.angle)
+
+        switch settings.fillType {
+        case 2:
+            let c1 = settings.primaryColor ?? ColorRGBA(r: 255, g: 255, b: 255, a: 255)
+            let c2 = settings.secondaryColor ?? ColorRGBA(r: 255, g: 255, b: 255, a: 255)
+            return [.gradient(
+                outer: cleanOuter,
+                holes: cleanHoles,
+                gradientName: settings.gradientName,
+                angle: angle,
+                color1: c1,
+                color2: c2)]
+        case 1:
+            return [.fillComplexPolygon(outer: cleanOuter, holes: cleanHoles, color: settings.primaryColor)]
+        default:
+            var prims: [CADPrimitive] = []
+            if settings.fillType == 0, let bg = settings.backgroundColor {
+                prims.append(.fillComplexPolygon(outer: cleanOuter, holes: cleanHoles, color: bg))
+            }
+            let patternBoundary = cleanHoles.isEmpty
+                ? cleanOuter
+                : DXFHatchGenerator.connectHoles(outer: cleanOuter, holes: cleanHoles)
+            prims.append(.hatch(
+                boundary: patternBoundary,
+                pattern: patternName,
+                scale: scale,
+                angle: angle,
+                color: settings.primaryColor,
+                backgroundColor: nil))
+            return prims
+        }
+    }
+
+    private static func hatchPatternName(from settings: HatchRibbonUI.Settings) -> String {
+        switch settings.fillType {
+        case 1: return "SOLID"
+        case 2: return "GRADIENT"
+        case 3: return "USER"
+        default:
+            let p = settings.patternName.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            return p.isEmpty ? "ANSI31" : p
+        }
+    }
+
+    private static func patternNameFromXData(_ entity: CADEntity) -> String? {
+        guard case .string(let value)? = entity.xdata["dxf.hatchPatternName"] else { return nil }
+        let pattern = value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return pattern.isEmpty ? nil : pattern
+    }
+
+    private static func editablePatternNameFromXData(_ entity: CADEntity) -> String? {
+        guard let pattern = patternNameFromXData(entity), pattern != "SOLID", pattern != "GRADIENT", pattern != "USER" else { return nil }
+        return pattern
+    }
+
+    private static func isHatchEntityByXData(_ entity: CADEntity) -> Bool {
+        entity.xdata.keys.contains { $0.hasPrefix("dxf.hatch") }
+    }
+
+    private static func classifyLoops(_ loops: [[Vector3]]) -> (outer: [Vector3], holes: [[Vector3]]) {
+        guard let outerIndex = loops.indices.max(by: { abs(loopArea(loops[$0])) < abs(loopArea(loops[$1])) }) else {
+            return ([], [])
+        }
+        let outer = normalizedLoop(loops[outerIndex])
+        let holes = loops.indices.filter { $0 != outerIndex }.map { normalizedLoop(loops[$0]) }.filter { $0.count >= 3 }
+        return (outer, holes)
+    }
+
+    private static func splitConnectedHatchBoundary(_ boundary: [Vector3]) -> (outer: [Vector3], holes: [[Vector3]]) {
+        var points = normalizedLoop(boundary)
+        var holes: [[Vector3]] = []
+
+        while points.count >= 7 {
+            var foundBridge: (start: Int, close: Int)? = nil
+
+            if points.count > 4 {
+                outerLoop: for start in 1..<(points.count - 2) {
+                    let minClose = start + 3
+                    guard minClose < points.count - 1 else { continue }
+                    for close in minClose..<(points.count - 1) {
+                        if nearlyEqual(points[start], points[close])
+                            && nearlyEqual(points[start - 1], points[close + 1]) {
+                            foundBridge = (start, close)
+                            break outerLoop
+                        }
+                    }
+                }
+            }
+
+            guard let bridge = foundBridge else { break }
+
+            let hole = normalizedLoop(Array(points[bridge.start..<bridge.close]))
+            if hole.count >= 3 { holes.append(hole) }
+            points.removeSubrange(bridge.start...(bridge.close + 1))
+            points = removeConsecutiveDuplicates(points)
+        }
+
+        let outer = normalizedLoop(removeConsecutiveDuplicates(points))
+        if outer.count >= 3 { return (outer, holes) }
+        return (normalizedLoop(boundary), holes)
+    }
+
+    private static func normalizedLoop(_ loop: [Vector3]) -> [Vector3] {
+        var points = removeConsecutiveDuplicates(loop)
+        if points.count > 1, let first = points.first, let last = points.last, nearlyEqual(first, last) {
+            points.removeLast()
+        }
+        return points
+    }
+
+    private static func removeConsecutiveDuplicates(_ loop: [Vector3]) -> [Vector3] {
+        var result: [Vector3] = []
+        for point in loop {
+            if let last = result.last, nearlyEqual(last, point) { continue }
+            result.append(point)
+        }
+        return result
+    }
+
+    private static func nearlyEqual(_ a: Vector3, _ b: Vector3) -> Bool {
+        let dx = a.x - b.x
+        let dy = a.y - b.y
+        let dz = a.z - b.z
+        return dx * dx + dy * dy + dz * dz < 1e-12
+    }
+
+    private static func loopArea(_ loop: [Vector3]) -> Double {
+        let points = normalizedLoop(loop)
+        guard points.count >= 3 else { return 0 }
+        var area = 0.0
+        for i in points.indices {
+            let p1 = points[i]
+            let p2 = points[(i + 1) % points.count]
+            area += p1.x * p2.y - p2.x * p1.y
+        }
+        return area * 0.5
     }
 
 }

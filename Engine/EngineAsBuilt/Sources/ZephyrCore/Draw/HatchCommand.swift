@@ -194,24 +194,134 @@ public final class HatchCommand: FeatureCommand {
     /// Extract the outer boundary and holes from an existing hatch entity.
     private func extractBoundary(from entity: CADEntity) -> (outer: [Vector3], holes: [[Vector3]])? {
         guard let geometry = entity.localGeometry else { return nil }
-        var outer: [Vector3] = []
-        var allHoles: [[Vector3]] = []
-        for prim in geometry {
-            switch prim {
-            case .fillComplexPolygon(let o, let h, _):
-                if outer.isEmpty { outer = o }
-                allHoles.append(contentsOf: h)
-            case .gradient(let o, let h, _, _, _, _):
-                if outer.isEmpty { outer = o }
-                allHoles.append(contentsOf: h)
-            case .hatch(let b, _, _, _, _, _):
-                if outer.isEmpty { outer = b }
-            default:
-                break
-            }
+
+        if let complex = geometry.compactMap({ prim -> (outer: [Vector3], holes: [[Vector3]])? in
+            guard case .fillComplexPolygon(let outer, let holes, _) = prim else { return nil }
+            return (normalizedLoop(outer), holes.map { normalizedLoop($0) }.filter { $0.count >= 3 })
+        }).first {
+            return complex.outer.count >= 3 ? complex : nil
         }
-        guard !outer.isEmpty else { return nil }
-        return (outer, allHoles)
+
+        if let gradient = geometry.compactMap({ prim -> (outer: [Vector3], holes: [[Vector3]])? in
+            guard case .gradient(let outer, let holes, _, _, _, _) = prim else { return nil }
+            return (normalizedLoop(outer), holes.map { normalizedLoop($0) }.filter { $0.count >= 3 })
+        }).first {
+            return gradient.outer.count >= 3 ? gradient : nil
+        }
+
+        let transparentLoops = geometry.compactMap { prim -> [Vector3]? in
+            guard case .polygon(let points, let color) = prim, color?.a == 0 else { return nil }
+            return normalizedLoop(points)
+        }.filter { $0.count >= 3 }
+        if !transparentLoops.isEmpty {
+            let classified = classifyLoops(transparentLoops)
+            return classified.outer.count >= 3 ? classified : nil
+        }
+
+        if let hatchBoundary = geometry.compactMap({ prim -> [Vector3]? in
+            guard case .hatch(let boundary, _, _, _, _, _) = prim else { return nil }
+            return boundary
+        }).first {
+            let split = splitConnectedHatchBoundary(hatchBoundary)
+            return split.outer.count >= 3 ? split : nil
+        }
+
+        return nil
+    }
+
+    private func applyHatchXData(to entity: inout CADEntity) {
+        let pattern: String
+        switch fillType {
+        case 0: pattern = patternName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "ANSI31" : patternName.uppercased()
+        case 2: pattern = "GRADIENT"
+        default: pattern = "SOLID"
+        }
+        let scale = Double(hatchScale)
+        entity.xdata["dxf.hatchPatternName"] = .string(pattern)
+        entity.xdata["dxf.hatchPatternType"] = .string(DXFHatchGenerator.patternKindName(for: pattern))
+        entity.xdata["dxf.hatchScale"] = .double(scale)
+        entity.xdata["dxf.hatchAngle"] = .double(Double(hatchAngle))
+        entity.xdata["dxf.hatchSpacing"] = .double(DXFHatchGenerator.effectiveSpacing(patternName: pattern, scale: scale))
+        entity.xdata["dxf.hatchAssociative"] = .bool(false)
+    }
+
+    private func classifyLoops(_ loops: [[Vector3]]) -> (outer: [Vector3], holes: [[Vector3]]) {
+        guard let outerIndex = loops.indices.max(by: { abs(loopArea(loops[$0])) < abs(loopArea(loops[$1])) }) else {
+            return ([], [])
+        }
+        let outer = normalizedLoop(loops[outerIndex])
+        let holes = loops.indices.filter { $0 != outerIndex }.map { normalizedLoop(loops[$0]) }.filter { $0.count >= 3 }
+        return (outer, holes)
+    }
+
+    private func splitConnectedHatchBoundary(_ boundary: [Vector3]) -> (outer: [Vector3], holes: [[Vector3]]) {
+        var points = normalizedLoop(boundary)
+        var holes: [[Vector3]] = []
+
+        while points.count >= 7 {
+            var foundBridge: (start: Int, close: Int)? = nil
+
+            if points.count > 4 {
+                outerLoop: for start in 1..<(points.count - 2) {
+                    let minClose = start + 3
+                    guard minClose < points.count - 1 else { continue }
+                    for close in minClose..<(points.count - 1) {
+                        if nearlyEqual(points[start], points[close])
+                            && nearlyEqual(points[start - 1], points[close + 1]) {
+                            foundBridge = (start, close)
+                            break outerLoop
+                        }
+                    }
+                }
+            }
+
+            guard let bridge = foundBridge else { break }
+
+            let hole = normalizedLoop(Array(points[bridge.start..<bridge.close]))
+            if hole.count >= 3 { holes.append(hole) }
+            points.removeSubrange(bridge.start...(bridge.close + 1))
+            points = removeConsecutiveDuplicates(points)
+        }
+
+        let outer = normalizedLoop(removeConsecutiveDuplicates(points))
+        if outer.count >= 3 { return (outer, holes) }
+        return (normalizedLoop(boundary), holes)
+    }
+
+    private func normalizedLoop(_ loop: [Vector3]) -> [Vector3] {
+        var points = removeConsecutiveDuplicates(loop)
+        if points.count > 1, let first = points.first, let last = points.last, nearlyEqual(first, last) {
+            points.removeLast()
+        }
+        return points
+    }
+
+    private func removeConsecutiveDuplicates(_ loop: [Vector3]) -> [Vector3] {
+        var result: [Vector3] = []
+        for point in loop {
+            if let last = result.last, nearlyEqual(last, point) { continue }
+            result.append(point)
+        }
+        return result
+    }
+
+    private func nearlyEqual(_ a: Vector3, _ b: Vector3) -> Bool {
+        let dx = a.x - b.x
+        let dy = a.y - b.y
+        let dz = a.z - b.z
+        return dx * dx + dy * dy + dz * dz < 1e-12
+    }
+
+    private func loopArea(_ loop: [Vector3]) -> Double {
+        let points = normalizedLoop(loop)
+        guard points.count >= 3 else { return 0 }
+        var area = 0.0
+        for i in points.indices {
+            let p1 = points[i]
+            let p2 = points[(i + 1) % points.count]
+            area += p1.x * p2.y - p2.x * p1.y
+        }
+        return area * 0.5
     }
 
     /// Apply the current ribbon settings to the selected hatch entity in-place.
@@ -223,7 +333,10 @@ public final class HatchCommand: FeatureCommand {
             return
         }
         let newPrims = buildPrimitives(boundary: boundary, holes: holes)
-        engine.document.updateEntityGeometry(for: handle, geometry: newPrims)
+        var updated = entity
+        applyHatchXData(to: &updated)
+        updated.localGeometry = newPrims
+        engine.document.updateEntity(updated)
         engine.tabManager.markActiveDirty()
         processor.commandPrompt = "Hatch updated. Click inside another area or press Esc/Enter."
     }
@@ -238,7 +351,8 @@ public final class HatchCommand: FeatureCommand {
         let layerID = engine.document.activeLayerID
             ?? engine.document.allLayers.first?.handle
             ?? UUID()
-        let entity = CADEntity(layerID: layerID, localGeometry: hatchPrims)
+        var entity = CADEntity(layerID: layerID, localGeometry: hatchPrims)
+        applyHatchXData(to: &entity)
 
         engine.document.addEntity(entity)
         engine.tabManager.markActiveDirty()
