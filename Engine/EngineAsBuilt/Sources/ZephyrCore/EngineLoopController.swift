@@ -432,12 +432,28 @@ public final class EngineLoopController {
                     let dimStart = Vector3(x: metadata.defPoint2.x + perp.x * offset, y: metadata.defPoint2.y + perp.y * offset, z: 0)
                     let dimEnd = Vector3(x: p2.x + perp.x * offset, y: p2.y + perp.y * offset, z: 0)
                     metadata.textMidpoint = Vector3(x: (dimStart.x + dimEnd.x) / 2.0, y: (dimStart.y + dimEnd.y) / 2.0, z: 0)
+                } else if case .radius = metadata.type {
+                    // arcPoint (defPoint2) moved — slide text along radial line from center
+                    let center = metadata.defPoint
+                    let dir = Vector3(x: metadata.defPoint2.x - center.x, y: metadata.defPoint2.y - center.y, z: 0).normalized
+                    let dist = hypot(metadata.textMidpoint.x - center.x, metadata.textMidpoint.y - center.y)
+                    metadata.textMidpoint = Vector3(x: center.x + dir.x * dist, y: center.y + dir.y * dist, z: 0)
+                } else if case .diameter = metadata.type {
+                    // Recompute direction from updated endpoints
+                    let dir = Vector3(x: metadata.defPoint2.x - metadata.defPoint.x, y: metadata.defPoint2.y - metadata.defPoint.y, z: 0).normalized
+                    let mid = Vector3(x: (metadata.defPoint.x + metadata.defPoint2.x) / 2.0, y: (metadata.defPoint.y + metadata.defPoint2.y) / 2.0, z: 0)
+                    let dist = hypot(metadata.textMidpoint.x - mid.x, metadata.textMidpoint.y - mid.y)
+                    metadata.textMidpoint = Vector3(x: mid.x + dir.x * dist, y: mid.y + dir.y * dist, z: 0)
                 }
-                // Recompute measurement for linear/aligned
+                // Recompute measurement
                 if case .linearOrRotated = metadata.type, let p2 = metadata.defPoint3 {
                     metadata.measurement = hypot(metadata.defPoint2.x - p2.x, metadata.defPoint2.y - p2.y)
                 } else if case .aligned = metadata.type, let p2 = metadata.defPoint3 {
                     metadata.measurement = hypot(metadata.defPoint2.x - p2.x, metadata.defPoint2.y - p2.y)
+                } else if case .radius = metadata.type {
+                    metadata.measurement = hypot(metadata.defPoint2.x - metadata.defPoint.x, metadata.defPoint2.y - metadata.defPoint.y)
+                } else if case .diameter = metadata.type {
+                    metadata.measurement = hypot(metadata.defPoint2.x - metadata.defPoint.x, metadata.defPoint2.y - metadata.defPoint.y)
                 }
                 // Regenerate dimension primitives
                 let style = metadata.styleOverrides ?? engine.document.dimensionStyles[metadata.styleName] ?? CADDimensionStyle.default
@@ -485,6 +501,20 @@ public final class EngineLoopController {
                     constrainedTextMid = Vector3(
                         x: metadata.defPoint2.x + dir.x * projT + perp.x * offset,
                         y: metadata.defPoint2.y + dir.y * projT + perp.y * offset, z: 0)
+                } else if case .radius = metadata.type {
+                    // Constrain text along the radial line from center to arcPoint
+                    let center = metadata.defPoint
+                    let dir = Vector3(x: metadata.defPoint2.x - center.x, y: metadata.defPoint2.y - center.y, z: 0).normalized
+                    let cv = Vector3(x: cursor.x - center.x, y: cursor.y - center.y, z: 0)
+                    let projT = cv.x * dir.x + cv.y * dir.y
+                    constrainedTextMid = Vector3(x: center.x + dir.x * projT, y: center.y + dir.y * projT, z: 0)
+                } else if case .diameter = metadata.type {
+                    // Constrain text along the diameter line direction
+                    let dir = Vector3(x: metadata.defPoint2.x - metadata.defPoint.x, y: metadata.defPoint2.y - metadata.defPoint.y, z: 0).normalized
+                    let mid = Vector3(x: (metadata.defPoint.x + metadata.defPoint2.x) / 2.0, y: (metadata.defPoint.y + metadata.defPoint2.y) / 2.0, z: 0)
+                    let cv = Vector3(x: cursor.x - mid.x, y: cursor.y - mid.y, z: 0)
+                    let projT = cv.x * dir.x + cv.y * dir.y
+                    constrainedTextMid = Vector3(x: mid.x + dir.x * projT, y: mid.y + dir.y * projT, z: 0)
                 }
                 metadata.textMidpoint = constrainedTextMid
                 let style = metadata.styleOverrides ?? engine.document.dimensionStyles[metadata.styleName] ?? CADDimensionStyle.default

@@ -289,18 +289,24 @@ public enum CADGripSystem {
                 handle: handle, grip: type, screenPos: sp, worldPos: worldPos))
         }
 
-        // Text midpoint grip — reposition text along/around the dimension line
+        // Text midpoint grip — reposition text along the dimension line
         addGrip(.center, worldPos: metadata.textMidpoint)
 
-        // Dimension line position grip — move the dimension line closer/farther
-        addGrip(.vertex(entity: handle, index: 1000), worldPos: metadata.defPoint)
-
-        // First extension line origin
-        addGrip(.vertex(entity: handle, index: 1001), worldPos: metadata.defPoint2)
-
-        // Second extension line origin (if present)
-        if let p3 = metadata.defPoint3 {
-            addGrip(.vertex(entity: handle, index: 1002), worldPos: p3)
+        // For radius: defPoint = center (fixed), defPoint2 = arcPoint (movable along circle)
+        // For diameter: defPoint & defPoint2 = endpoints of diameter line
+        // For linear/aligned: defPoint = dim line position, defPoint2/3 = extension origins
+        if metadata.type == .radius {
+            // Only arcPoint grip (center is fixed to the arc/circle)
+            addGrip(.vertex(entity: handle, index: 1001), worldPos: metadata.defPoint2)
+        } else {
+            // Dimension line position / first point grip
+            addGrip(.vertex(entity: handle, index: 1000), worldPos: metadata.defPoint)
+            // Second point grip
+            addGrip(.vertex(entity: handle, index: 1001), worldPos: metadata.defPoint2)
+            // Third point grip (if present, for linear/aligned/angular)
+            if let p3 = metadata.defPoint3 {
+                addGrip(.vertex(entity: handle, index: 1002), worldPos: p3)
+            }
         }
 
         return grips

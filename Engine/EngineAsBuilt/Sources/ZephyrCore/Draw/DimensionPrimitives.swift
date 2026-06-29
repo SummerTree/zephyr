@@ -222,14 +222,54 @@ public enum DimensionPrimitives {
             primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: 0, style: style, color: color))
             
         case .diameter, .radius:
-            let center = metadata.defPoint2
-            let dimPos = metadata.defPoint
+            // For radius:  defPoint = center,  defPoint2 = arcPoint
+            // For diameter: defPoint = one end of diameter line, defPoint2 = other end
+            let isRadius = metadata.type == .radius
+            let center: Vector3
+            let arcPoint: Vector3
+            if isRadius {
+                center = metadata.defPoint
+                arcPoint = metadata.defPoint2
+            } else {
+                // Diameter: compute center as midpoint
+                let p1 = metadata.defPoint
+                let p2 = metadata.defPoint2
+                center = Vector3(x: (p1.x + p2.x) / 2.0, y: (p1.y + p2.y) / 2.0, z: 0)
+                arcPoint = p2
+            }
             
-            let p1 = center
-            let p2 = Vector3(x: dimPos.x, y: dimPos.y, z: 0)
+            let n = Vector3(x: arcPoint.x - center.x, y: arcPoint.y - center.y, z: 0).normalized
+            let textLoc = metadata.textMidpoint
+            let prefix = isRadius ? "R" : "\u{2300}"
+            let valueStr = metadata.textOverride ?? style.formatMeasurement(metadata.measurement, prefix: prefix)
             
-            primitives.append(contentsOf: dimensionLine(from: p1, to: p2, arrowAtStart: false, arrowAtEnd: true, style: style, color: color))
-            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: 0, style: style, color: color))
+            if isRadius {
+                // Leader line from arc point to text location
+                primitives.append(.line(start: arcPoint, end: textLoc, color: color))
+                // Arrowhead at arc point pointing towards center
+                primitives.append(contentsOf: arrowhead(tip: arcPoint, direction: Vector3(x: -n.x, y: -n.y, z: 0), size: style.arrowSize, color: color))
+            } else {
+                // Diameter line across the circle
+                let p1 = metadata.defPoint
+                let p2 = metadata.defPoint2
+                primitives.append(.line(start: p1, end: p2, color: color))
+                // Leader line from p2 to text
+                primitives.append(.line(start: p2, end: textLoc, color: color))
+                // Arrowheads at both ends
+                primitives.append(contentsOf: arrowhead(tip: p1, direction: n, size: style.arrowSize, color: color))
+                primitives.append(contentsOf: arrowhead(tip: p2, direction: Vector3(x: -n.x, y: -n.y, z: 0), size: style.arrowSize, color: color))
+            }
+            
+            // Horizontal text tail
+            let textTailLength: Double = 5.0
+            let tailEnd = Vector3(x: textLoc.x + (n.x >= 0 ? textTailLength : -textTailLength), y: textLoc.y, z: 0)
+            primitives.append(.line(start: textLoc, end: tailEnd, color: color))
+            
+            // Text positioned near the tail
+            let textPos = Vector3(x: textLoc.x + (n.x >= 0 ? textTailLength / 2 : -textTailLength / 2), y: textLoc.y + style.textOffset, z: 0)
+            primitives.append(dimensionText(position: textPos, value: valueStr, rotation: 0, style: style, color: color))
+            
+            return primitives
             
         default:
             // Fallback just draws text
