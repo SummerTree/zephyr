@@ -190,6 +190,12 @@ Adaptive subdivision keyed to screen pixels. Curves stay smooth at any zoom, bou
 ### Grid
 - Configurable grid with `GRID`, `GRID SPACING <value>`, `GRID ORIGIN <x> <y>`, `GRID SNAP` commands.
 
+### Document Settings
+
+| Command | Alias | Description |
+|---|---|---|
+| UNITS | `UNIT`, `DDUNITS` | Set or display the drawing base unit (mm, cm, m, in, ft, yd). Flows through to PDF `/Measure` dictionary for Bluebeam Revu, DXF `$INSUNITS`, and EAB file header. |
+
 ## Nightly Builds
 
 Same links as above — all four platform/architecture combinations updated on every push.

@@ -236,6 +236,7 @@ public struct CommandDescriptor: Sendable {
         CommandDescriptor(canonicalName: "OTRACK",          aliases: [],                category: .settings, syntax: "", description: "Toggle object snap tracking on/off"),
         CommandDescriptor(canonicalName: "EXTENSION",       aliases: ["EXT"],           category: .settings, syntax: "", description: "Toggle extension snapping on/off"),
         CommandDescriptor(canonicalName: "ORTHO",          aliases: [],                category: .settings, syntax: "", description: "Toggle ortho mode (F8) — constrain cursor to cardinal axes"),
+        CommandDescriptor(canonicalName: "UNITS",          aliases: ["UNIT", "DDUNITS"], category: .settings, syntax: "[mm|cm|m|in|ft|yd]", description: "Set or display the drawing base unit"),
     ]
 }
 
@@ -1010,6 +1011,33 @@ public final class CADCommandProcessor {
             engine.snap.orthoEnabled.toggle()
             print("[CAD] Ortho: \(engine.snap.orthoEnabled ? "ON" : "OFF")")
             clearCommand()
+        // --- Drawing Units ---
+        case "UNITS", "UNIT", "DDUNITS":
+            guard let engine = engine else { clearCommand(); return }
+            print("[CAD] Current drawing unit: \(engine.document.unit.description) (\(engine.document.unit.dxfINSUNITS == 1 ? "inches" : engine.document.unit.dxfINSUNITS == 2 ? "feet" : engine.document.unit.dxfINSUNITS == 3 ? "yards" : engine.document.unit.dxfINSUNITS == 4 ? "millimeters" : engine.document.unit.dxfINSUNITS == 5 ? "centimeters" : "meters"))")
+            print("[CAD] Available units: mm, cm, m, in, ft, yd")
+            print("[CAD] Usage: UNITS <unit>")
+            clearCommand()
+        case _ where upper.hasPrefix("UNITS ") || upper.hasPrefix("UNIT ") || upper.hasPrefix("DDUNITS "):
+            guard let engine = engine else { clearCommand(); return }
+            let prefixLen: Int
+            if upper.hasPrefix("UNITS ") { prefixLen = 6 }
+            else if upper.hasPrefix("DDUNITS ") { prefixLen = 8 }
+            else { prefixLen = 5 }  // "UNIT "
+            let arg = String(upper.dropFirst(prefixLen)).trimmingCharacters(in: .whitespaces)
+            guard let unit = parseUnit(arg) else {
+                print("[CAD] Unknown unit '\(arg)'. Available: mm, cm, m, in, ft, yd")
+                clearCommand()
+                break
+            }
+            if engine.document.unit != unit {
+                engine.document.unit = unit
+                engine.document.markEdited(regenerate: false)
+                print("[CAD] Drawing unit set to \(unit.description) (\(arg))")
+            } else {
+                print("[CAD] Drawing unit is already \(unit.description)")
+            }
+            clearCommand()
         case "LM", "LAYMOVE", "LAYERMOVE":
             // Layer Move: reassign selected entities with autocomplete popup
             guard let engine = engine else { clearCommand(); return }
@@ -1114,6 +1142,26 @@ public final class CADCommandProcessor {
             return true
         default:
             return false
+        }
+    }
+
+    /// Parse a unit string (case-insensitive) to a CADUnit, or nil if unrecognized.
+    private func parseUnit(_ raw: String) -> CADUnit? {
+        switch raw {
+        case "MM", "MILLIMETER", "MILLIMETERS", "MILLIMETRE", "MILLIMETRES":
+            return .millimeter
+        case "CM", "CENTIMETER", "CENTIMETERS", "CENTIMETRE", "CENTIMETRES":
+            return .centimeter
+        case "M", "METER", "METERS", "METRE", "METRES":
+            return .meter
+        case "IN", "INCH", "INCHES":
+            return .inch
+        case "FT", "FOOT", "FEET":
+            return .foot
+        case "YD", "YARD", "YARDS":
+            return .yard
+        default:
+            return nil
         }
     }
 
