@@ -786,6 +786,8 @@ public:
       insertCount++;
       break;
     case DXFRW_ET_TEXT:
+    case DXFRW_ET_ATTRIB:
+    case DXFRW_ET_ATTDEF:
       textCount++;
       break;
     case DXFRW_ET_MTEXT:
@@ -1366,8 +1368,16 @@ public:
         printf("[addText DEBUG] text: '%s', h: %f, base(%f,%f), sec(%f,%f), alignH: %d, alignV: %d\n",
                data.text.c_str(), data.height, data.basePoint.x, data.basePoint.y, data.secPoint.x, data.secPoint.y, data.alignH, data.alignV);
     }
+
+    DXFRW_EntityType textType = DXFRW_ET_TEXT;
+    if (data.isAttributeDefinition) {
+      textType = DXFRW_ET_ATTDEF;
+    } else if (data.isAttribute) {
+      textType = DXFRW_ET_ATTRIB;
+    }
+
     DXFRW_EntityData e;
-    initEntity(e, DXFRW_ET_TEXT, data);
+    initEntity(e, textType, data);
     e.basePoint = toC(data.basePoint);
     e.secPoint = toC(data.secPoint);
     e.textValue = strToC(data.text);
@@ -1378,6 +1388,8 @@ public:
     e.extrusion = toC(data.extPoint);
     e.alignH = (int)data.alignH;
     e.alignV = (int)data.alignV;
+    e.attributeTag = strToC(data.attributeTag);
+    e.attributeFlags = data.attributeFlags;
     bump(e.type);
     entities.push_back(e);
   }
@@ -2425,6 +2437,7 @@ void dxfrw_result_free(DXFRW_Result *result) {
     free(e->lineTypeName);
     free(e->textValue);
     free(e->textStyle);
+    free(e->attributeTag);
     free(e->blockName);
     free(e->parentBlockName);
     free(e->hatchPatternName);

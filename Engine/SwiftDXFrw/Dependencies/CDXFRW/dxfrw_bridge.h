@@ -66,6 +66,8 @@ typedef enum {
   DXFRW_ET_LEADER = 15,
   DXFRW_ET_IMAGE = 16,
   DXFRW_ET_VIEWPORT = 17,
+  DXFRW_ET_ATTRIB = 18,
+  DXFRW_ET_ATTDEF = 19,
   DXFRW_ET_UNKNOWN = 99
 } DXFRW_EntityType;
 
@@ -142,6 +144,10 @@ typedef struct {
   char *textStyle;       /* text style name */
   int alignH;            /* horizontal justification */
   int alignV;            /* vertical justification */
+
+  /* ATTRIB / ATTDEF */
+  char *attributeTag;   /* attribute tag (DXF group 2) */
+  int attributeFlags;   /* attribute flags (DXF group 70) */
 
   /* MTEXT */
   double mtextInterline; /* interline spacing factor */

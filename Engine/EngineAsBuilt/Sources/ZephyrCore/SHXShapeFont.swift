@@ -635,15 +635,15 @@ public final class SHXShapeFont: @unchecked Sendable {
         for (lineIndex, lineText) in finalLines.enumerated() {
             let lineScalars = Array(lineText.unicodeScalars)
             let lineLocalWidth = getLocalStringWidth(lineText, spaceAdvance: spaceAdvance)
+            let drawableBounds = getLocalDrawableBounds(lineText, spaceAdvance: spaceAdvance)
+                ?? (minX: 0.0, maxX: lineLocalWidth)
 
             var offsetX: Double = 0
             switch alignH {
-            case 1: // Center
-                offsetX = -0.5 * lineLocalWidth
-            case 2: // Right
-                offsetX = -lineLocalWidth
-            case 4: // Middle
-                offsetX = -0.5 * lineLocalWidth
+            case 1, 4:
+                offsetX = -0.5 * (drawableBounds.minX + drawableBounds.maxX)
+            case 2:
+                offsetX = -drawableBounds.maxX
             default:
                 offsetX = 0
             }
@@ -755,27 +755,13 @@ public final class SHXShapeFont: @unchecked Sendable {
             
             if char.value == 0x25 && i + 2 < scalars.count && scalars[i + 1].value == 0x25 {
                 let codeChar = scalars[i + 2]
+                if let codePoint = resolvedSpecialCodePoint(for: codeChar) {
+                    width += glyphs[codePoint]?.advanceX ?? spaceAdvance
+                    i += 3
+                    continue
+                }
                 let codeLower = codeChar.value | 0x20
-                if codeLower == 0x75 { // 'u'
-                    i += 3
-                    continue
-                } else if codeLower == 0x64 { // 'd'
-                    let codePoint = glyphs[0x00B0] != nil ? 0x00B0 : (glyphs[127] != nil ? 127 : 0x00B0)
-                    width += glyphs[codePoint]?.advanceX ?? spaceAdvance
-                    i += 3
-                    continue
-                } else if codeLower == 0x70 { // 'p'
-                    let codePoint = glyphs[0x00B1] != nil ? 0x00B1 : 0x00B1
-                    width += glyphs[codePoint]?.advanceX ?? spaceAdvance
-                    i += 3
-                    continue
-                } else if codeLower == 0x63 { // 'c'
-                    let codePoint = glyphs[0x2205] != nil ? 0x2205 : (glyphs[0x00D8] != nil ? 0x00D8 : 0x2205)
-                    width += glyphs[codePoint]?.advanceX ?? spaceAdvance
-                    i += 3
-                    continue
-                } else if codeChar.value == 0x25 { // '%'
-                    width += glyphs[0x25]?.advanceX ?? spaceAdvance
+                if codeLower == 0x75 {
                     i += 3
                     continue
                 }
@@ -792,6 +778,72 @@ public final class SHXShapeFont: @unchecked Sendable {
             i += 1
         }
         return width
+    }
+
+    private func getLocalDrawableBounds(_ str: String, spaceAdvance: Double) -> (minX: Double, maxX: Double)? {
+        var cursorX: Double = 0
+        var minX = Double.infinity
+        var maxX = -Double.infinity
+        let scalars = Array(str.unicodeScalars)
+        var i = 0
+
+        func includeGlyph(_ codePoint: Int) {
+            guard let glyph = glyphs[codePoint] else {
+                cursorX += spaceAdvance
+                return
+            }
+            for seg in glyph.segments {
+                minX = min(minX, cursorX + seg.x1, cursorX + seg.x2)
+                maxX = max(maxX, cursorX + seg.x1, cursorX + seg.x2)
+            }
+            cursorX += glyph.advanceX
+        }
+
+        while i < scalars.count {
+            let char = scalars[i]
+
+            if char.value == 0x25 && i + 2 < scalars.count && scalars[i + 1].value == 0x25 {
+                let codeChar = scalars[i + 2]
+                if let codePoint = resolvedSpecialCodePoint(for: codeChar) {
+                    includeGlyph(codePoint)
+                    i += 3
+                    continue
+                }
+                let codeLower = codeChar.value | 0x20
+                if codeLower == 0x75 {
+                    i += 3
+                    continue
+                }
+            }
+
+            let codePoint = Int(char.value)
+            if codePoint == 0x20 {
+                cursorX += spaceAdvance
+            } else if codePoint != 0x0A && codePoint != 0x0D {
+                includeGlyph(codePoint)
+            }
+            i += 1
+        }
+
+        guard minX.isFinite, maxX.isFinite else { return nil }
+        return (minX, maxX)
+    }
+
+    private func resolvedSpecialCodePoint(for codeChar: Unicode.Scalar) -> Int? {
+        let codeLower = codeChar.value | 0x20
+        if codeLower == 0x64 {
+            return glyphs[0x00B0] != nil ? 0x00B0 : (glyphs[127] != nil ? 127 : 0x00B0)
+        }
+        if codeLower == 0x70 {
+            return 0x00B1
+        }
+        if codeLower == 0x63 {
+            return glyphs[0x2205] != nil ? 0x2205 : (glyphs[0x00D8] != nil ? 0x00D8 : 0x2205)
+        }
+        if codeChar.value == 0x25 {
+            return 0x25
+        }
+        return nil
     }
 
     // MARK: - Helpers

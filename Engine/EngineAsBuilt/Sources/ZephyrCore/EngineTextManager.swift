@@ -279,15 +279,19 @@ public final class EngineTextManager {
         let blockHeight = Double(max(lines.count, 1) - 1) * lineHeightWorld + height
 
         let baseY: Double
-        switch alignV {
-        case 1:
-            baseY = -blockHeight
-        case 2, 4:
+        if alignH == 4 {
             baseY = -blockHeight * 0.5
-        case 3:
-            baseY = 0
-        default:
-            baseY = -height
+        } else {
+            switch alignV {
+            case 1:
+                baseY = -blockHeight
+            case 2, 4:
+                baseY = -blockHeight * 0.5
+            case 3:
+                baseY = 0
+            default:
+                baseY = -height
+            }
         }
 
         func worldPoint(localX: Double, localY: Double) -> Vector3 {

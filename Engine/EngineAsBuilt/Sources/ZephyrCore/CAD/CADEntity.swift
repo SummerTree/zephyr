@@ -498,15 +498,19 @@ public struct CADEntity: Entity, Snappable, AttributeAttachable, Hashable, Senda
         
         let localLineSpacing = 1.666 * height
         let blockOffsetY: Double
-        switch alignV {
-        case 1: // Bottom
-            blockOffsetY = Double(numLines - 1) * localLineSpacing + 0.2 * height
-        case 2: // Middle
-            blockOffsetY = 0.5 * Double(numLines - 1) * localLineSpacing - 0.4 * height
-        case 3: // Top
-            blockOffsetY = -height
-        default: // Baseline (0)
-            blockOffsetY = Double(numLines - 1) * localLineSpacing
+        if alignH == 4 {
+            blockOffsetY = 0.5 * Double(numLines - 1) * localLineSpacing - 0.5 * height
+        } else {
+            switch alignV {
+            case 1: // Bottom
+                blockOffsetY = Double(numLines - 1) * localLineSpacing + 0.2 * height
+            case 2: // Middle
+                blockOffsetY = 0.5 * Double(numLines - 1) * localLineSpacing - 0.4 * height
+            case 3: // Top
+                blockOffsetY = -height
+            default: // Baseline (0)
+                blockOffsetY = Double(numLines - 1) * localLineSpacing
+            }
         }
         
         let minY = -(blockOffsetY + height)

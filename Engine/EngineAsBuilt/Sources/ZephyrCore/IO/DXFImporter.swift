@@ -292,6 +292,10 @@ public enum DXFImporter {
                         continue
                     }
 
+                    if !shouldRenderAttributeEntity(src) {
+                        continue
+                    }
+
                     let bylayerColor: ColorRGBA? = (subLayerName != "0") ? subLayer?.color : nil
                     var primitives = DXFEntityConverter.convertEntityToPrimitives(
                         src, arrowSize: drawingArrowSize, bylayerColor: bylayerColor)
@@ -334,7 +338,7 @@ public enum DXFImporter {
                         let typeStr = src.type == DXFRW_ET_LWPOLYLINE ? "LWPOLYLINE(\(primitives.count)segs)" :
                                       src.type == DXFRW_ET_POLYLINE ? "POLYLINE(\(primitives.count)segs)" :
                                       src.type == DXFRW_ET_HATCH ? "HATCH" :
-                                      src.type == DXFRW_ET_TEXT || src.type == DXFRW_ET_MTEXT ? "TEXT" :
+                                      isTextLikeEntity(src.type) ? "TEXT" :
                                       src.type == DXFRW_ET_SPLINE ? "SPLINE" :
                                       src.type == DXFRW_ET_INSERT ? "INSERT" : "other"
                         print("[DXFImport] Block '\(bn)' entity #\(i): \(typeStr)")
@@ -343,6 +347,9 @@ public enum DXFImporter {
             } else if isModelSpaceEntity
                         || (!isPaperSpaceEntity && (metadata?.space ?? 0) == 0) {
                 // Top-level entity
+                if !shouldRenderAttributeEntity(src) {
+                    continue
+                }
                 let primitives = DXFEntityConverter.convertEntityToPrimitives(src, arrowSize: drawingArrowSize)
                 let layerName = src.layerName.map { String(cString: $0) } ?? "0"
                 let layerID = layerNameToID[layerName] ?? layerNameToID["0"]!
@@ -1066,6 +1073,27 @@ public enum DXFImporter {
         }
     }
 
+    private static func isTextLikeEntity(_ type: DXFRW_EntityType) -> Bool {
+        return type == DXFRW_ET_TEXT
+            || type == DXFRW_ET_MTEXT
+            || type == DXFRW_ET_ATTRIB
+            || type == DXFRW_ET_ATTDEF
+    }
+
+    private static func shouldRenderAttributeEntity(_ src: DXFRW_EntityData) -> Bool {
+        let flags = Int(src.attributeFlags)
+        let invisibleFlag = 1
+        let constantFlag = 2
+
+        if src.type == DXFRW_ET_ATTRIB {
+            return (flags & invisibleFlag) == 0
+        }
+        if src.type == DXFRW_ET_ATTDEF {
+            return (flags & invisibleFlag) == 0 && (flags & constantFlag) != 0
+        }
+        return true
+    }
+
     @MainActor
     private static func makeEntity(
         from src: DXFRW_EntityData,
@@ -1158,9 +1186,9 @@ public enum DXFImporter {
         }
 
         var transform = Transform3D.identity
-        if src.type == DXFRW_ET_TEXT || src.type == DXFRW_ET_MTEXT {
+        if isTextLikeEntity(src.type) {
             let pos: Vector3
-            if src.type == DXFRW_ET_TEXT && (src.alignH != 0 || src.alignV != 0) {
+            if (src.type == DXFRW_ET_TEXT || src.type == DXFRW_ET_ATTRIB || src.type == DXFRW_ET_ATTDEF) && (src.alignH != 0 || src.alignV != 0) {
                 pos = toVector(src.secPoint)
             } else {
                 pos = toVector(src.basePoint)
@@ -1234,7 +1262,7 @@ public enum DXFImporter {
         }
 
         // Store text as xdata if present
-        if src.type == DXFRW_ET_TEXT || src.type == DXFRW_ET_MTEXT {
+        if isTextLikeEntity(src.type) {
             if let textPtr = src.textValue {
                 let rawText = String(cString: textPtr)
                 let cleaned = DXFEntityConverter.cleanMTextFormatting(rawText)
@@ -1275,6 +1303,13 @@ public enum DXFImporter {
             }
             entity.xdata["dxf.alignH"] = .int(Int(src.alignH))
             entity.xdata["dxf.alignV"] = .int(Int(src.alignV))
+            if src.type == DXFRW_ET_ATTRIB || src.type == DXFRW_ET_ATTDEF {
+                entity.xdata["dxf.attributeType"] = .string(src.type == DXFRW_ET_ATTRIB ? "ATTRIB" : "ATTDEF")
+                entity.xdata["dxf.attributeFlags"] = .int(Int(src.attributeFlags))
+                if let tagPtr = src.attributeTag {
+                    entity.xdata["dxf.attributeTag"] = .string(String(cString: tagPtr))
+                }
+            }
             if src.type == DXFRW_ET_MTEXT && src.textWidthScale > 0 {
                 entity.xdata["dxf.mtextWidth"] = .double(src.textWidthScale)
             }

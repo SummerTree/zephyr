@@ -62,12 +62,12 @@ public enum DXFEntityConverter {
             // Convert fit points or control points to line segments
             return convertSpline(e, color: primColor)
 
-        case DXFRW_ET_TEXT, DXFRW_ET_MTEXT:
+        case DXFRW_ET_TEXT, DXFRW_ET_MTEXT, DXFRW_ET_ATTRIB, DXFRW_ET_ATTDEF:
             let textVal = e.textValue.map { String(cString: $0) } ?? ""
             let cleaned = cleanMTextFormatting(textVal)
             let height = e.textHeight > 0 ? e.textHeight : 2.5
             let style = e.textStyle.map { String(cString: $0) }
-            let isText = e.type == DXFRW_ET_TEXT
+            let isText = e.type == DXFRW_ET_TEXT || e.type == DXFRW_ET_ATTRIB || e.type == DXFRW_ET_ATTDEF
             // In DXF, if alignH is 1(Center), 2(Right), 4(Middle), or if alignV is non-zero,
             // the second alignment point (secPoint) specifies the actual alignment location.
             // (For alignH 3 and 5, secPoint is the endpoint, but basePoint is the start.)
