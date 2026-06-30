@@ -228,7 +228,7 @@ public struct HatchRibbonUI {
                 var idx = Int32(currentIdx)
                 ImGuiPushItemWidth(-1)
                 // Use a C array of C strings for Combo
-                let cStrings = gradients.map { _strdup($0) }
+                let cStrings = gradients.map { z_strdup($0) }
                 var cPointers: [UnsafePointer<CChar>?] = cStrings.map { UnsafePointer($0) }
                 if igCombo_Str_arr("##GradientCombo", &idx, &cPointers, Int32(gradients.count), -1) {
                     settings.gradientName = gradients[Int(idx)]
@@ -238,7 +238,7 @@ public struct HatchRibbonUI {
             } else {
                 var idx: Int32 = 0
                 ImGuiPushItemWidth(-1)
-                let cStrings = gradients.map { _strdup($0) }
+                let cStrings = gradients.map { z_strdup($0) }
                 var cPointers: [UnsafePointer<CChar>?] = cStrings.map { UnsafePointer($0) }
                 if igCombo_Str_arr("##GradientCombo", &idx, &cPointers, Int32(gradients.count), -1) {
                     settings.gradientName = gradients[Int(idx)]
