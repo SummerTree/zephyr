@@ -6,11 +6,13 @@ import PackageDescription
 let env = ProcessInfo.processInfo.environment
 let dwgIncludePath = env["DWG_INCLUDE"]
 let dwgLibraryPath = env["DWG_LIB"]
+let dwgSrcPath = env["DWG_SRC"]
 
 // --- Diagnostic Print ---
 print("--- SwiftDWG Manifest Diagnostic ---")
 print("DWG_INCLUDE env var is: \(dwgIncludePath ?? "NOT SET")")
 print("DWG_LIB env var is: \(dwgLibraryPath ?? "NOT SET")")
+print("DWG_SRC env var is: \(dwgSrcPath ?? "NOT SET")")
 print("------------------------------------")
 
 // --- Prepare Settings ---
@@ -35,9 +37,11 @@ cSettings.append(.define("ENABLE_SHARED", to: ""))
     if let includePath = dwgIncludePath {
         cSettings.append(.unsafeFlags(["-I", includePath]))
         // Also need the src dir for bits.h
-        cSettings.append(.unsafeFlags(["-I", includePath + "/../src"]))
+        if let srcPath = dwgSrcPath {
+            cSettings.append(.unsafeFlags(["-I", srcPath]))
+            swiftSettings.append(.unsafeFlags(["-Xcc", "-I\(srcPath)"]))
+        }
         swiftSettings.append(.unsafeFlags(["-Xcc", "-I\(includePath)"]))
-        swiftSettings.append(.unsafeFlags(["-Xcc", "-I\(includePath)/../src"]))
     } else {
         let brewPrefix = ProcessInfo.processInfo.environment["HOMEBREW_PREFIX"] ?? "/opt/homebrew"
         cSettings.append(.unsafeFlags(["-I", "\(brewPrefix)/include"]))
@@ -79,9 +83,11 @@ cSettings.append(.define("ENABLE_SHARED", to: ""))
     // --- LibreDWG Include Path ---
     if let includePath = dwgIncludePath {
         cSettings.append(.unsafeFlags(["-I", includePath]))
-        cSettings.append(.unsafeFlags(["-I", includePath + "/../src"]))
+        if let srcPath = dwgSrcPath {
+            cSettings.append(.unsafeFlags(["-I", srcPath]))
+            swiftSettings.append(.unsafeFlags(["-Xcc", "-I\(srcPath)"]))
+        }
         swiftSettings.append(.unsafeFlags(["-Xcc", "-I\(includePath)"]))
-        swiftSettings.append(.unsafeFlags(["-Xcc", "-I\(includePath)/../src"]))
     }
 
     // --- LibreDWG Library Path ---
