@@ -25,6 +25,16 @@ struct AppCommandRegistration {
             aliases: ["CS", "SPECKLES"],
             factory: { CleanSpecklesCommand() }
         )
+        engine.commandProcessor.registerFeatureCommand(
+            name: "AISELECT",
+            aliases: ["AIS", "AIFIND"],
+            factory: { AISelectCommand() }
+        )
+        engine.commandProcessor.registerFeatureCommand(
+            name: "AIDRAW",
+            aliases: ["AID", "AIGEN"],
+            factory: { AIDrawCommand() }
+        )
 
         // --- Modify commands ---
         engine.commandProcessor.registerFeatureCommand(

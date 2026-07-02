@@ -186,6 +186,8 @@ public struct CommandDescriptor: Sendable {
         CommandDescriptor(canonicalName: "PASTEORIG",  aliases: [],                category: .modify,  syntax: "", description: "Paste clipboard entities at original coordinates"),
         CommandDescriptor(canonicalName: "PASTEBLOCK", aliases: [],                category: .modify,  syntax: "", description: "Paste clipboard entities as a new block"),
         CommandDescriptor(canonicalName: "CLEANSPECKLES", aliases: ["CS", "SPECKLES"], category: .modify, syntax: "", description: "Remove tiny/speckle entities from the drawing"),
+        CommandDescriptor(canonicalName: "AISELECT", aliases: ["AIS", "AIFIND"], category: .modify, syntax: "", description: "AI-powered pattern-matching selection. Select examples, then window to find similar shapes."),
+        CommandDescriptor(canonicalName: "AIDRAW", aliases: ["AID", "AIGEN"], category: .draw, syntax: "<prompt>", description: "AI-assisted drawing generator. Describe geometry to preview and apply."),
         CommandDescriptor(canonicalName: "DDEDIT",     aliases: ["ED"],            category: .modify,  syntax: "", description: "Edit the selected text entity"),
         CommandDescriptor(canonicalName: "JOIN",       aliases: ["J"],             category: .modify,  syntax: "", description: "Join selected line entities into polylines"),
         CommandDescriptor(canonicalName: "TRIM",       aliases: ["TR"],            category: .modify,  syntax: "", description: "Trim lines at intersections — click the side to remove"),
@@ -208,6 +210,7 @@ public struct CommandDescriptor: Sendable {
         CommandDescriptor(canonicalName: "PLAN",       aliases: [],                category: .view,    syntax: "", description: "Reset view rotation to standard orientation"),
         CommandDescriptor(canonicalName: "DVIEW",      aliases: ["DV"],            category: .view,    syntax: "", description: "Dynamic view: twist the 2D view angle"),
         CommandDescriptor(canonicalName: "SNAPANG",    aliases: [],                category: .settings, syntax: "<degrees>", description: "Set the crosshair and ortho rotation angle"),
+        CommandDescriptor(canonicalName: "AISETTINGS", aliases: ["AICFG"],      category: .settings, syntax: "[URL|MODEL|APIKEY|GAP|MAXCLUSTERS|TIMEOUT] [value]", description: "View or set AI pattern-matching settings (URL, model, API key, gap tolerance, etc.)"),
         // --- Layer ---
         CommandDescriptor(canonicalName: "LAYER",      aliases: ["LA"],            category: .layer,   syntax: "", description: "Show/hide the layer panel"),
         CommandDescriptor(canonicalName: "LAYER NEW",  aliases: ["LA NEW"],        category: .layer,   syntax: "<name>", description: "Create a new layer with an optional name"),
@@ -619,6 +622,74 @@ public final class CADCommandProcessor {
             let cmd = DViewCommand()
             activeFeatureCommand = cmd
             cmd.start(engine: engine, processor: self)
+
+        // --- AI Draw inline prompt ---
+        case _ where upper.hasPrefix("AIDRAW ") || upper.hasPrefix("AID ") || upper.hasPrefix("AIGEN "):
+            guard let engine = engine else { clearCommand(); return }
+            let prefix: String
+            if upper.hasPrefix("AIDRAW ") { prefix = "AIDRAW " }
+            else if upper.hasPrefix("AIGEN ") { prefix = "AIGEN " }
+            else { prefix = "AID " }
+            let prompt = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { clearCommand(); return }
+            let cmd = AIDrawCommand(initialPrompt: prompt)
+            activeFeatureCommand = cmd
+            cmd.start(engine: engine, processor: self)
+
+        // --- AI Settings ---
+        case _ where upper.hasPrefix("AISETTINGS ") || upper.hasPrefix("AICFG "):
+            guard let engine = engine else { clearCommand(); return }
+            let prefix: String
+            if upper.hasPrefix("AISETTINGS ") { prefix = "AISETTINGS " }
+            else { prefix = "AICFG " }
+            let remainder = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+            let parts = remainder.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard parts.count >= 2 else {
+                print("[CAD] Usage: AISETTINGS URL|MODEL|APIKEY|GAP|MAXCLUSTERS|TIMEOUT <value>")
+                clearCommand()
+                break
+            }
+            let key = parts[0].uppercased()
+            let val = String(parts[1])
+            switch key {
+            case "URL":
+                engine.aiSelectConfig.baseURL = val
+                print("[CAD] AI base URL set to: \(val)")
+            case "MODEL":
+                engine.aiSelectConfig.model = val
+                print("[CAD] AI model set to: \(val)")
+            case "APIKEY":
+                engine.aiSelectConfig.apiKey = val.isEmpty ? nil : val
+                print("[CAD] AI API key \(val.isEmpty ? "cleared" : "set").")
+            case "GAP":
+                guard let d = Double(val) else { print("[CAD] GAP requires a number."); clearCommand(); break }
+                engine.aiSelectConfig.gapTolerance = d
+                print("[CAD] AI gap tolerance set to: \(d)")
+            case "MAXCLUSTERS":
+                guard let i = Int(val) else { print("[CAD] MAXCLUSTERS requires an integer."); clearCommand(); break }
+                engine.aiSelectConfig.maxClustersToEvaluate = i
+                print("[CAD] AI max clusters set to: \(i)")
+            case "TIMEOUT":
+                guard let d = Double(val) else { print("[CAD] TIMEOUT requires a number."); clearCommand(); break }
+                engine.aiSelectConfig.requestTimeout = d
+                print("[CAD] AI request timeout set to: \(d)s")
+            default:
+                print("[CAD] Unknown setting: \(key). Use URL, MODEL, APIKEY, GAP, MAXCLUSTERS, or TIMEOUT.")
+            }
+            clearCommand()
+
+        case "AISETTINGS", "AICFG":
+            guard let engine = engine else { clearCommand(); return }
+            let cfg = engine.aiSelectConfig
+            print("[CAD] --- AI Pattern-Matching Settings ---")
+            print("[CAD]   URL:         \(cfg.baseURL)")
+            print("[CAD]   Model:       \(cfg.model.isEmpty ? "(server default)" : cfg.model)")
+            print("[CAD]   API Key:     \(cfg.apiKey != nil ? "********" : "(none)")")
+            print("[CAD]   Gap Tol:     \(cfg.gapTolerance)")
+            print("[CAD]   Max Clusters:\(cfg.maxClustersToEvaluate)")
+            print("[CAD]   Timeout:     \(cfg.requestTimeout)s")
+            print("[CAD] Usage: AISETTINGS <key> <value>")
+            clearCommand()
 
         case _ where upper.hasPrefix("SNAPANG "):
             guard let engine = engine else { clearCommand(); return }

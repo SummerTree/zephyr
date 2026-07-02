@@ -118,6 +118,9 @@ public final class PhrostEngine {
     /// Lower = smoother curves (more segments). Default 5000.
     public var splineTessellationDivisor: Double = 5000.0
 
+    /// Configuration for the AI-powered pattern-matching selection tool (AISELECT).
+    public var aiSelectConfig = AISelectionConfig()
+
     /// Toggle simplifying dense polylines.
     public func toggleSimplifyPolylines() {
         DXFEntityConverter.simplifyPolylines.toggle()
