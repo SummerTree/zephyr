@@ -1045,6 +1045,47 @@ public enum EABReader {
                     clipBoundary: clipBoundary,
                     tint: tint
                 ))
+            case 9: // fillComplexPolygon
+                let outerCount = Int(r.readUInt32())
+                var outer: [Vector3] = []
+                for _ in 0..<outerCount {
+                    outer.append(Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64()))
+                }
+                let holeCount = Int(r.readUInt32())
+                var holes: [[Vector3]] = []
+                for _ in 0..<holeCount {
+                    let hc = Int(r.readUInt32())
+                    var hole: [Vector3] = []
+                    for _ in 0..<hc {
+                        hole.append(Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64()))
+                    }
+                    holes.append(hole)
+                }
+                let color = readColor()
+                prims.append(.fillComplexPolygon(outer: outer, holes: holes, color: color))
+            case 10: // gradient
+                let outerCount = Int(r.readUInt32())
+                var outer: [Vector3] = []
+                for _ in 0..<outerCount {
+                    outer.append(Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64()))
+                }
+                let holeCount = Int(r.readUInt32())
+                var holes: [[Vector3]] = []
+                for _ in 0..<holeCount {
+                    let hc = Int(r.readUInt32())
+                    var hole: [Vector3] = []
+                    for _ in 0..<hc {
+                        hole.append(Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64()))
+                    }
+                    holes.append(hole)
+                }
+                let gradientName = r.readString()
+                let gradientAngle = r.readFloat64()
+                let color1 = readColor() ?? .white
+                let color2 = readColor() ?? .white
+                prims.append(.gradient(outer: outer, holes: holes,
+                                       gradientName: gradientName, angle: gradientAngle,
+                                       color1: color1, color2: color2))
             default:
                 throw EABError.readError("Unknown primitive type: \(type)")
             }
