@@ -231,7 +231,7 @@ $env:DXFRW_INCLUDE      = "$DevRoot\libdxfrw\src" -replace '\\', '/'
 $env:DXFRW_LIB          = "$DevRoot\libdxfrw\build\Release" -replace '\\', '/'
 
 $env:DWG_INCLUDE        = "$DevRoot\libredwg\include" -replace '\\', '/'
-$env:DWG_LIB            = "$DevRoot\libredwg\build\Release" -replace '\\', '/'
+$env:DWG_LIB            = "$DevRoot\libredwg\build" -replace '\\', '/'
 
 $env:ZLIB_NG_INCLUDE    = "$DevRoot\zlib-ng\include" -replace '\\', '/'
 $env:ZLIB_NG_LIB        = "$DevRoot\zlib-ng\lib" -replace '\\', '/'
@@ -296,7 +296,7 @@ Copy-Item -Path "$DevRoot\SDL3\lib\SDL3_ttf.dll"   -Destination $dllDest -Force
 if (Test-Path "$DevRoot\pdfium\bin\pdfium.dll") { Copy-Item -LiteralPath "$DevRoot\pdfium\bin\pdfium.dll" -Destination $dllDest -Force }
 
 Copy-Item -Path "$DevRoot\libdxfrw\build\Release\dxfrw.dll" -Destination $dllDest -Force -ErrorAction SilentlyContinue
-Copy-Item -Path "$DevRoot\libredwg\build\Release\libredwg.dll" -Destination $dllDest -Force -ErrorAction SilentlyContinue
+Copy-Item -Path "$DevRoot\libredwg\build\libredwg.dll" -Destination $dllDest -Force -ErrorAction SilentlyContinue
 Copy-Item -Path "$DevRoot\vcpkg\installed\$vcpkgTriplet\bin\iconv-2.dll" -Destination $dllDest -Force -ErrorAction SilentlyContinue
 
 # Assets

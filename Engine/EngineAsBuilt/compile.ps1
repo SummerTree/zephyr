@@ -12,7 +12,15 @@ $ErrorActionPreference = "Stop"
 # Calculate project paths reliably regardless of where the terminal is currently CD'd
 $zephyrDir = $PSScriptRoot
 if ([string]::IsNullOrEmpty($zephyrDir)) { $zephyrDir = "." }
-$swiftBuildDir = "$zephyrDir\Engine\EngineAsBuilt"
+
+# Auto-detect: if Package.swift exists here, we're already in the project. Otherwise, descend.
+if (Test-Path "$zephyrDir\Package.swift") {
+    $swiftBuildDir = "$zephyrDir"
+} elseif (Test-Path "$zephyrDir\Engine\EngineAsBuilt\Package.swift") {
+    $swiftBuildDir = "$zephyrDir\Engine\EngineAsBuilt"
+} else {
+    throw "Could not find Package.swift in $zephyrDir or $zephyrDir\Engine\EngineAsBuilt"
+}
 
 # 1. Determine build configuration
 $isRelease = $Release -or ($args -contains "--release")
