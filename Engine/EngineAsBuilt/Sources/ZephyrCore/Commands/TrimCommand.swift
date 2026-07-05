@@ -310,14 +310,33 @@ public final class TrimCommand: FeatureCommand {
         // ── Step 4: Collect cutting edges from all OTHER visible entities ──
         // Every primitive from every other entity is exploded into line segments.
         // Skip invisible layers, block references, and the target entity itself.
+        //
+        // Two separate edge collections are maintained:
+        //   - `cuttingSegments`: All cutting edges (lines kept as exact segments;
+        //     everything else tessellated via explode()). Used by line/arc/circle/polyline
+        //     trim paths.
+        //   - `exactLineCuttingSegments`: ONLY the exact `.line` primitives, transformed
+        //     directly without tessellation. Used by the spline trim path for a dedicated
+        //     high-precision second pass (see Step 5–7 spline case). This separation is
+        //     critical because: a line endpoint that was created from a spline's tessellated
+        //     trim point will visually touch the spline but miss the true NURBS intersection
+        //     by a sub-pixel amount. The spline path handles this via edge-extension and
+        //     endpoint-touch detection on these exact segments.
         var cuttingSegments: [(Vector3, Vector3)] = []
+        var exactLineCuttingSegments: [(Vector3, Vector3)] = []
         for otherEntity in doc.entitiesView {
             guard otherEntity.handle != hitHandle else { continue }
             guard let layer = doc.layer(for: otherEntity.layerID), layer.isVisible else { continue }
             guard otherEntity.blockID == nil else { continue }
             guard let geom = doc.resolvedGeometry(for: otherEntity) else { continue }
             for prim in geom {
-                cuttingSegments.append(contentsOf: explode(primitive: prim, t: otherEntity.transform))
+                if case .line(let start, let end, _) = prim {
+                    let segment = (otherEntity.transform.transformPoint(start), otherEntity.transform.transformPoint(end))
+                    cuttingSegments.append(segment)
+                    exactLineCuttingSegments.append(segment)
+                } else {
+                    cuttingSegments.append(contentsOf: explode(primitive: prim, t: otherEntity.transform))
+                }
             }
         }
 
@@ -536,21 +555,113 @@ public final class TrimCommand: FeatureCommand {
         // ── .spline: NURBS subdivision trim (preserves spline type) ──
         // Uses knot-insertion (Boehm's algorithm) to split the NURBS curve at
         // the intersection parameter, preserving the original spline representation.
+        //
+        // ── Precision strategy for spline–line intersections ──
+        // This addresses a real-world failure mode: when a line endpoint was created
+        // from a spline's previous tessellated trim point, the endpoint visually touches
+        // the spline but misses the true NURBS intersection by a sub-pixel amount.
+        // The tessellated polyline approximation of the spline creates a tiny gap (on
+        // the order of microns in world space) that segment-segment intersection never
+        // catches.
+        //
+        // Two mechanisms close this gap:
+        //   1. **Edge extension** — Each exact line cutting segment is extended by
+        //      `localTolerance` (~4 screen pixels) at both ends before intersection
+        //      testing, so an intersection *just* past the endpoint is still found.
+        //   2. **Endpoint-touch detection** — Each exact line endpoint is projected
+        //      onto the spline; if the distance is within `localTolerance`, the
+        //      projected NURBS parameter is registered as a valid trim hit.
+        //
+        // The intersection search itself runs in two passes:
+        //   - Pass 1: All cutting edges (tessellated) at 96 search segments.
+        //   - Pass 2: Exact line edges only, extended by tolerance, at 256 search
+        //     segments — plus endpoint-touch checks on both original endpoints.
         case .spline(let controlPoints, let knots, let degree, let weights, let color):
             let w = weights ?? Array(repeating: 1.0, count: controlPoints.count)
             let p = degree
+            let minT = knots[p]
+            let maxT = knots[controlPoints.count]
+            /// Dynamic hit-deduplication tolerance — scales with the spline's
+            /// parameter range so wide/long splines use the same relative precision.
+            let parameterDuplicateTolerance = max(1e-6, (maxT - minT) * 1e-7)
+            let scale = max(abs(transform.scale.x), abs(transform.scale.y), 1e-9)
+            /// Screen-space tolerance converted to local (unscaled) coordinates.
+            /// ~4 screen pixels at the current zoom, divided by entity scale.
+            /// Capped at 1e-7 to avoid degenerate ultra-small values.
+            let localTolerance = max(1e-7, (4.0 / engine.camera.zoom) / scale)
+            let localToleranceSq = localTolerance * localTolerance
 
-            // Transform cutting edges to local space for intersection testing.
             let localEdges: [(Vector3, Vector3)] = cuttingSegments.map { edge in
                 (invTransform.transformPoint(edge.0),
                  invTransform.transformPoint(edge.1))
             }
+            let localExactLineEdges: [(Vector3, Vector3)] = exactLineCuttingSegments.map { edge in
+                (invTransform.transformPoint(edge.0),
+                 invTransform.transformPoint(edge.1))
+            }
 
-            // Find all intersection parameters along the spline.
             struct SplineHit { let t: Double; let point: Vector3 }
             var hits: [SplineHit] = []
 
-            for edge in localEdges {
+            func appendHit(t: Double, point: Vector3) {
+                guard t > minT + 1e-8, t < maxT - 1e-8 else { return }
+                if !hits.contains(where: { abs($0.t - t) < parameterDuplicateTolerance }) {
+                    hits.append(SplineHit(t: t, point: point))
+                }
+            }
+
+            /// Extends a line segment at both ends by `amount` in world/local units.
+            /// Used to close the tiny gap between a line endpoint (e.g. a previous
+            /// trim result) and the true NURBS intersection point. By extending the
+            /// segment, the intersection search finds hits that lie infinitesimally
+            /// past the exact endpoint — where the spline physically crosses but the
+            /// unscaled segment ends just short.
+            func extendedEdge(_ edge: (Vector3, Vector3), by amount: Double) -> (Vector3, Vector3) {
+                let dx = edge.1.x - edge.0.x
+                let dy = edge.1.y - edge.0.y
+                let len = hypot(dx, dy)
+                guard len > 1e-12 else { return edge }
+                let ux = dx / len
+                let uy = dy / len
+                return (
+                    Vector3(x: edge.0.x - ux * amount, y: edge.0.y - uy * amount, z: edge.0.z),
+                    Vector3(x: edge.1.x + ux * amount, y: edge.1.y + uy * amount, z: edge.1.z)
+                )
+            }
+
+            /// Detects when a line cutting-edge endpoint lies close enough to the
+            /// spline to count as a valid trim intersection. Projects the endpoint
+            /// onto the NURBS curve using a high-segment closest-parameter search
+            /// and validates the true NURBS distance against `localTolerance`.
+            ///
+            /// This is the key fix for the failure mode where a line endpoint
+            /// (created from a prior spline trim's tessellated output) visually
+            /// touches the spline but misses the exact NURBS intersection by a
+            /// sub-pixel gap in world space.
+            func addEndpointTouchHit(_ endpoint: Vector3) {
+                let t = NURBSEvaluator.findClosestParameter(
+                    degree: p,
+                    knots: knots,
+                    controlPoints: controlPoints,
+                    weights: w,
+                    to: endpoint,
+                    segments: 256)
+
+                guard let point = NURBSEvaluator.evaluateAt(
+                    degree: p,
+                    knots: knots,
+                    controlPoints: controlPoints,
+                    weights: w,
+                    at: t) else { return }
+
+                let dx = point.x - endpoint.x
+                let dy = point.y - endpoint.y
+                if dx * dx + dy * dy <= localToleranceSq {
+                    appendHit(t: t, point: point)
+                }
+            }
+
+            func findHits(on edge: (Vector3, Vector3), searchSegments: Int) {
                 let results = NURBSEvaluator.findIntersectionParameters(
                     degree: p,
                     knots: knots,
@@ -558,15 +669,36 @@ public final class TrimCommand: FeatureCommand {
                     weights: w,
                     segmentA: edge.0,
                     segmentB: edge.1,
-                    searchSegments: 96
+                    searchSegments: searchSegments
                 )
                 for result in results {
-                    // Avoid duplicate intersections at nearly the same t
-                    let isDuplicate = hits.contains { abs($0.t - result.t) < 1e-6 }
-                    if !isDuplicate {
-                        hits.append(SplineHit(t: result.t, point: result.point))
-                    }
+                    appendHit(t: result.t, point: result.point)
                 }
+            }
+
+            // ── Pass 1: Coarse intersection search over all cutting edges ──
+            // Tessellated primitives (arcs, circles, other splines, etc.) and exact
+            // line segments. 96 segments per edge is sufficient for the adaptive
+            // Newton refinement inside findIntersectionParameters.
+            for edge in localEdges {
+                findHits(on: edge, searchSegments: 96)
+            }
+
+            // ── Pass 2: High-precision pass on exact line cutting edges ──
+            // These are the edges most likely to exhibit the sub-pixel-gap failure
+            // mode (a line endpoint from a prior trim just barely missing the NURBS).
+            //
+            // Two complementary strategies are applied:
+            //   a) Extend each edge by `localTolerance` (~4 screen px), then search
+            //      with 256 segments — catches intersections that lie just past the
+            //      literal segment endpoints.
+            //   b) Check both original endpoints against the spline — catches the
+            //      case where an endpoint sits ON the spline curve but the extended
+            //      segment's line sweeps past it without intersecting.
+            for edge in localExactLineEdges {
+                findHits(on: extendedEdge(edge, by: localTolerance), searchSegments: 256)
+                addEndpointTouchHit(edge.0)
+                addEndpointTouchHit(edge.1)
             }
 
             if hits.isEmpty {
@@ -584,8 +716,6 @@ public final class TrimCommand: FeatureCommand {
                     to: invClick,
                     segments: 96)
 
-                let minT = knots[p]
-                let maxT = knots[controlPoints.count]
                 var tBefore = minT
                 var tAfter = maxT
 
