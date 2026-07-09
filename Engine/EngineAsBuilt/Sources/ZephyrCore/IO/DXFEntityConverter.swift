@@ -19,17 +19,24 @@ public enum DXFEntityConverter {
         switch e.eType {
         case .pOINT:
             guard let p = e as? DXFPointEntity else { return [] }
-            return [.point(position: yflip(p.basePoint), color: primColor)]
+            return [.point(position: cadPoint(p.basePoint, extrusion: p.haveExtrusion ? p.extrusion : nil), color: primColor)]
         case .lINE:
             guard let l = e as? DXFLineEntity else { return [] }
             return [.line(start: yflip(l.basePoint), end: yflip(l.secPoint), color: primColor)]
         case .cIRCLE:
             guard let c = e as? DXFCircleEntity else { return [] }
-            return [.circle(center: yflip(c.basePoint), radius: c.radius, color: primColor)]
+            return [.circle(center: cadPoint(c.basePoint, extrusion: c.haveExtrusion ? c.extrusion : nil), radius: c.radius, color: primColor)]
         case .aRC:
             guard let a = e as? DXFArcEntity else { return [] }
-            return [.arc(center: yflip(a.basePoint), radius: a.radius,
-                        startAngle: -a.endAngle, endAngle: -a.startAngle, color: primColor)]
+            let center = cadPoint(a.basePoint, extrusion: a.haveExtrusion ? a.extrusion : nil)
+            var startAngle = -a.endAngle
+            var endAngle = -a.startAngle
+            if a.haveExtrusion && a.extrusion.z < 0 {
+                startAngle = -a.startAngle
+                endAngle = -a.endAngle
+            }
+            return [.arc(center: center, radius: a.radius,
+                        startAngle: startAngle, endAngle: endAngle, color: primColor)]
         case .lWPOLYLINE, .pOLYLINE:
             return convertPolyline(e, color: primColor)
         case .eLLIPSE:
@@ -42,12 +49,14 @@ public enum DXFEntityConverter {
             return []
         case .sOLID:
             guard let s = e as? DXFSolidEntity else { return [] }
-            return [.fillPolygon(points: [yflip(s.basePoint), yflip(s.secPoint),
-                                         yflip(s.thirdPoint), yflip(s.fourPoint)], color: primColor)]
+            let ext = s.haveExtrusion ? s.extrusion : nil
+            return [.fillPolygon(points: [cadPoint(s.basePoint, extrusion: ext), cadPoint(s.secPoint, extrusion: ext),
+                                         cadPoint(s.thirdPoint, extrusion: ext), cadPoint(s.fourPoint, extrusion: ext)], color: primColor)]
         case .e3DFACE:
             guard let f = e as? DXF3DFaceEntity else { return [] }
-            return [.polygon(points: [yflip(f.basePoint), yflip(f.secPoint),
-                                     yflip(f.thirdPoint), yflip(f.fourPoint)], color: primColor)]
+            let ext = f.haveExtrusion ? f.extrusion : nil
+            return [.polygon(points: [cadPoint(f.basePoint, extrusion: ext), cadPoint(f.secPoint, extrusion: ext),
+                                     cadPoint(f.thirdPoint, extrusion: ext), cadPoint(f.fourPoint, extrusion: ext)], color: primColor)]
         case .hATCH:
             return convertHatch(e, color: primColor)
         case .dIMENSION:
@@ -81,21 +90,32 @@ public enum DXFEntityConverter {
         if let lw = e as? DXFLWPolylineEntity {
             guard !lw.vertices.isEmpty else { return [] }
             if lw.vertices.count == 1 {
-                return [.point(position: Vector3(x: lw.vertices[0].x, y: -lw.vertices[0].y, z: 0), color: color)]
+                return [.point(position: cadLWPoint(lw.vertices[0], in: lw), color: color)]
             }
             let isClosed = (lw.flags & 0x01) != 0
+            let mirrored = !isDefaultExtrusion(lw.extPoint) && lw.extPoint.z < 0
             let path = CADPolyline(
                 vertices: lw.vertices.map { v in
-                    CADPolylineVertex(position: Vector3(x: v.x, y: -v.y, z: 0),
-                                      bulge: -v.bulge, startWidth: v.startWidth, endWidth: v.endWidth)
+                    var bulge = -v.bulge
+                    if mirrored { bulge = -bulge }
+                    return CADPolylineVertex(position: cadLWPoint(v, in: lw),
+                                             bulge: bulge, startWidth: v.startWidth, endWidth: v.endWidth)
                 }, isClosed: isClosed, lineTypeGenerationEnabled: (lw.flags & 0x80) != 0)
             return [.polyline(path: simplifyIfNeeded(path), color: color)]
         }
         if let pl = e as? DXFPolylineEntity {
             guard !pl.vertices.isEmpty else { return [] }
-            let path = CADPolyline(points: pl.vertices.map { yflip($0.basePoint) },
-                                  isClosed: (pl.flags & 0x01) != 0, lineTypeGenerationEnabled: false)
-            return [.polyline(path: path, color: color)]
+            let mirrored = pl.haveExtrusion && pl.extrusion.z < 0
+            let path = CADPolyline(
+                vertices: pl.vertices.map { v in
+                    var bulge = -v.bulge
+                    if mirrored { bulge = -bulge }
+                    return CADPolylineVertex(position: cadPolylinePoint(v, in: pl),
+                                             bulge: bulge, startWidth: v.startWidth, endWidth: v.endWidth)
+                },
+                isClosed: (pl.flags & 0x01) != 0,
+                lineTypeGenerationEnabled: false)
+            return [.polyline(path: simplifyIfNeeded(path), color: color)]
         }
         return []
     }
@@ -194,35 +214,34 @@ public enum DXFEntityConverter {
     private static func extractHatchBoundaries(from h: DXFHatchEntity) -> (outer: [Vector3], holes: [[Vector3]]) {
         guard !h.loops.isEmpty else { return ([], []) }
 
-        // Build polygon from all entities in a loop
+        // Build polygon from all entities in a loop. Hatch edge order is not
+        // guaranteed, so each edge is tessellated independently and then stitched
+        // by matching nearest endpoints.
         func buildLoopPolygon(_ loop: DXFHatchLoop) -> [Vector3] {
-            // If loop has a single LWPolyline, extract vertices directly
-            if loop.entities.count == 1, let lw = loop.entities[0] as? DXFLWPolylineEntity {
-                return lw.vertices.map { Vector3(x: $0.x, y: -$0.y, z: 0) }
-            }
-            // If loop has a single old-style Polyline
-            if loop.entities.count == 1, let pl = loop.entities[0] as? DXFPolylineEntity {
-                return pl.vertices.map { yflip($0.basePoint) }
+            var edges: [[Vector3]] = []
+            edges.reserveCapacity(loop.entities.count)
+
+            for ent in loop.entities {
+                var edge: [Vector3] = []
+                if let lw = ent as? DXFLWPolylineEntity {
+                    edge = hatchLWPolylineToPoints(lw)
+                } else if let pl = ent as? DXFPolylineEntity {
+                    edge = hatchPolylineToPoints(pl)
+                } else if let line = ent as? DXFLineEntity {
+                    edge = [yflip(line.basePoint), yflip(line.secPoint)]
+                } else if let arc = ent as? DXFArcEntity {
+                    edge = arcToPolyline(arc)
+                } else if let ellipse = ent as? DXFEllipseEntity {
+                    edge = ellipseToPolyline(ellipse)
+                } else if let spline = ent as? DXFSplineEntity {
+                    edge = splineToPolyline(spline)
+                }
+
+                edge = cleanAdjacentPoints(edge)
+                if edge.count >= 2 { edges.append(edge) }
             }
 
-            var pts: [Vector3] = []
-            for ent in loop.entities {
-                if let lw = ent as? DXFLWPolylineEntity {
-                    pts.append(contentsOf: lw.vertices.map { Vector3(x: $0.x, y: -$0.y, z: 0) })
-                } else if let pl = ent as? DXFPolylineEntity {
-                    pts.append(contentsOf: pl.vertices.map { yflip($0.basePoint) })
-                } else if let line = ent as? DXFLineEntity {
-                    pts.append(yflip(line.basePoint))
-                    pts.append(yflip(line.secPoint))
-                } else if let arc = ent as? DXFArcEntity {
-                    pts.append(contentsOf: arcToPolyline(arc))
-                } else if let ellipse = ent as? DXFEllipseEntity {
-                    pts.append(contentsOf: ellipseToPolyline(ellipse))
-                } else if let spline = ent as? DXFSplineEntity {
-                    pts.append(contentsOf: splineToPolyline(spline))
-                }
-            }
-            return pts
+            return cleanAdjacentPoints(stitchHatchEdges(edges))
         }
 
         let loops = h.loops.map { buildLoopPolygon($0) }.filter { $0.count >= 3 }
@@ -232,6 +251,113 @@ public enum DXFEntityConverter {
         let outer = loops[0]
         let holes = Array(loops.dropFirst())
         return (outer, holes)
+    }
+
+
+    private static func hatchLWPolylineToPoints(_ polyline: DXFLWPolylineEntity) -> [Vector3] {
+        guard !polyline.vertices.isEmpty else { return [] }
+        let vertices = polyline.vertices.map {
+            var bulge = -$0.bulge
+            if !isDefaultExtrusion(polyline.extPoint) && polyline.extPoint.z < 0 { bulge = -bulge }
+            return CADPolylineVertex(position: cadLWPoint($0, in: polyline),
+                              bulge: bulge,
+                              startWidth: $0.startWidth,
+                              endWidth: $0.endWidth)
+        }
+        let path = CADPolyline(vertices: vertices, isClosed: (polyline.flags & 1) != 0)
+        return path.hasBulges ? path.tessellatedPoints() : path.points
+    }
+
+    private static func hatchPolylineToPoints(_ polyline: DXFPolylineEntity) -> [Vector3] {
+        guard !polyline.vertices.isEmpty else { return [] }
+        let vertices = polyline.vertices.map {
+            var bulge = -$0.bulge
+            if polyline.haveExtrusion && polyline.extrusion.z < 0 { bulge = -bulge }
+            return CADPolylineVertex(position: cadPolylinePoint($0, in: polyline),
+                              bulge: bulge,
+                              startWidth: $0.startWidth,
+                              endWidth: $0.endWidth)
+        }
+        let path = CADPolyline(vertices: vertices, isClosed: (polyline.flags & 1) != 0)
+        return path.hasBulges ? path.tessellatedPoints() : path.points
+    }
+
+    private static func stitchHatchEdges(_ edges: [[Vector3]]) -> [Vector3] {
+        guard !edges.isEmpty else { return [] }
+        var used = Array(repeating: false, count: edges.count)
+        var out = edges[0]
+        used[0] = true
+        var usedCount = 1
+
+        func distSq(_ a: Vector3, _ b: Vector3) -> Double {
+            let dx = a.x - b.x
+            let dy = a.y - b.y
+            let dz = a.z - b.z
+            return dx * dx + dy * dy + dz * dz
+        }
+
+        func appendEdge(_ edge: [Vector3]) {
+            guard !edge.isEmpty else { return }
+            if let tail = out.last, let first = edge.first, distSq(tail, first) < 1e-10 {
+                out.append(contentsOf: edge.dropFirst())
+            } else {
+                out.append(contentsOf: edge)
+            }
+        }
+
+        while usedCount < edges.count {
+            guard let tail = out.last else { break }
+            var bestIndex: Int?
+            var reverse = false
+            var bestDistance = Double.infinity
+
+            for index in edges.indices where !used[index] && !edges[index].isEmpty {
+                let edge = edges[index]
+                let startDistance = distSq(tail, edge[0])
+                if startDistance < bestDistance {
+                    bestDistance = startDistance
+                    bestIndex = index
+                    reverse = false
+                }
+                if let end = edge.last {
+                    let endDistance = distSq(tail, end)
+                    if endDistance < bestDistance {
+                        bestDistance = endDistance
+                        bestIndex = index
+                        reverse = true
+                    }
+                }
+            }
+
+            guard let index = bestIndex else { break }
+            used[index] = true
+            usedCount += 1
+            if reverse {
+                appendEdge(Array(edges[index].reversed()))
+            } else {
+                appendEdge(edges[index])
+            }
+        }
+
+        return out
+    }
+
+    private static func cleanAdjacentPoints(_ points: [Vector3], toleranceSquared: Double = 1e-10) -> [Vector3] {
+        var out: [Vector3] = []
+        out.reserveCapacity(points.count)
+        for point in points {
+            if let last = out.last, nearlySamePoint(last, point, toleranceSquared: toleranceSquared) {
+                continue
+            }
+            out.append(point)
+        }
+        if out.count > 1,
+           let first = out.first,
+           let last = out.last,
+           nearlySamePoint(first, last, toleranceSquared: toleranceSquared) {
+            out.removeLast()
+        }
+        return out
     }
 
     // MARK: - Boundary entity → polyline converters
@@ -356,8 +482,8 @@ public enum DXFEntityConverter {
         return out
     }
 
-    private static func nearlySamePoint(_ a: Vector3, _ b: Vector3) -> Bool {
-        (a - b).magnitudeSquared <= 1e-12
+    private static func nearlySamePoint(_ a: Vector3, _ b: Vector3, toleranceSquared: Double = 1e-12) -> Bool {
+        (a - b).magnitudeSquared <= toleranceSquared
     }
 
     // MARK: - Leader
@@ -460,6 +586,56 @@ public enum DXFEntityConverter {
         }
         simplify(0, pts.count - 1)
         return pts.enumerated().compactMap { keep[$0.offset] ? $0.element : nil }
+    }
+
+    private static func cadLWPoint(_ vertex: DXFVertex2D, in polyline: DXFLWPolylineEntity) -> Vector3 {
+        let raw = SwiftDXFrw.Vector3(x: vertex.x, y: vertex.y, z: polyline.elevation)
+        let extrusion = isDefaultExtrusion(polyline.extPoint) ? nil : polyline.extPoint
+        return cadPoint(raw, extrusion: extrusion)
+    }
+
+    private static func cadPolylinePoint(_ vertex: DXFVertexEntity, in polyline: DXFPolylineEntity) -> Vector3 {
+        cadPoint(vertex.basePoint, extrusion: polyline.haveExtrusion ? polyline.extrusion : nil)
+    }
+
+    private static func cadPoint(_ point: SwiftDXFrw.Vector3, extrusion: SwiftDXFrw.Vector3?) -> Vector3 {
+        guard let extrusion, !isDefaultExtrusion(extrusion) else { return yflip(point) }
+        return yflip(ocsToWcs(point, extrusion: extrusion))
+    }
+
+    private static func isDefaultExtrusion(_ n: SwiftDXFrw.Vector3) -> Bool {
+        abs(n.x) < 1e-12 && abs(n.y) < 1e-12 && abs(n.z - 1.0) < 1e-12
+    }
+
+    private static func ocsToWcs(_ point: SwiftDXFrw.Vector3, extrusion n: SwiftDXFrw.Vector3) -> SwiftDXFrw.Vector3 {
+        var az = n
+        var mag = sqrt(az.x * az.x + az.y * az.y + az.z * az.z)
+        if mag < 1e-12 {
+            az = SwiftDXFrw.Vector3(x: 0, y: 0, z: 1)
+            mag = 1.0
+        }
+        az.x /= mag; az.y /= mag; az.z /= mag
+
+        var ax: SwiftDXFrw.Vector3
+        if abs(az.x) < 0.015625 && abs(az.y) < 0.015625 {
+            ax = SwiftDXFrw.Vector3(x: az.z, y: 0, z: -az.x)
+        } else {
+            ax = SwiftDXFrw.Vector3(x: -az.y, y: az.x, z: 0)
+        }
+        mag = sqrt(ax.x * ax.x + ax.y * ax.y + ax.z * ax.z)
+        if mag > 1e-12 { ax.x /= mag; ax.y /= mag; ax.z /= mag }
+
+        var ay = SwiftDXFrw.Vector3(
+            x: az.y * ax.z - az.z * ax.y,
+            y: az.z * ax.x - az.x * ax.z,
+            z: az.x * ax.y - az.y * ax.x)
+        mag = sqrt(ay.x * ay.x + ay.y * ay.y + ay.z * ay.z)
+        if mag > 1e-12 { ay.x /= mag; ay.y /= mag; ay.z /= mag }
+
+        return SwiftDXFrw.Vector3(
+            x: ax.x * point.x + ay.x * point.y + az.x * point.z,
+            y: ax.y * point.x + ay.y * point.y + az.y * point.z,
+            z: ax.z * point.x + ay.z * point.y + az.z * point.z)
     }
 
     /// Convert SwiftDXFrw.Vector3 → ZephyrCore.Vector3 with Y-flip

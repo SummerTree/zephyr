@@ -245,6 +245,7 @@ public class DXFReader {
     /// Returns entity or nil. Advances pos past entity properties (to next 0 pair).
     private func parseEntity(at startPos: inout Int) throws -> DXFEntity? {
         guard startPos < pairs.count else { return nil }
+        let entityStart = startPos
         let (code, typeName) = pairs[startPos]
         guard code == 0 else { return nil }
 
@@ -270,7 +271,11 @@ public class DXFReader {
         case "ARC":      return parseArc(allPairs)
         case "ELLIPSE":  return parseEllipse(allPairs)
         case "LWPOLYLINE": return parseLWPolyline(allPairs)
-        case "POLYLINE": return parsePolylineHeader(allPairs)
+        case "POLYLINE":
+            var polylinePos = entityStart
+            let polyline = try parsePolylineEntity(at: &polylinePos)
+            startPos = polylinePos
+            return polyline
         case "VERTEX":   return nil  // handled by POLYLINE context
         case "SEQEND":   return nil
         case "SPLINE":   return parseSpline(allPairs)
@@ -453,6 +458,78 @@ extension DXFReader {
             case 73: e.smoothM = i(v)
             case 74: e.smoothN = i(v)
             case 75: e.curveType = i(v)
+            default: break
+            }
+        }
+        return e
+    }
+
+
+    func parsePolylineEntity(at startPos: inout Int) throws -> DXFPolylineEntity? {
+        guard startPos < pairs.count, pairs[startPos].code == 0, pairs[startPos].value == "POLYLINE" else {
+            return nil
+        }
+
+        var headerPairs: [(Int, String)] = [(0, "POLYLINE")]
+        var idx = startPos + 1
+        while idx < pairs.count {
+            let (c, v) = pairs[idx]
+            if c == 0 { break }
+            headerPairs.append((c, v))
+            idx += 1
+        }
+
+        let polyline = parsePolylineHeader(headerPairs)
+
+        while idx < pairs.count {
+            let (c, v) = pairs[idx]
+            guard c == 0 else { idx += 1; continue }
+
+            if v == "VERTEX" {
+                var vertexPairs: [(Int, String)] = [(0, "VERTEX")]
+                idx += 1
+                while idx < pairs.count {
+                    let (vc, vv) = pairs[idx]
+                    if vc == 0 { break }
+                    vertexPairs.append((vc, vv))
+                    idx += 1
+                }
+                polyline.vertices.append(parseVertex(vertexPairs))
+                continue
+            }
+
+            if v == "SEQEND" {
+                idx += 1
+                while idx < pairs.count, pairs[idx].code != 0 { idx += 1 }
+                break
+            }
+
+            break
+        }
+
+        polyline.vertexCount = polyline.vertices.count
+        startPos = idx
+        return polyline
+    }
+
+    func parseVertex(_ pairs: [(Int, String)]) -> DXFVertexEntity {
+        let e = DXFVertexEntity()
+        applyCommon(pairs, to: e)
+        for (c, v) in pairs {
+            switch c {
+            case 10: e.basePoint.x = d(v)
+            case 20: e.basePoint.y = d(v)
+            case 30: e.basePoint.z = d(v)
+            case 40: e.startWidth = d(v)
+            case 41: e.endWidth = d(v)
+            case 42: e.bulge = d(v)
+            case 50: e.tangentDir = d(v) * .pi / 180.0
+            case 70: e.flags = i(v)
+            case 71: e.vIndex1 = i(v)
+            case 72: e.vIndex2 = i(v)
+            case 73: e.vIndex3 = i(v)
+            case 74: e.vIndex4 = i(v)
+            case 91: e.identifier = i(v)
             default: break
             }
         }
