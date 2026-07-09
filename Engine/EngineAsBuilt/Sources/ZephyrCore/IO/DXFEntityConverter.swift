@@ -1,915 +1,473 @@
 import Foundation
+import SwiftDXFrw
 
-// =========================================================================
-// MARK: - DXFEntityConverter
-//
-// Converts parsed DXF entity data (from DXFImporter) into CADPrimitive arrays.
-// Maps DXF-specific structures (bulge arcs, polyline vertex sequences,
-// hatch boundary loops) into the engine's unified CADPrimitive enum.
-//
-// This is the bridge between raw DXF parsing and the rendering pipeline.
-import CDXFRW
-
-@MainActor
+/// Converts SwiftDXFrw entity types into Zephyr CADPrimitive arrays.
+/// Replaces the old CDXFRW bridge converter — pure Swift.
 public enum DXFEntityConverter {
 
-    public static var simplifyPolylines: Bool = false
+    public nonisolated(unsafe) static var simplifyPolylines: Bool = false
 
-    /// Converts a raw libdxfrw entity into engine primitives.
-    ///
-    /// - Parameter bylayerColor: Resolved color to bake into the primitives when
-    ///   the entity's own color is BYLAYER (256). Used for entities inside block
-    ///   definitions, where the render path can't resolve BYLAYER against the
-    ///   sub-entity's layer anymore (block geometry is flattened and only the
-    ///   INSERT's layer survives). Top-level entities pass nil — their BYLAYER
-    ///   colors resolve correctly at render time via the entity's own layer.
-    ///   Explicit entity colors always win over this fallback.
-    internal static func convertEntityToPrimitives(_ e: DXFRW_EntityData, arrowSize: Double, bylayerColor: ColorRGBA? = nil) -> [CADPrimitive] {
-        let explicitColor: ColorRGBA? = (e.color24 >= 0 || (e.color > 0 && e.color < 256)) ? DXFColorTable.aciToRGBA(e.color, color24: e.color24) : nil
-        // BYBLOCK (color == 0) must stay nil so it inherits the INSERT's
-        // resolved color at render time; only BYLAYER (256) takes the fallback.
+    /// Convert a SwiftDXFrw DXFEntity to CADPrimitives
+    internal static func convertEntityToPrimitives(
+        _ e: DXFEntity,
+        arrowSize: Double = 1.0,
+        bylayerColor: ColorRGBA? = nil
+    ) -> [CADPrimitive] {
+        let explicitColor: ColorRGBA? = resolveEntityColor(e)
         let primColor: ColorRGBA? = explicitColor ?? (e.color == 256 ? bylayerColor : nil)
 
-        switch e.type {
-        case DXFRW_ET_POINT:
-            return [.point(position: DXFImporter.toVector(e.basePoint), color: primColor)]
-
-        case DXFRW_ET_LINE:
-            return [.line(start: DXFImporter.toVector(e.basePoint), end: DXFImporter.toVector(e.secPoint), color: primColor)]
-
-        case DXFRW_ET_CIRCLE:
-            return [.circle(center: DXFImporter.toVector(e.basePoint), radius: e.radius, color: primColor)]
-
-        case DXFRW_ET_ARC:
-            // libdxfrw already converts these to radians in C++.
-            // We only negate and swap them to map the CCW sweep to a Y-down space.
-            return [.arc(
-                center: DXFImporter.toVector(e.basePoint),
-                radius: e.radius,
-                startAngle: -e.endAngle,
-                endAngle: -e.startAngle,
-                color: primColor
-            )]
-
-        case DXFRW_ET_LWPOLYLINE, DXFRW_ET_POLYLINE:
+        switch e.eType {
+        case .pOINT:
+            guard let p = e as? DXFPointEntity else { return [] }
+            return [.point(position: yflip(p.basePoint), color: primColor)]
+        case .lINE:
+            guard let l = e as? DXFLineEntity else { return [] }
+            return [.line(start: yflip(l.basePoint), end: yflip(l.secPoint), color: primColor)]
+        case .cIRCLE:
+            guard let c = e as? DXFCircleEntity else { return [] }
+            return [.circle(center: yflip(c.basePoint), radius: c.radius, color: primColor)]
+        case .aRC:
+            guard let a = e as? DXFArcEntity else { return [] }
+            return [.arc(center: yflip(a.basePoint), radius: a.radius,
+                        startAngle: -a.endAngle, endAngle: -a.startAngle, color: primColor)]
+        case .lWPOLYLINE, .pOLYLINE:
             return convertPolyline(e, color: primColor)
-
-        case DXFRW_ET_ELLIPSE:
-            // Approximate ellipse as a polyline for now
+        case .eLLIPSE:
             return convertEllipse(e, color: primColor)
-
-        case DXFRW_ET_SPLINE:
-            // Convert fit points or control points to line segments
+        case .sPLINE:
             return convertSpline(e, color: primColor)
-
-        case DXFRW_ET_TEXT, DXFRW_ET_MTEXT, DXFRW_ET_ATTRIB, DXFRW_ET_ATTDEF:
-            let textVal = e.textValue.map { String(cString: $0) } ?? ""
-            let cleaned = cleanMTextFormatting(textVal)
-            let height = e.textHeight > 0 ? e.textHeight : 2.5
-            let style = e.textStyle.map { String(cString: $0) }
-            let isText = e.type == DXFRW_ET_TEXT || e.type == DXFRW_ET_ATTRIB || e.type == DXFRW_ET_ATTDEF
-            // In DXF, if alignH is 1(Center), 2(Right), 4(Middle), or if alignV is non-zero,
-            // the second alignment point (secPoint) specifies the actual alignment location.
-            // (For alignH 3 and 5, secPoint is the endpoint, but basePoint is the start.)
-            let useSecPoint = isText && (e.alignH == 1 || e.alignH == 2 || e.alignH == 4 || e.alignV != 0)
-            
-            let posX = DXFImporter.toVector(useSecPoint ? e.secPoint : e.basePoint).x
-            let posY = DXFImporter.toVector(useSecPoint ? e.secPoint : e.basePoint).y
-            var pos = Vector3(x: posX, y: posY, z: 0)
-
-            let passAlignH = Int(e.alignH)
-            let passAlignV = Int(e.alignV)
-
-            var angle = -e.textAngle * .pi / 180.0
-            // TEXT coordinates are in OCS, but libdxfrw's
-            // DRW_Text::applyExtrusion() is an unimplemented TODO ("RLZ TODO"),
-            // so TEXT is the one OCS entity type the C++ side does not convert
-            // when reading with applyExt=true. Handle the planar mirrored case
-            // here, using the same guard libdxfrw applies for arcs. MTEXT is
-            // excluded: its insertion point is WCS per the DXF spec.
-            // (Limitation: AutoCAD draws such text mirror-imaged; we render it
-            // readable at the correct position and angle.)
-            if isText,
-               abs(e.extrusion.x) < 0.015625, abs(e.extrusion.y) < 0.015625,
-               e.extrusion.z < 0 {
-                // OCS (x, y) -> WCS (-x, y) -> engine (-x, -y).
-                // toVector already produced (x, -y), so only x is negated here.
-                pos = Vector3(x: -pos.x, y: pos.y, z: pos.z)
-                // WCS angle mirrors to (180° - θ); the engine's Y-flip negates
-                // angles, giving θ·π/180 - π.
-                angle = e.textAngle * .pi / 180.0 - .pi
-            }
-            return [
-                .text(
-                    position: pos,
-                    text: cleaned,
-                    height: height,
-                    rotation: angle,
-                    style: style,
-                    alignH: passAlignH,
-                    alignV: passAlignV,
-                    mtextWidth: e.type == DXFRW_ET_MTEXT && e.textWidthScale > 0 ? e.textWidthScale : nil,
-                    color: primColor
-                )
-            ]
-
-        case DXFRW_ET_INSERT:
-            // INSERTS are handled at the entity level (block references),
-            // not as primitives. Return empty.
+        case .tEXT, .mTEXT:
+            return convertText(e, color: primColor)
+        case .iNSERT:
             return []
-
-        case DXFRW_ET_SOLID:
-            return [
-                .fillPolygon(points: [
-                    DXFImporter.toVector(e.basePoint),
-                    DXFImporter.toVector(e.secPoint),
-                    DXFImporter.toVector(e.thirdPoint),
-                    DXFImporter.toVector(e.fourPoint),
-                ], color: primColor)
-            ]
-
-        case DXFRW_ET_3DFACE:
-            return [
-                .polygon(points: [
-                    DXFImporter.toVector(e.basePoint),
-                    DXFImporter.toVector(e.secPoint),
-                    DXFImporter.toVector(e.thirdPoint),
-                    DXFImporter.toVector(e.fourPoint),
-                ], color: primColor)
-            ]
-
-        case DXFRW_ET_HATCH:
-            var outerLoop: [Vector3] = []
-            var holeLoops: [[Vector3]] = []
-            var loopPolygons: [[Vector3]] = []
-
-            var editLoopPolygons: [[Vector3]] = []
-
-            if e.hatchLoopCount > 0, let loops = e.hatchLoops {
-                var outerIndex = 0
-                for i in 0..<Int(e.hatchLoopCount) {
-                    if (loops[i].loopFlags & 0x01) != 0 {
-                        outerIndex = i
-                        break
-                    }
-                }
-
-                for i in 0..<Int(e.hatchLoopCount) {
-                    let loop = loops[i]
-                    var pts: [Vector3] = []
-                    if loop.vertexCount > 0, let vertices = loop.vertices {
-                        for vIdx in 0..<Int(loop.vertexCount) {
-                            pts.append(Vector3(x: vertices[vIdx].x, y: -vertices[vIdx].y, z: vertices[vIdx].z))
-                        }
-                    }
-
-                    var editPts: [Vector3] = []
-                    if loop.editVertexCount > 0, let editVertices = loop.editVertices {
-                        for vIdx in 0..<Int(loop.editVertexCount) {
-                            editPts.append(Vector3(x: editVertices[vIdx].x, y: -editVertices[vIdx].y, z: editVertices[vIdx].z))
-                        }
-                    }
-                    if editPts.count < 2 { editPts = simplifiedGripLoop(from: pts) }
-
-                    guard pts.count >= 3 else { continue }
-                    loopPolygons.append(pts)
-                    if editPts.count >= 2 { editLoopPolygons.append(editPts) }
-
-                    if i == outerIndex {
-                        outerLoop = pts
-                    } else {
-                        holeLoops.append(pts)
-                    }
-                }
-            }
-
-            let invisibleBoundaryColor = ColorRGBA(r: 0, g: 0, b: 0, a: 0)
-            let editableBoundaryPrims = editLoopPolygons.map { CADPrimitive.polygon(points: $0, color: invisibleBoundaryColor) }
-            
-            if e.isGradient == 1 && !outerLoop.isEmpty {
-                // Gradient hatch: build gradient primitive
-                let gradName = e.gradientName.map { String(cString: $0) } ?? "LINEAR"
-                let gradAngle = e.gradientAngle * .pi / 180.0  // DXF degrees → radians
-
-                // color1 from entity color (or explicit)
-                let c1: ColorRGBA
-                if e.color1 >= 0 {
-                    let r = UInt8((e.color1 >> 16) & 0xFF)
-                    let g = UInt8((e.color1 >> 8) & 0xFF)
-                    let b = UInt8(e.color1 & 0xFF)
-                    c1 = ColorRGBA(r: r, g: g, b: b)
-                } else {
-                    c1 = primColor ?? .white
-                }
-
-                // color2 from gradient color stops
-                let c2: ColorRGBA
-                if e.color2 >= 0 {
-                    let r = UInt8((e.color2 >> 16) & 0xFF)
-                    let g = UInt8((e.color2 >> 8) & 0xFF)
-                    let b = UInt8(e.color2 & 0xFF)
-                    c2 = ColorRGBA(r: r, g: g, b: b)
-                } else {
-                    // fallback: lighter version of c1
-                    c2 = ColorRGBA(r: min(255, c1.r + 60), g: min(255, c1.g + 60), b: min(255, c1.b + 60))
-                }
-
-                if c1 == c2 {
-                    var prims: [CADPrimitive] = [.fillComplexPolygon(outer: outerLoop, holes: holeLoops, color: c1)]
-                    prims.append(contentsOf: editableBoundaryPrims)
-                    return prims
-                }
-
-                var prims: [CADPrimitive] = [.gradient(outer: outerLoop, holes: holeLoops,
-                                  gradientName: gradName, angle: gradAngle,
-                                  color1: c1, color2: c2)]
-                prims.append(contentsOf: editableBoundaryPrims)
-                return prims
-            }
-
-            if e.hatchSolid == 1 {
-                if !outerLoop.isEmpty {
-                    var prims: [CADPrimitive] = [.fillComplexPolygon(outer: outerLoop, holes: holeLoops, color: primColor)]
-                    prims.append(contentsOf: editableBoundaryPrims)
-                    return prims
-                }
-                return []
-            } else {
-                let patternName = e.hatchPatternName.map { String(cString: $0).uppercased() } ?? ""
-                let scale = e.hatchScale > 0 ? e.hatchScale : 1.0
-                let angle = e.hatchAngle
-                var prims: [CADPrimitive] = []
-                // Background fill color (DXF group 63)
-                let bgColor: ColorRGBA? = {
-                    if e.hatchBackgroundColor >= 0 {
-                        let r = UInt8((e.hatchBackgroundColor >> 16) & 0xFF)
-                        let g = UInt8((e.hatchBackgroundColor >> 8) & 0xFF)
-                        let b = UInt8(e.hatchBackgroundColor & 0xFF)
-                        return ColorRGBA(r: r, g: g, b: b)
-                    }
-                    return nil
-                }()
-                for poly in loopPolygons {
-                    prims.append(.hatch(
-                        boundary: poly,
-                        pattern: patternName.isEmpty ? "SOLID" : patternName,
-                        scale: scale,
-                        angle: angle,
-                        color: primColor,
-                        backgroundColor: bgColor))
-                }
-                return editableBoundaryPrims + prims
-            }
-
-        case DXFRW_ET_DIMENSION:
-            // Store dimension definition points as lines
-            let def = DXFImporter.toVector(e.dimDefPoint)
-            let txt = DXFImporter.toVector(e.dimTextPoint)
-            if def != txt {
-                return [.line(start: def, end: txt, color: primColor)]
-            }
-            return [.point(position: def, color: primColor)]
-
-        case DXFRW_ET_LEADER:
+        case .sOLID:
+            guard let s = e as? DXFSolidEntity else { return [] }
+            return [.fillPolygon(points: [yflip(s.basePoint), yflip(s.secPoint),
+                                         yflip(s.thirdPoint), yflip(s.fourPoint)], color: primColor)]
+        case .e3DFACE:
+            guard let f = e as? DXF3DFaceEntity else { return [] }
+            return [.polygon(points: [yflip(f.basePoint), yflip(f.secPoint),
+                                     yflip(f.thirdPoint), yflip(f.fourPoint)], color: primColor)]
+        case .hATCH:
+            return convertHatch(e, color: primColor)
+        case .dIMENSION:
+            guard let d = e as? DXFDimensionEntity else { return [] }
+            let def = yflip(d.defPoint); let txt = yflip(d.textPoint)
+            return def != txt ? [.line(start: def, end: txt, color: primColor)] : [.point(position: def, color: primColor)]
+        case .lEADER:
             return convertLeader(e, arrowSize: arrowSize, color: primColor)
-
-        case DXFRW_ET_IMAGE:
+        case .iMAGE:
             return convertImage(e, color: primColor)
-
-        case DXFRW_ET_TABLE:
-            return convertTable(e, color: primColor)
-
+        case .xLINE:
+            guard let x = e as? DXFXLineEntity else { return [] }
+            let base = yflip(x.basePoint); let dir = yflip(x.secPoint)
+            return [.line(start: base, end: Vector3(x: base.x + dir.x, y: base.y + dir.y, z: base.z + dir.z), color: primColor)]
+        case .rAY:
+            guard let r = e as? DXFRayEntity else { return [] }
+            return [.ray(start: yflip(r.basePoint), direction: yflip(r.secPoint), color: primColor)]
+        case .tRACE:
+            guard let t = e as? DXFTraceEntity else { return [] }
+            return [.line(start: yflip(t.basePoint), end: yflip(t.secPoint), color: primColor)]
+        case .vIEWPORT, .tABLE, .bLOCK, .uNKNOWN:
+            return []
         default:
             return []
         }
     }
 
-    /// Convert a DXF IMAGE entity to a CADPrimitive array.
-    private static func convertImage(_ e: DXFRW_EntityData, color: ColorRGBA?) -> [CADPrimitive] {
-        let insertion = DXFImporter.toVector(e.basePoint)
-        // imageU/imageV are single-pixel vectors; scale by sizeU/sizeV for full extent
-        let uSingle = DXFImporter.toVector(e.imageU)
-        let vSingle = DXFImporter.toVector(e.imageV)
-        let sizeU = e.imageSizeU > 0 ? e.imageSizeU : 1.0
-        let sizeV = e.imageSizeV > 0 ? e.imageSizeV : 1.0
-        let uAxis = Vector3(x: uSingle.x * sizeU, y: uSingle.y * sizeU, z: uSingle.z * sizeU)
-        let vAxis = Vector3(x: vSingle.x * sizeV, y: vSingle.y * sizeV, z: vSingle.z * sizeV)
+    // MARK: - Polyline
 
-        // Get file path (might be nil if IMAGEDEF wasn't found)
-        guard let filePathC = e.imageFilePath,
-              let filePath = String(cString: filePathC, encoding: .utf8),
-              !filePath.isEmpty else {
-            // Missing external image — return a placeholder rectangle
-            // Using a 100×100 unit rectangle with diagonal cross
-            let size = 100.0
-            let origin = Vector3(x: insertion.x, y: insertion.y - size, z: insertion.z)
-            return [
-                .rect(origin: origin, size: Vector3(x: size, y: size, z: 0), color: color),
-                .line(start: origin, end: Vector3(x: origin.x + size, y: origin.y + size, z: origin.z), color: color),
-                .line(start: Vector3(x: origin.x + size, y: origin.y, z: origin.z),
-                      end: Vector3(x: origin.x, y: origin.y + size, z: origin.z), color: color),
-            ]
+    private static func convertPolyline(_ e: DXFEntity, color: ColorRGBA?) -> [CADPrimitive] {
+        if let lw = e as? DXFLWPolylineEntity {
+            guard !lw.vertices.isEmpty else { return [] }
+            if lw.vertices.count == 1 {
+                return [.point(position: Vector3(x: lw.vertices[0].x, y: -lw.vertices[0].y, z: 0), color: color)]
+            }
+            let isClosed = (lw.flags & 0x01) != 0
+            let path = CADPolyline(
+                vertices: lw.vertices.map { v in
+                    CADPolylineVertex(position: Vector3(x: v.x, y: -v.y, z: 0),
+                                      bulge: -v.bulge, startWidth: v.startWidth, endWidth: v.endWidth)
+                }, isClosed: isClosed, lineTypeGenerationEnabled: (lw.flags & 0x80) != 0)
+            return [.polyline(path: simplifyIfNeeded(path), color: color)]
         }
+        if let pl = e as? DXFPolylineEntity {
+            guard !pl.vertices.isEmpty else { return [] }
+            let path = CADPolyline(points: pl.vertices.map { yflip($0.basePoint) },
+                                  isClosed: (pl.flags & 0x01) != 0, lineTypeGenerationEnabled: false)
+            return [.polyline(path: path, color: color)]
+        }
+        return []
+    }
 
-        // File path exists — but image data loading is deferred to ImageImporter
-        // For now, store the file path in a temporary imageName (will be replaced
-        // with sha256-based name when the file is actually loaded).
-        let imageName = filePath
+    // MARK: - Ellipse
 
-        let clipBoundary: [Vector3]?
-        if e.imageClippingEnabled != 0 && e.imageClipVertexCount > 0,
-           let clipVerts = e.imageClipVertices {
+    private static func convertEllipse(_ e: DXFEntity, color: ColorRGBA?) -> [CADPrimitive] {
+        guard let el = e as? DXFEllipseEntity else { return [] }
+        let center = yflip(el.basePoint)
+        let rawMajor = Vector3(x: el.secPoint.x, y: el.secPoint.y, z: el.secPoint.z)
+        let majorLen = rawMajor.magnitude; let minorLen = majorLen * el.ratio
+        guard majorLen > 1e-12, minorLen > 1e-12 else { return [.point(position: center, color: color)] }
+        let startP = el.startParam; let endP = el.endParam
+        let isFull = abs(abs(endP - startP) - .pi * 2) < 1e-5 || abs(endP - startP) < 1e-5
+        var sweep = endP - startP; if sweep < 0 && !isFull { sweep += .pi * 2.0 }
+        let angle = atan2(rawMajor.y, rawMajor.x); let cosR = cos(angle); let sinR = sin(angle)
+        let segs = 64; var pts: [Vector3] = []
+        for i in 0...segs {
+            let t = Double(i) / Double(segs); let param = startP + sweep * t
+            let px = majorLen * cos(param); let py = minorLen * sin(param)
+            let rx = px * cosR - py * sinR; let ry = px * sinR + py * cosR
+            pts.append(Vector3(x: center.x + rx, y: center.y - ry, z: center.z))
+        }
+        if isFull { return [.polygon(points: pts, color: color)] }
+        return (0..<(pts.count - 1)).map { .line(start: pts[$0], end: pts[$0 + 1], color: color) }
+    }
+
+    // MARK: - Spline
+
+    private static func convertSpline(_ e: DXFEntity, color: ColorRGBA?) -> [CADPrimitive] {
+        guard let sp = e as? DXFSplineEntity else { return [] }
+        let degree = sp.degree > 0 ? sp.degree : 3
+        if sp.nControl > 0, sp.nKnots > 0 {
+            let cps = sp.controlPoints.map { yflip($0) }
+            let weights = sp.weights.isEmpty ? Array(repeating: 1.0, count: cps.count) : sp.weights
+            return [.spline(controlPoints: cps, knots: sp.knots, degree: degree,
+                           weights: weights.contains { abs($0 - 1.0) > 1e-9 } ? weights : nil, color: color)]
+        }
+        if sp.nFit > 0 {
+            let fpts = sp.fitPoints.map { yflip($0) }
+            guard fpts.count > 1 else { return [] }
+            return (0..<(fpts.count - 1)).map { .line(start: fpts[$0], end: fpts[$0 + 1], color: color) }
+        }
+        return []
+    }
+
+    // MARK: - Text
+
+    private static func convertText(_ e: DXFEntity, color: ColorRGBA?) -> [CADPrimitive] {
+        guard let tx = e as? DXFTextEntity else { return [] }
+        let cleaned = cleanMTextFormatting(tx.text)
+        let height = tx.height > 0 ? tx.height : 2.5
+        let isText = e.eType == .tEXT
+        let useSec = isText && (tx.alignH == 1 || tx.alignH == 2 || tx.alignH == 4 || tx.alignV != 0)
+        let ref = useSec ? tx.secPoint : tx.basePoint
+        var pos = yflip(ref)
+        var angle = -tx.angle_p * .pi / 180.0
+        if isText, abs(tx.extrusion.x) < 0.015625, abs(tx.extrusion.y) < 0.015625, tx.extrusion.z < 0 {
+            pos = Vector3(x: -pos.x, y: pos.y, z: pos.z)
+            angle = tx.angle_p * .pi / 180.0 - .pi
+        }
+        let isMText = e.eType == .mTEXT
+        return [.text(position: pos, text: cleaned, height: height, rotation: angle,
+                      style: tx.style, alignH: tx.alignH, alignV: tx.alignV,
+                      mtextWidth: isMText && tx.widthScale > 0 ? tx.widthScale : nil, color: color)]
+    }
+
+    // MARK: - Hatch
+
+    private static func convertHatch(_ e: DXFEntity, color: ColorRGBA?) -> [CADPrimitive] {
+        guard let h = e as? DXFHatchEntity else { return [] }
+        let (outerLoop, holes) = extractHatchBoundaries(from: h)
+        let holesArr = holes.map { $0 }
+        if h.isGradient == 1, !outerLoop.isEmpty {
+            var c1 = color ?? .white; var c2 = ColorRGBA(r: UInt8(min(255, Int(c1.r) + 60)), g: UInt8(min(255, Int(c1.g) + 60)), b: UInt8(min(255, Int(c1.b) + 60)))
+            if let gc = h.gradientColors.first, gc.rgb >= 0 { c1 = rgbToRGBA(gc.rgb) }
+            if h.gradientColors.count > 1, h.gradientColors[1].rgb >= 0 { c2 = rgbToRGBA(h.gradientColors[1].rgb) }
+            if c1 == c2 { return [.fillComplexPolygon(outer: outerLoop, holes: holesArr, color: c1)] }
+            return [.gradient(outer: outerLoop, holes: holesArr, gradientName: h.gradientName,
+                             angle: h.gradientAngle * .pi / 180.0, color1: c1, color2: c2)]
+        }
+        if h.solid == 1, !outerLoop.isEmpty {
+            return [.fillComplexPolygon(outer: outerLoop, holes: holesArr, color: color)]
+        }
+        if !outerLoop.isEmpty {
+            let background = h.bgColor >= 0 ? DXFColorTable.aciToRGBA(h.bgColor, color24: -1) : nil
+            return [.hatch(boundary: outerLoop, pattern: h.name.isEmpty ? "SOLID" : h.name,
+                          scale: h.scale > 0 ? h.scale : 1.0, angle: h.angle_p * .pi / 180.0,
+                          color: color, backgroundColor: background)]
+        }
+        return []
+    }
+
+    /// Extract outer boundary and holes from a hatch entity's loops.
+    /// Each loop may contain multiple boundary entities (lines, arcs, ellipses, splines, polylines).
+    private static func extractHatchBoundaries(from h: DXFHatchEntity) -> (outer: [Vector3], holes: [[Vector3]]) {
+        guard !h.loops.isEmpty else { return ([], []) }
+
+        // Build polygon from all entities in a loop
+        func buildLoopPolygon(_ loop: DXFHatchLoop) -> [Vector3] {
+            // If loop has a single LWPolyline, extract vertices directly
+            if loop.entities.count == 1, let lw = loop.entities[0] as? DXFLWPolylineEntity {
+                return lw.vertices.map { Vector3(x: $0.x, y: -$0.y, z: 0) }
+            }
+            // If loop has a single old-style Polyline
+            if loop.entities.count == 1, let pl = loop.entities[0] as? DXFPolylineEntity {
+                return pl.vertices.map { yflip($0.basePoint) }
+            }
+
             var pts: [Vector3] = []
-            for i in 0..<Int(e.imageClipVertexCount) {
-                pts.append(Vector3(x: clipVerts[i].x, y: -clipVerts[i].y, z: 0))
+            for ent in loop.entities {
+                if let lw = ent as? DXFLWPolylineEntity {
+                    pts.append(contentsOf: lw.vertices.map { Vector3(x: $0.x, y: -$0.y, z: 0) })
+                } else if let pl = ent as? DXFPolylineEntity {
+                    pts.append(contentsOf: pl.vertices.map { yflip($0.basePoint) })
+                } else if let line = ent as? DXFLineEntity {
+                    pts.append(yflip(line.basePoint))
+                    pts.append(yflip(line.secPoint))
+                } else if let arc = ent as? DXFArcEntity {
+                    pts.append(contentsOf: arcToPolyline(arc))
+                } else if let ellipse = ent as? DXFEllipseEntity {
+                    pts.append(contentsOf: ellipseToPolyline(ellipse))
+                } else if let spline = ent as? DXFSplineEntity {
+                    pts.append(contentsOf: splineToPolyline(spline))
+                }
             }
-            clipBoundary = pts.isEmpty ? nil : pts
+            return pts
+        }
+
+        let loops = h.loops.map { buildLoopPolygon($0) }.filter { $0.count >= 3 }
+        guard !loops.isEmpty else { return ([], []) }
+
+        // First non-empty loop is the outer boundary; rest are holes
+        let outer = loops[0]
+        let holes = Array(loops.dropFirst())
+        return (outer, holes)
+    }
+
+    // MARK: - Boundary entity → polyline converters
+
+    /// Convert an arc to a polyline approximation
+    private static func arcToPolyline(_ arc: DXFArcEntity, segments: Int = 64) -> [Vector3] {
+        guard arc.radius > 1e-12 else { return [] }
+        let center = yflip(arc.basePoint)
+        // Angles are in radians; CADPrimitive uses -endAngle/-startAngle convention
+        let startAngle = -arc.endAngle
+        let endAngle = -arc.startAngle
+        var sweep = endAngle - startAngle
+        if sweep < 0 { sweep += .pi * 2.0 }
+        let n = max(segments, 3)
+        var pts: [Vector3] = []
+        for i in 0...n {
+            let t = Double(i) / Double(n)
+            let angle = startAngle + sweep * t
+            pts.append(Vector3(x: center.x + arc.radius * cos(angle),
+                              y: center.y + arc.radius * sin(angle), z: 0))
+        }
+        return pts
+    }
+
+    /// Convert an ellipse to a polyline approximation
+    private static func ellipseToPolyline(_ ellipse: DXFEllipseEntity, segments: Int = 64) -> [Vector3] {
+        let center = yflip(ellipse.basePoint)
+        let rawMajor = Vector3(x: ellipse.secPoint.x, y: ellipse.secPoint.y, z: ellipse.secPoint.z)
+        let majorLen = rawMajor.magnitude
+        let minorLen = majorLen * ellipse.ratio
+        guard majorLen > 1e-12, minorLen > 1e-12 else { return [] }
+        let startP = ellipse.startParam
+        let endP = ellipse.endParam
+        let isFull = abs(abs(endP - startP) - .pi * 2) < 1e-5 || abs(endP - startP) < 1e-5
+        var sweep = endP - startP
+        if sweep < 0 && !isFull { sweep += .pi * 2.0 }
+        let angle = atan2(rawMajor.y, rawMajor.x)
+        let cosR = cos(angle)
+        let sinR = sin(angle)
+        let n = max(segments, 3)
+        var pts: [Vector3] = []
+        for i in 0...n {
+            let t = Double(i) / Double(n)
+            let param = startP + sweep * t
+            let px = majorLen * cos(param)
+            let py = minorLen * sin(param)
+            let rx = px * cosR - py * sinR
+            let ry = px * sinR + py * cosR
+            pts.append(Vector3(x: center.x + rx, y: center.y - ry, z: center.z))
+        }
+        return pts
+    }
+
+    /// Convert a spline to a polyline approximation using control points
+    private static func splineToPolyline(_ spline: DXFSplineEntity, segments: Int = 64) -> [Vector3] {
+        let degree = spline.degree > 0 ? spline.degree : 3
+        let knots = spline.knots
+        var cps: [Vector3]
+
+        if spline.nControl > 0, !spline.controlPoints.isEmpty {
+            cps = spline.controlPoints.map { yflip($0) }
+        } else if spline.nFit > 0, !spline.fitPoints.isEmpty {
+            return spline.fitPoints.map { yflip($0) }
         } else {
-            clipBoundary = nil
+            return []
         }
 
-        return [.image(
-            insertion: insertion,
-            uAxis: uAxis,
-            vAxis: vAxis,
-            imageName: imageName,
-            clipBoundary: clipBoundary,
-            tint: nil
-        )]
-    }
-
-    /// Convert a DXF ACAD_TABLE entity to a DataTable primitive.
-    private static func convertTable(_ e: DXFRW_EntityData, color: ColorRGBA?) -> [CADPrimitive] {
-        var columns: [DataTableColumn] = []
-        var rows: [DataTableRow] = []
-
-        // Create columns from column widths
-        for c in 0..<Int(e.tableNumColumns) {
-            let width = (c < Int(e.tableNumColumns) && e.tableColumnWidths != nil)
-                ? e.tableColumnWidths![c] : 0.0
-            columns.append(DataTableColumn(
-                id: UUID(),
-                name: "Column \(c + 1)",
-                width: width,
-                alignment: .left
-            ))
+        var weights = normalizedSplineWeights(spline.weights, controlCount: cps.count)
+        let expectedControlCount = knots.count - degree - 1
+        if expectedControlCount > cps.count, !cps.isEmpty {
+            let baseCPs = cps
+            let baseWeights = weights
+            for i in 0..<(expectedControlCount - cps.count) {
+                cps.append(baseCPs[i % baseCPs.count])
+                weights.append(baseWeights[i % baseWeights.count])
+            }
         }
 
-        // Build rows from cell data
-        let cellCount = Int(e.tableCellCount)
-        var cellsByRow: [Int: [(col: Int, cell: DataTableCell)]] = [:]
+        guard degree >= 1, cps.count > degree, knots.count == cps.count + degree + 1 else {
+            return cps.count > 1 ? cps : []
+        }
 
-        for i in 0..<cellCount {
-            let row = Int(e.tableCellRow![i])
-            let col = Int(e.tableCellCol![i])
-            let text = e.tableCellText?[i].map { String(cString: $0) } ?? ""
-            let fieldHandle = e.tableCellFieldHandle?[i].map { String(cString: $0) }
-            let displayText = e.tableCellDisplayText?[i].map { String(cString: $0) }
-            let colSpan = (i < Int(e.tableCellCount) && e.tableCellColSpan != nil)
-                ? Int(e.tableCellColSpan![i]) : 1
-            let covered = (i < Int(e.tableCellCount) && e.tableCellCovered != nil)
-                ? (e.tableCellCovered![i] != 0) : false
+        var pts = NURBSEvaluator.evaluateAdaptiveByKnotSpans(
+            degree: degree,
+            knots: knots,
+            controlPoints: cps,
+            weights: weights,
+            chordTolerance: 0.01,
+            maxDepth: 10,
+            maxSegments: max(512, segments * 16)
+        )
 
-            let colID = col < columns.count ? columns[col].id : UUID()
-            let value: DataTableCellValue = text.isEmpty ? .empty : .string(text)
-
-            let cell = DataTableCell(
-                columnID: colID,
-                value: value,
-                formulaExpression: fieldHandle != nil ? "FIELD:\(fieldHandle!)" : nil,
-                cachedDisplayText: displayText,
-                rowSpan: 1,
-                colSpan: colSpan,
-                coveredByMerge: covered
+        if pts.count < 2 {
+            pts = NURBSEvaluator.evaluateByKnotSpans(
+                degree: degree,
+                knots: knots,
+                controlPoints: cps,
+                weights: weights,
+                segmentsPerSpan: 12
             )
-
-            if cellsByRow[row] == nil { cellsByRow[row] = [] }
-            cellsByRow[row]!.append((col: col, cell: cell))
         }
 
-        // Sort cells within each row by column index
-        let sortedRows = cellsByRow.keys.sorted()
-        for rowIdx in sortedRows {
-            let sortedCells = (cellsByRow[rowIdx] ?? []).sorted { $0.col < $1.col }
-            rows.append(DataTableRow(id: UUID(), cells: sortedCells.map { $0.cell }))
+        if ((spline.flags & 1) != 0 || (spline.flags & 2) != 0),
+           let first = pts.first, let last = pts.last,
+           !nearlySamePoint(first, last) {
+            pts.append(first)
         }
 
-        // Build row heights
-        var rowHeights: [Double] = []
-        if e.tableRowHeights != nil {
-            for r in 0..<Int(e.tableNumRows) {
-                rowHeights.append(r < Int(e.tableNumRows) ? e.tableRowHeights![r] : 2.0)
-            }
-        }
-
-        // Build native DXF payload for raw passthrough
-        var rawGroups: [DataTableRawDXFGroup] = []
-        let rawCount = Int(e.tableRawGroupCount)
-        if rawCount > 0, let codes = e.tableRawGroupCodes, let values = e.tableRawGroupValues {
-            for i in 0..<rawCount {
-                let value = values[i].map { String(cString: $0) } ?? ""
-                rawGroups.append(DataTableRawDXFGroup(code: Int(codes[i]), value: value))
-            }
-        }
-
-        let nativePayload = DataTableNativeDXFPayload(
-            rawGroups: rawGroups,
-            blockName: e.tableBlockName.map { String(cString: $0) },
-            tableStyleHandle: e.tableStyleHandle.map { String(cString: $0) },
-            blockRecordHandle: e.tableBlockRecordHandle.map { String(cString: $0) },
-            isModified: e.tableIsModified != 0
-        )
-
-        var data = DataTableData(
-            columns: columns,
-            rows: rows,
-            rowHeights: rowHeights,
-            defaultRowHeight: 2.0,
-            defaultColumnWidth: 5.0,
-            headerRowCount: 1,
-            cellMargin: 0.25,
-            textHeight: 1.5,
-            cellAlignment: .left,
-            nativeDXFPayload: nativePayload
-        )
-
-        let insertion = DXFImporter.toVector(e.basePoint)
-        let origin = Vector3(x: insertion.x, y: -insertion.y, z: insertion.z)
-
-        return [.table(data: data, origin: origin, color: color)]
+        return pts
     }
 
-
-
-    internal static func simplifiedGripLoop(from pts: [Vector3]) -> [Vector3] {
-        guard pts.count > 12 else { return pts }
-
-        let closed = pts.first.map { first in pts.last.map { first.distance(to: $0) < 1e-6 } ?? false } ?? false
-        let source = closed ? Array(pts.dropLast()) : pts
-        guard source.count > 12 else { return source }
-
-        let bb = BoundingBox3D(from: source)
-        let diag = max(bb.size.x, bb.size.y)
-        guard diag > 1e-9 else { return source }
-
-        let c = bb.center
-        let rx = max(abs(bb.max.x - c.x), abs(c.x - bb.min.x))
-        let ry = max(abs(bb.max.y - c.y), abs(c.y - bb.min.y))
-        if rx > 1e-9 && ry > 1e-9 {
-            var maxErr = 0.0
-            for p in source {
-                let nx = (p.x - c.x) / rx
-                let ny = (p.y - c.y) / ry
-                maxErr = max(maxErr, abs(sqrt(nx * nx + ny * ny) - 1.0))
-            }
-            if maxErr < 0.08 {
-                return [
-                    Vector3(x: c.x + rx, y: c.y, z: c.z),
-                    Vector3(x: c.x, y: c.y + ry, z: c.z),
-                    Vector3(x: c.x - rx, y: c.y, z: c.z),
-                    Vector3(x: c.x, y: c.y - ry, z: c.z)
-                ]
-            }
+    private static func normalizedSplineWeights(_ raw: [Double], controlCount: Int) -> [Double] {
+        guard controlCount > 0 else { return [] }
+        if raw.count == controlCount {
+            return raw.map { $0.isFinite && $0 > 0 ? $0 : 1.0 }
         }
-
-        let tolerance = max(diag * 0.015, 0.01)
-        let simplified = rdp(source, tolerance: tolerance)
-        if simplified.count >= 2 { return simplified }
-        return source
+        if raw.isEmpty {
+            return Array(repeating: 1.0, count: controlCount)
+        }
+        var out = raw.prefix(controlCount).map { $0.isFinite && $0 > 0 ? $0 : 1.0 }
+        while out.count < controlCount { out.append(1.0) }
+        return out
     }
 
+    private static func nearlySamePoint(_ a: Vector3, _ b: Vector3) -> Bool {
+        (a - b).magnitudeSquared <= 1e-12
+    }
+
+    // MARK: - Leader
+
+    private static func convertLeader(_ e: DXFEntity, arrowSize: Double, color: ColorRGBA?) -> [CADPrimitive] {
+        guard let ld = e as? DXFLeaderEntity, ld.vertices.count >= 2 else { return [] }
+        let pts = ld.vertices.map { yflip($0) }
+        var prims: [CADPrimitive] = []
+        if ld.arrow != 0 {
+            let v0 = pts[0]; let v1 = pts[1]
+            let dir = (v1 - v0).normalized; let len = min(arrowSize, v0.distance(to: v1) * 0.5)
+            let perp = Vector3(x: -dir.y, y: dir.x, z: 0); let wing = len * 0.25
+            let tip = v0 + dir * len
+            prims.append(.fillPolygon(points: [v0, tip + perp * wing, tip - perp * wing], color: color))
+            prims.append(.line(start: tip, end: v1, color: color))
+        }
+        for i in (ld.arrow != 0 ? 1 : 0)..<(pts.count - 1) {
+            prims.append(.line(start: pts[i], end: pts[i + 1], color: color))
+        }
+        return prims
+    }
+
+    // MARK: - Image
+
+    private static func convertImage(_ e: DXFEntity, color: ColorRGBA?) -> [CADPrimitive] {
+        guard let img = e as? DXFImageEntity else { return [] }
+        let ins = yflip(img.basePoint)
+        let u = yflip(img.secPoint) * (img.sizeU > 0 ? img.sizeU : 1.0)
+        let v = yflip(img.vVector) * (img.sizeV > 0 ? img.sizeV : 1.0)
+        return [.image(insertion: ins, uAxis: u, vAxis: v,
+                      imageName: String(format: "%X", img.ref), clipBoundary: nil, tint: nil)]
+    }
+
+    // MARK: - Helpers
+
+    private static func resolveEntityColor(_ e: DXFEntity) -> ColorRGBA? {
+        if e.color24 >= 0 || (e.color > 0 && e.color < 256) {
+            return DXFColorTable.aciToRGBA(e.color, color24: e.color24)
+        }
+        return nil
+    }
+
+    public static func cleanMTextFormatting(_ text: String) -> String {
+        var clean = ""; var i = text.startIndex
+        while i < text.endIndex {
+            let c = text[i]; let nextI = text.index(after: i)
+            guard nextI < text.endIndex else { clean.append(c); break }
+            let next = text[nextI]
+            if c == "\\" || c == "¥" {
+                switch next {
+                case "P": clean.append("\n"); i = text.index(after: nextI)
+                case "L", "l": clean.append("%%u"); i = text.index(after: nextI)
+                case "O", "o": i = text.index(after: nextI)
+                case "\\", "¥", "{", "}": clean.append(String(next)); i = text.index(after: nextI)
+                default:
+                    if Set("fFcChHsStTwWaAqQp").contains(next) {
+                        var j = text.index(after: nextI)
+                        while j < text.endIndex, text[j] != ";" { j = text.index(after: j) }
+                        i = j < text.endIndex ? text.index(after: j) : text.endIndex
+                    } else { i = nextI }
+                }
+            } else if c == "{" || c == "}" { i = nextI }
+            else { clean.append(c); i = nextI }
+        }
+        return clean
+    }
+
+    private static func simplifyIfNeeded(_ path: CADPolyline) -> CADPolyline {
+        guard simplifyPolylines, !path.hasBulges, path.vertices.count > 200 else { return path }
+        let bb = BoundingBox3D(from: path.points)
+        let diag = max(bb.size.x, bb.size.y); let tol = max(diag * 0.002, 0.01)
+        var simplified = rdp(path.points, tolerance: tol)
+        let minPts = path.isClosed ? 3 : 2
+        if simplified.count < minPts {
+            simplified = path.isClosed ? [bb.min, Vector3(x: bb.max.x, y: bb.min.y), bb.max, Vector3(x: bb.min.x, y: bb.max.y)]
+                                       : [path.points.first!, path.points.last!]
+        }
+        return CADPolyline(points: simplified, isClosed: path.isClosed, lineTypeGenerationEnabled: path.lineTypeGenerationEnabled)
+    }
 
     internal static func rdp(_ pts: [Vector3], tolerance: Double) -> [Vector3] {
         guard pts.count > 2 else { return pts }
-        var keep = Array(repeating: false, count: pts.count)
-        keep[0] = true
-        keep[pts.count - 1] = true
-
-        func perpendicularDistance(_ p: Vector3, _ a: Vector3, _ b: Vector3) -> Double {
-            let ab = b - a
-            let ap = p - a
+        var keep = [Bool](repeating: false, count: pts.count)
+        keep[0] = true; keep[pts.count - 1] = true
+        func perpDist(_ p: Vector3, _ a: Vector3, _ b: Vector3) -> Double {
+            let ab = b - a; let ap = p - a
             let len2 = ab.x * ab.x + ab.y * ab.y
-            if len2 < 1e-12 { return p.distance(to: a) }
+            guard len2 > 1e-12 else { return p.distance(to: a) }
             let t = max(0, min(1, (ap.x * ab.x + ap.y * ab.y) / len2))
-            let proj = Vector3(x: a.x + ab.x * t, y: a.y + ab.y * t, z: a.z + ab.z * t)
-            return p.distance(to: proj)
+            return p.distance(to: a + ab * t)
         }
-
         func simplify(_ start: Int, _ end: Int) {
             guard end > start + 1 else { return }
-            var maxDist = 0.0
-            var maxIdx = start
+            var maxDist = 0.0; var maxIdx = start
             for i in (start + 1)..<end {
-                let d = perpendicularDistance(pts[i], pts[start], pts[end])
-                if d > maxDist {
-                    maxDist = d
-                    maxIdx = i
-                }
+                let d = perpDist(pts[i], pts[start], pts[end])
+                if d > maxDist { maxDist = d; maxIdx = i }
             }
-            if maxDist > tolerance {
-                keep[maxIdx] = true
-                simplify(start, maxIdx)
-                simplify(maxIdx, end)
-            }
+            if maxDist > tolerance { keep[maxIdx] = true; simplify(start, maxIdx); simplify(maxIdx, end) }
         }
-
         simplify(0, pts.count - 1)
         return pts.enumerated().compactMap { keep[$0.offset] ? $0.element : nil }
     }
 
-
-    internal static func convertLeader(_ e: DXFRW_EntityData, arrowSize: Double, color: ColorRGBA?) -> [CADPrimitive] {
-        let count = Int(e.vertexCount)
-        guard count > 0, let vertices = e.vertices else { return [] }
-
-        var points: [Vector3] = []
-        points.reserveCapacity(count)
-        for i in 0..<count {
-            points.append(Vector3(x: vertices[i].x, y: -vertices[i].y, z: vertices[i].startWidth))
-        }
-
-        points = normalizedLeaderPoints(points, textHeight: e.textHeight, arrowSize: arrowSize)
-        guard points.count >= 2 else { return [] }
-
-        var prims: [CADPrimitive] = []
-
-        let hasArrow = e.flags != 0
-        var startIdx = 0
-
-        if hasArrow {
-            let v0 = points[0]
-            let v1 = points[1]
-            let dir = v1 - v0
-            let len = dir.magnitude
-            if len > 1e-6 {
-                let d = dir.normalized
-                let arrowLen = min(arrowSize, len * 0.5)
-                let arrowHalfWidth = arrowLen * 0.25
-                let p = Vector3(x: -d.y, y: d.x, z: 0)
-                let pRight = v0 + d * arrowLen + p * arrowHalfWidth
-                let pLeft = v0 + d * arrowLen - p * arrowHalfWidth
-                prims.append(.fillPolygon(points: [v0, pRight, pLeft], color: color))
-                prims.append(.line(start: v0 + d * arrowLen, end: v1, color: color))
-                startIdx = 1
-            }
-        }
-
-        for i in startIdx..<(points.count - 1) {
-            prims.append(.line(start: points[i], end: points[i + 1], color: color))
-        }
-
-        return prims
+    /// Convert SwiftDXFrw.Vector3 → ZephyrCore.Vector3 with Y-flip
+    private static func yflip(_ v: SwiftDXFrw.Vector3) -> Vector3 {
+        Vector3(x: v.x, y: -v.y, z: v.z)
     }
 
-    private static func normalizedLeaderPoints(
-        _ input: [Vector3],
-        textHeight: Double,
-        arrowSize: Double
-    ) -> [Vector3] {
-        var points: [Vector3] = []
-        points.reserveCapacity(input.count)
-
-        for point in input {
-            if let last = points.last, last.distance(to: point) < 1e-8 {
-                continue
-            }
-            points.append(point)
-        }
-
-        while points.count >= 3, shouldDropLeaderHookOutlier(points, textHeight: textHeight, arrowSize: arrowSize) {
-            points.removeLast()
-        }
-
-        return points
-    }
-
-    private static func shouldDropLeaderHookOutlier(
-        _ points: [Vector3],
-        textHeight: Double,
-        arrowSize: Double
-    ) -> Bool {
-        guard points.count >= 3 else { return false }
-
-        let a = points[points.count - 3]
-        let b = points[points.count - 2]
-        let c = points[points.count - 1]
-        let last = c - b
-        let lastLen = last.magnitude
-        guard lastLen > 1e-8 else { return true }
-
-        let isNearlyHorizontal = abs(last.y) <= max(abs(last.x) * 0.02, 1e-6)
-        guard isNearlyHorizontal else { return false }
-
-        var priorMax = max((b - a).magnitude, 1e-8)
-        if points.count > 3 {
-            for i in 0..<(points.count - 2) {
-                priorMax = max(priorMax, (points[i + 1] - points[i]).magnitude)
-            }
-        }
-
-        let leaderTextHeight = textHeight > 0 ? textHeight : 2.5
-        let drawingScale = max(leaderTextHeight, arrowSize, 1.0)
-        let outlierLimit = max(priorMax * 8.0, drawingScale * 40.0)
-
-        return lastLen > outlierLimit
-    }
-
-
-    internal static func convertPolyline(_ e: DXFRW_EntityData, color: ColorRGBA?) -> [CADPrimitive] {
-        let count = Int(e.vertexCount)
-        guard count > 0, let vertices = e.vertices else { return [] }
-
-        if count == 1 {
-            return [.point(position: Vector3(x: vertices[0].x, y: -vertices[0].y, z: 0), color: color)]
-        }
-
-        let isClosed = (e.flags & 0x01) != 0
-        var path = CADPolyline(
-            vertices: (0..<count).map { index in
-                let vertex = vertices[index]
-                return CADPolylineVertex(
-                    position: Vector3(x: vertex.x, y: -vertex.y, z: 0),
-                    bulge: -vertex.bulge,
-                    startWidth: vertex.startWidth,
-                    endWidth: vertex.endWidth)
-            },
-            isClosed: isClosed,
-            lineTypeGenerationEnabled: (e.flags & 0x80) != 0)
-
-        if DXFEntityConverter.simplifyPolylines,
-           !path.hasBulges,
-           path.vertices.count > 200 {
-            let originalPoints = path.points
-            let bb = BoundingBox3D(from: originalPoints)
-            let diag = max(bb.size.x, bb.size.y)
-            let tolerance = max(diag * 0.002, 0.01)
-            var simplified = rdp(originalPoints, tolerance: tolerance)
-            let minimum = isClosed ? 3 : 2
-            if simplified.count < minimum {
-                simplified = isClosed
-                    ? [bb.min,
-                       Vector3(x: bb.max.x, y: bb.min.y, z: bb.min.z),
-                       bb.max,
-                       Vector3(x: bb.min.x, y: bb.max.y, z: bb.min.z)]
-                    : [originalPoints.first!, originalPoints.last!]
-            }
-            path = CADPolyline(
-                points: simplified,
-                isClosed: isClosed,
-                lineTypeGenerationEnabled: path.lineTypeGenerationEnabled)
-        }
-
-        return [.polyline(path: path, color: color)]
-    }
-
-
-    internal static func convertEllipse(_ e: DXFRW_EntityData, color: ColorRGBA?) -> [CADPrimitive] {
-        let center = DXFImporter.toVector(e.basePoint)
-        
-        // The major axis vector is stored relative to the center
-        // We do NOT use DXFImporter.toVector() here because it flips Y. We want the raw DXF vector first 
-        // so we can calculate the true geometric angle, then we will transform it at the end.
-        let rawMajorVec = Vector3(x: e.secPoint.x, y: e.secPoint.y, z: e.secPoint.z)
-        let majorLen = rawMajorVec.magnitude
-        let minorLen = majorLen * e.axisRatio
-
-        guard majorLen > 1e-12, minorLen > 1e-12 else {
-            return [.point(position: center, color: color)]
-        }
-
-        // DXF angles are in radians.
-        //
-        // NOTE: extrusion handling for ellipses now lives in libdxfrw
-        // (dxfrw_bridge.cpp reads with applyExt=true). For (0,0,-1) extrusion,
-        // DRW_Ellipse::applyExtrusion() already mirrors the major axis vector
-        // and swaps/reverses the start/end parameters before this data
-        // reaches Swift. Re-applying the swap here would cancel libdxfrw's
-        // correction (the swap is an involution), so the values are used
-        // exactly as delivered.
-        let startParam = e.startAngle
-        let endParam = e.endAngle
-
-        let segments = 64
-        let isFull = abs(abs(endParam - startParam) - .pi * 2) < 1e-5 || abs(endParam - startParam) < 1e-5
-        
-        var sweep = endParam - startParam
-        if sweep < 0 && !isFull { sweep += .pi * 2.0 }
-
-        // Find the rotation of the major axis relative to the X axis
-        let ellipseRotation = atan2(rawMajorVec.y, rawMajorVec.x)
-        
-        let cosRot = cos(ellipseRotation)
-        let sinRot = sin(ellipseRotation)
-
-        var points: [Vector3] = []
-        
-        for i in 0...segments {
-            let t = Double(i) / Double(segments)
-            let param = startParam + sweep * t
-            
-            // Calculate point on a standard, unrotated ellipse at the origin
-            let px = majorLen * cos(param)
-            let py = minorLen * sin(param)
-            
-            // Rotate the point by the major axis angle
-            let rx = px * cosRot - py * sinRot
-            let ry = px * sinRot + py * cosRot
-            
-            // Translate to center and apply the engine's Y-down flip!
-            let finalX = center.x + rx
-            let finalY = center.y - ry // FLIP Y HERE!
-            let finalZ = center.z
-            
-            points.append(Vector3(x: finalX, y: finalY, z: finalZ))
-        }
-
-        if isFull {
-            return [.polygon(points: points, color: color)]
-        } else {
-            var prims: [CADPrimitive] = []
-            for i in 0..<(points.count - 1) {
-                prims.append(.line(start: points[i], end: points[i + 1], color: color))
-            }
-            return prims
-        }
-    }
-
-
-    internal static func convertSpline(_ e: DXFRW_EntityData, color: ColorRGBA?) -> [CADPrimitive] {
-        // Safely determine degree (AutoCAD defaults to 3 / Cubic if omitted)
-        let rawDegree = Int(e.splineDegree)
-        let degree = rawDegree > 0 ? rawDegree : 3
-
-        // 1. Preserve NURBS spline as a first-class primitive using Control Points & Knots
-        if e.splineNControl > 0 && e.splineNKnots > 0,
-           let ctrlPts = e.splineControlPoints,
-           let knotsPtr = e.splineKnots {
-
-            let ctrlCount = Int(e.splineNControl)
-            let knotCount = Int(e.splineNKnots)
-
-            var vecs: [Vector3] = []
-            for i in 0..<ctrlCount {
-                let c = ctrlPts[i]
-                vecs.append(Vector3(x: c.x, y: -c.y, z: c.z))
-            }
-
-            var weights: [Double] = []
-            if e.splineWeightCount > 0, let wPts = e.splineWeights {
-                weights = (0..<Int(e.splineWeightCount)).map { wPts[$0] }
-            } else {
-                weights = Array(repeating: 1.0, count: ctrlCount)
-            }
-
-            var knots = (0..<knotCount).map { knotsPtr[$0] }
-
-            var finalCPs = vecs
-            var finalWeights = weights
-            let isClosed = (e.flags & 1) != 0 || (e.flags & 2) != 0
-
-            if isClosed && knotCount == ctrlCount + 1 {
-                let p = degree
-                let period = knots.last! - knots.first!
-                var newKnots = knots
-                
-                // Add p knots to the beginning
-                if p > 0 {
-                    for i in 1...p {
-                        let idx = ctrlCount - i
-                        let k = idx >= 0 ? knots[idx] - period : knots[0] - period
-                        newKnots.insert(k, at: 0)
-                    }
-                }
-                
-                // Add p knots to the end
-                if p > 0 {
-                    for i in 1...p {
-                        let idx = i
-                        let k = idx < knots.count ? knots[idx] + period : knots.last! + period
-                        newKnots.append(k)
-                    }
-                }
-                knots = newKnots
-
-                // Add p control points to the end
-                if p > 0 {
-                    for i in 0..<p {
-                        finalCPs.append(finalCPs[i % ctrlCount])
-                        finalWeights.append(finalWeights[i % ctrlCount])
-                    }
-                }
-            } else {
-                // Auto-fix omitted periodic control points:
-                // AutoCAD often compacts closed splines. We wrap and pad them 
-                // back in so the knot vector math lines up perfectly.
-                let expectedCount = knots.count - degree - 1
-
-                if finalCPs.count < expectedCount {
-                    let missing = expectedCount - finalCPs.count
-                    for i in 0..<missing {
-                        finalCPs.append(vecs[i % vecs.count])
-                        finalWeights.append(weights[i % weights.count])
-                    }
-                }
-            }
-
-            // Check if weights are non-uniform (all 1.0 = uniform)
-            let hasWeights = finalWeights.contains(where: { abs($0 - 1.0) > 1e-9 })
-            return [.spline(
-                controlPoints: finalCPs,
-                knots: knots,
-                degree: degree,
-                weights: hasWeights ? finalWeights : nil,
-                color: color
-            )]
-        }
-
-        // 2. Fallback to Fit Points (no NURBS data available)
-        // Convert fit points to line segments since there's no parametric definition.
-        if e.splineNFit > 0, let pts = e.splineFitPoints {
-            let count = Int(e.splineNFit)
-            var vecs: [Vector3] = []
-            for i in 0..<count {
-                let c = pts[i]
-                vecs.append(Vector3(x: c.x, y: -c.y, z: c.z))
-            }
-
-            if vecs.count > 1 {
-                var prims: [CADPrimitive] = []
-                for i in 0..<(vecs.count - 1) {
-                    prims.append(.line(start: vecs[i], end: vecs[i + 1], color: color))
-                }
-                return prims
-            }
-        }
-
-        return []
-    }
-
-
-    /// Strip AutoCAD MTEXT formatting codes (e.g. {\fpxqc;\Farchquik.shx|c0;...} or \P, \L, etc.)
-    /// and map backslash/Yen control characters appropriately.
-    nonisolated public static func cleanMTextFormatting(_ text: String) -> String {
-        var clean = ""
-        var i = 0
-        let chars = Array(text)
-        
-        while i < chars.count {
-            let c = chars[i]
-            
-            // Check for backslash or Yen symbol (often a mapped backslash in Japanese/Asian codepages)
-            if c == "\\" || c == "¥" {
-                if i + 1 < chars.count {
-                    let next = chars[i + 1]
-                    if next == "P" {
-                        // \P is paragraph/newline (uppercase only)
-                        clean.append("\n")
-                        i += 2
-                        continue
-                    } else if next == "L" || next == "l" {
-                        // \L is underline start/stop. Toggle it using our custom underline prefix %%u.
-                        clean.append("%%u")
-                        i += 2
-                        continue
-                    } else if next == "O" || next == "o" {
-                        // \O is overline. Strip it.
-                        i += 2
-                        continue
-                    } else if next == "\\" || next == "¥" || next == "{" || next == "}" {
-                        // Escaped backslash, Yen, or braces
-                        clean.append(String(next))
-                        i += 2
-                        continue
-                    } else {
-                        // Check if it's one of the parameter codes that has a semicolon
-                        let paramCodes: Set<Character> = ["f", "F", "c", "C", "h", "H", "s", "S", "t", "T", "w", "W", "a", "A", "q", "Q", "p"]
-                        if paramCodes.contains(next) {
-                            i += 2
-                            while i < chars.count {
-                                let curr = chars[i]
-                                i += 1
-                                if curr == ";" {
-                                    break
-                                }
-                            }
-                            continue
-                        } else {
-                            // Unknown code, just skip backslash/Yen and continue
-                            i += 1
-                            continue
-                        }
-                    }
-                }
-            } else if c == "{" || c == "}" {
-                // Formatting groups: just skip the braces
-                i += 1
-                continue
-            }
-            
-            clean.append(String(c))
-            i += 1
-        }
-        
-        return clean
+    private static func rgbToRGBA(_ rgb: Int32) -> ColorRGBA {
+        ColorRGBA(r: UInt8((rgb >> 16) & 0xFF), g: UInt8((rgb >> 8) & 0xFF), b: UInt8(rgb & 0xFF))
     }
 }

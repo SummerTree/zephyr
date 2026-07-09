@@ -21,7 +21,7 @@ let package = Package(
         .target(
             name: "ZephyrCore",
             dependencies: [
-                .product(name: "CDXFRW", package: "SwiftDXFrw"),
+                .product(name: "SwiftDXFrw", package: "SwiftDXFrw"),
                 .product(name: "CDWG", package: "SwiftDWG"),
                 .product(name: "CZLibNG", package: "SwiftZLibNG"),
                 .product(name: "CSDL3", package: "SwiftSDL"),

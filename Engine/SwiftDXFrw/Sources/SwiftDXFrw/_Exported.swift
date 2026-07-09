@@ -1,3 +1,2 @@
-#if canImport(CDXFRW)
-@_exported import CDXFRW
-#endif
+// No external C dependencies needed.
+// All DXF functionality is pure Swift.

@@ -308,4 +308,35 @@ public enum DXFColorTable {
         // > 90: direct alpha value (0=transparent, 255=opaque)
         return Double(trans) / 255.0
     }
+
+    /// Convert RGBA → ACI. Returns 7 (white) by default.
+    public static func rgbaToACI(_ color: ColorRGBA) -> Int32 {
+        if color.a == 0 { return 256 }
+        var best: Int32 = 7; var bestDist = Double.infinity
+        for i in 1..<256 {
+            let (dr, dg, db) = (Double(Int(color.r) - Int(_dxfPalette[i][0])),
+                                Double(Int(color.g) - Int(_dxfPalette[i][1])),
+                                Double(Int(color.b) - Int(_dxfPalette[i][2])))
+            let dist = dr * dr + dg * dg + db * db
+            if dist < bestDist { bestDist = dist; best = Int32(i) }
+        }
+        return best
+    }
+
+    /// Convert RGBA → 24-bit true color. nil if BYLAYER.
+    public static func rgbaToTrueColor(_ color: ColorRGBA) -> Int32? {
+        if color.a == 0 { return nil }
+        return (Int32(color.r) << 16) | (Int32(color.g) << 8) | Int32(color.b)
+    }
+
+    /// ACI palette table (indices 1-255), used by rgbaToACI
+    private static let _dxfPalette: [[UInt8]] = {
+        // Map ACI → RGB using the existing aciToRGBA logic
+        var p = [[UInt8]](repeating: [0,0,0], count: 256)
+        for i in 1..<256 {
+            let c = aciToRGBA(Int32(i), color24: -1)
+            p[i] = [c.r, c.g, c.b]
+        }
+        return p
+    }()
 }
