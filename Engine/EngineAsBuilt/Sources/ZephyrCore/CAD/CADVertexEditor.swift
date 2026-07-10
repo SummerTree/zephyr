@@ -108,7 +108,7 @@ public final class CADVertexEditor {
             case .polygon(_, let c):
                 prim = .polygon(points: localPts, color: c)
             case .polyline(let path, let c):
-                if !path.hasBulges, localPts.count == path.vertices.count {
+                if path.hatchEdges.isEmpty, !path.hasBulges, localPts.count == path.vertices.count {
                     prim = .polyline(
                         path: CADPolyline(
                             points: localPts,
@@ -164,7 +164,7 @@ public final class CADVertexEditor {
                 prim = .hatch(boundary: localPts, pattern: pattern, scale: scale, angle: angle, color: c, backgroundColor: nil)
             case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let c, let bg):
                 var newBoundary = boundary
-                if localPts.count == newBoundary.vertices.count {
+                if newBoundary.hatchEdges.isEmpty, localPts.count == newBoundary.vertices.count {
                     for i in localPts.indices { newBoundary.vertices[i].position = localPts[i] }
                 }
                 prim = .hatchPath(boundary: newBoundary, holes: holes, pattern: pattern, scale: scale, angle: angle, color: c, backgroundColor: bg)

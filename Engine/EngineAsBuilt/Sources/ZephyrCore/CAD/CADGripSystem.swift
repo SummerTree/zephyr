@@ -77,7 +77,17 @@ public enum CADGripSystem {
                 continue
             }
 
-            if simplifyComplexBlocks && geometry.count > 50 { continue }
+            let containsAnalyticHatchBoundary = geometry.contains { primitive in
+                switch primitive {
+                case .polyline(let path, _):
+                    return path.isHatchBoundaryCarrier && !path.hatchEdges.isEmpty
+                case .hatchPath(let path, _, _, _, _, _, _):
+                    return !path.hatchEdges.isEmpty
+                default:
+                    return false
+                }
+            }
+            if simplifyComplexBlocks && geometry.count > 50 && !containsAnalyticHatchBoundary { continue }
 
             // ── Image entities: generate entity-level grips (center + 4 corners)
             //     from the oriented bounding box, for move/scale support.
@@ -108,6 +118,22 @@ public enum CADGripSystem {
 
             for prim in geometry {
                 if case .polyline(let path, _) = prim {
+                    if !path.hatchEdges.isEmpty {
+                        let localGripPoints = analyticHatchGripPoints(path)
+                        for (index, localPoint) in localGripPoints.enumerated() {
+                            let point = entity.transform.transformPoint(localPoint)
+                            let screen = EngineCameraManager.worldToScreen(
+                                worldX: point.x, worldY: point.y, cam: cam)
+                            results.append(CADSelectionManager.CadGripInfo(
+                                handle: handle,
+                                grip: .vertex(entity: handle, index: globalIdx + index),
+                                screenPos: screen,
+                                worldPos: point))
+                        }
+                        globalIdx += localGripPoints.count
+                        continue
+                    }
+
                     let worldVertices = path.vertices.map {
                         entity.transform.transformPoint($0.position)
                     }
@@ -140,7 +166,24 @@ public enum CADGripSystem {
 
                 if case .hatchPath(let boundary, _, _, _, _, _, _) = prim {
                     if hasEditableBoundary {
-                        globalIdx += boundary.vertices.count
+                        globalIdx += boundary.hatchEdges.isEmpty
+                            ? boundary.vertices.count
+                            : analyticHatchGripPoints(boundary).count
+                        continue
+                    }
+                    if !boundary.hatchEdges.isEmpty {
+                        let localGripPoints = analyticHatchGripPoints(boundary)
+                        for (index, localPoint) in localGripPoints.enumerated() {
+                            let point = entity.transform.transformPoint(localPoint)
+                            let screen = EngineCameraManager.worldToScreen(
+                                worldX: point.x, worldY: point.y, cam: cam)
+                            results.append(CADSelectionManager.CadGripInfo(
+                                handle: handle,
+                                grip: .vertex(entity: handle, index: globalIdx + index),
+                                screenPos: screen,
+                                worldPos: point))
+                        }
+                        globalIdx += localGripPoints.count
                         continue
                     }
                     let worldVertices = boundary.vertices.map {
@@ -268,6 +311,10 @@ public enum CADGripSystem {
                 pts = path.tessellatedPoints().map {
                     entity.transform.transformPoint($0)
                 }
+            } else if case .hatchPath(let boundary, _, _, _, _, _, _) = prim {
+                pts = boundary.tessellatedPoints().map {
+                    entity.transform.transformPoint($0)
+                }
             } else {
                 pts = CADGeometryMath.worldPointsForPrimitive(
                     prim, transform: entity.transform)
@@ -350,6 +397,17 @@ public enum CADGripSystem {
         return grips
     }
 
+    private static func analyticHatchGripPoints(_ path: CADPolyline) -> [Vector3] {
+        var points: [Vector3] = []
+        for edge in path.hatchEdges {
+            for point in edge.gripPoints {
+                if points.contains(where: { $0.distance(to: point) <= 1e-9 }) { continue }
+                points.append(point)
+            }
+        }
+        return points
+    }
+
     // MARK: - Primitive Classification Helpers
 
     /// Returns true if the primitive is an invisible edit boundary (polygon
@@ -357,6 +415,11 @@ public enum CADGripSystem {
     /// and should not produce visible grips.
     public static func isInvisibleEditBoundary(_ prim: CADPrimitive) -> Bool {
         if case .polygon(_, let color) = prim, let color, color.a == 0 {
+            return true
+        }
+        if case .polyline(let path, let color) = prim,
+           path.isHatchBoundaryCarrier,
+           color?.a == 0 {
             return true
         }
         return false

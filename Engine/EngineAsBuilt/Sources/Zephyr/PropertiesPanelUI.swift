@@ -482,7 +482,7 @@ struct PropertiesPanelUI {
 
     /// Render Hatch / Gradient properties for the selected entity.
     private static func renderHatchSection(entity: CADEntity, engine: PhrostEngine, geometry: [CADPrimitive]) {
-        for prim in geometry {
+        for (primitiveIndex, prim) in geometry.enumerated() {
             switch prim {
             case .hatch(let boundary, let pattern, let scale, let angle, let color, let backgroundColor):
                 guard ImGuiCollapsingHeader("Hatch", Int32(ImGuiTreeNodeFlags_DefaultOpen.rawValue)) else { continue }
@@ -499,7 +499,7 @@ struct PropertiesPanelUI {
                             let newPrim = CADPrimitive.hatch(
                                 boundary: boundary, pattern: pn == "SOLID" ? "SOLID" : pn,
                                 scale: scale, angle: angle, color: color, backgroundColor: backgroundColor)
-                            engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                            updateHatchPrimitive(entity: entity, geometry: geometry, index: primitiveIndex, primitive: newPrim, engine: engine)
                             engine.tabManager.markActiveDirty()
                         }
                         if selected { ImGuiSetItemDefaultFocus() }
@@ -514,7 +514,7 @@ struct PropertiesPanelUI {
                 ImGuiPushItemWidth(ImGuiGetFontSize() * 5)
                 if ImGuiSliderAngle("##PropsHatchAngle", &angleDeg, -180, 180, "%.0f", ImGuiSliderFlags(0)) {
                     let newPrim = CADPrimitive.hatch(boundary: boundary, pattern: pattern, scale: scale, angle: Double(angleDeg), color: color, backgroundColor: backgroundColor)
-                    engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                    updateHatchPrimitive(entity: entity, geometry: geometry, index: primitiveIndex, primitive: newPrim, engine: engine)
                     engine.tabManager.markActiveDirty()
                 }
                 ImGuiPopItemWidth()
@@ -525,7 +525,7 @@ struct PropertiesPanelUI {
                 ImGuiPushItemWidth(ImGuiGetFontSize() * 5)
                 if ImGuiInputFloat("##PropsHatchScale", &scl, 0.1, 1.0, "%.2f", 0) {
                     let newPrim = CADPrimitive.hatch(boundary: boundary, pattern: pattern, scale: Double(scl), angle: angle, color: color, backgroundColor: backgroundColor)
-                    engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                    updateHatchPrimitive(entity: entity, geometry: geometry, index: primitiveIndex, primitive: newPrim, engine: engine)
                     engine.tabManager.markActiveDirty()
                 }
                 ImGuiPopItemWidth()
@@ -547,7 +547,7 @@ struct PropertiesPanelUI {
                             let newPrim = CADPrimitive.hatchPath(
                                 boundary: boundary, holes: holes, pattern: pn == "SOLID" ? "SOLID" : pn,
                                 scale: scale, angle: angle, color: color, backgroundColor: backgroundColor)
-                            engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                            updateHatchPrimitive(entity: entity, geometry: geometry, index: primitiveIndex, primitive: newPrim, engine: engine)
                             engine.tabManager.markActiveDirty()
                         }
                         if selected { ImGuiSetItemDefaultFocus() }
@@ -562,7 +562,7 @@ struct PropertiesPanelUI {
                 ImGuiPushItemWidth(ImGuiGetFontSize() * 5)
                 if ImGuiSliderAngle("##PropsHatchPathAngle", &angleDeg, -180, 180, "%.0f", ImGuiSliderFlags(0)) {
                     let newPrim = CADPrimitive.hatchPath(boundary: boundary, holes: holes, pattern: pattern, scale: scale, angle: Double(angleDeg), color: color, backgroundColor: backgroundColor)
-                    engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                    updateHatchPrimitive(entity: entity, geometry: geometry, index: primitiveIndex, primitive: newPrim, engine: engine)
                     engine.tabManager.markActiveDirty()
                 }
                 ImGuiPopItemWidth()
@@ -573,14 +573,14 @@ struct PropertiesPanelUI {
                 ImGuiPushItemWidth(ImGuiGetFontSize() * 5)
                 if ImGuiInputFloat("##PropsHatchPathScale", &scl, 0.1, 1.0, "%.2f", 0) {
                     let newPrim = CADPrimitive.hatchPath(boundary: boundary, holes: holes, pattern: pattern, scale: Double(scl), angle: angle, color: color, backgroundColor: backgroundColor)
-                    engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                    updateHatchPrimitive(entity: entity, geometry: geometry, index: primitiveIndex, primitive: newPrim, engine: engine)
                     engine.tabManager.markActiveDirty()
                 }
                 ImGuiPopItemWidth()
 
                 igSeparator()
 
-            case .gradient(let outer, _, let name, let gradAngle, let c1, let c2):
+            case .gradient(let outer, let holes, let name, let gradAngle, let c1, let c2):
                 guard ImGuiCollapsingHeader("Gradient", Int32(ImGuiTreeNodeFlags_DefaultOpen.rawValue)) else { continue }
                 ImGuiTextV("Type: \(name)")
 
@@ -589,8 +589,8 @@ struct PropertiesPanelUI {
                 ImGuiSameLine(0, 8)
                 ImGuiPushItemWidth(ImGuiGetFontSize() * 5)
                 if ImGuiSliderAngle("##PropsGradAngle", &angleDeg, -180, 180, "%.0f", ImGuiSliderFlags(0)) {
-                    let newPrim = CADPrimitive.gradient(outer: outer, holes: [], gradientName: name, angle: Double(angleDeg), color1: c1, color2: c2)
-                    engine.document.updateEntityGeometry(for: entity.handle, geometry: [newPrim])
+                    let newPrim = CADPrimitive.gradient(outer: outer, holes: holes, gradientName: name, angle: Double(angleDeg), color1: c1, color2: c2)
+                    updateHatchPrimitive(entity: entity, geometry: geometry, index: primitiveIndex, primitive: newPrim, engine: engine)
                     engine.tabManager.markActiveDirty()
                 }
                 ImGuiPopItemWidth()
@@ -601,6 +601,38 @@ struct PropertiesPanelUI {
                 break
             }
         }
+    }
+
+    private static func updateHatchPrimitive(
+        entity: CADEntity,
+        geometry: [CADPrimitive],
+        index: Int,
+        primitive: CADPrimitive,
+        engine: PhrostEngine
+    ) {
+        guard geometry.indices.contains(index) else { return }
+        var updatedGeometry = geometry
+        updatedGeometry[index] = primitive
+        var updatedEntity = entity
+        updatedEntity.localGeometry = updatedGeometry
+
+        switch primitive {
+        case .hatch(_, let pattern, let scale, let angle, _, _),
+             .hatchPath(_, _, let pattern, let scale, let angle, _, _):
+            updatedEntity.xdata["dxf.hatchPatternName"] = .string(pattern)
+            updatedEntity.xdata["dxf.hatchScale"] = .double(scale)
+            updatedEntity.xdata["dxf.hatchAngle"] = .double(angle)
+            updatedEntity.xdata["dxf.hatchIsGradient"] = .bool(false)
+        case .gradient(_, _, let name, let angle, _, _):
+            updatedEntity.xdata["dxf.hatchPatternName"] = .string("GRADIENT")
+            updatedEntity.xdata["dxf.hatchIsGradient"] = .bool(true)
+            updatedEntity.xdata["dxf.hatchGradientName"] = .string(name)
+            updatedEntity.xdata["dxf.hatchGradientAngle"] = .double(angle)
+        default:
+            break
+        }
+
+        engine.document.updateEntity(updatedEntity)
     }
 
     /// Parse a hex color string like "#FF8000" or "FF8000" into [Float] (0–1 range).

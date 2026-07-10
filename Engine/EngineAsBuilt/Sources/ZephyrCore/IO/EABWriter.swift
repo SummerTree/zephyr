@@ -1122,6 +1122,45 @@ public enum EABWriter {
                     w.writeUInt8(0)
                 }
             }
+            let writeHatchPathMetadata = { (path: CADPolyline) in
+                w.writeUInt8(path.isHatchBoundaryCarrier ? 1 : 0)
+                w.writeUInt32(UInt32(path.hatchEdges.count))
+                for edge in path.hatchEdges {
+                    switch edge {
+                    case .line(let start, let end):
+                        w.writeUInt8(0)
+                        for point in [start, end] {
+                            w.writeFloat64(point.x); w.writeFloat64(point.y); w.writeFloat64(point.z)
+                        }
+                    case .circularArc(let center, let radius, let startAngle, let sweep):
+                        w.writeUInt8(1)
+                        w.writeFloat64(center.x); w.writeFloat64(center.y); w.writeFloat64(center.z)
+                        w.writeFloat64(radius); w.writeFloat64(startAngle); w.writeFloat64(sweep)
+                    case .ellipticalArc(let center, let axisU, let axisV, let startParam, let sweep):
+                        w.writeUInt8(2)
+                        for point in [center, axisU, axisV] {
+                            w.writeFloat64(point.x); w.writeFloat64(point.y); w.writeFloat64(point.z)
+                        }
+                        w.writeFloat64(startParam); w.writeFloat64(sweep)
+                    case .spline(let controlPoints, let knots, let degree, let weights, let closed, let periodic):
+                        w.writeUInt8(3)
+                        w.writeUInt32(UInt32(degree))
+                        w.writeUInt8(closed ? 1 : 0)
+                        w.writeUInt8(periodic ? 1 : 0)
+                        w.writeUInt32(UInt32(controlPoints.count))
+                        for point in controlPoints {
+                            w.writeFloat64(point.x); w.writeFloat64(point.y); w.writeFloat64(point.z)
+                        }
+                        w.writeUInt32(UInt32(knots.count))
+                        for knot in knots { w.writeFloat64(knot) }
+                        w.writeUInt8(weights == nil ? 0 : 1)
+                        if let weights {
+                            w.writeUInt32(UInt32(weights.count))
+                            for weight in weights { w.writeFloat64(weight) }
+                        }
+                    }
+                }
+            }
 
             // type byte: 0=point, 1=line, 2=rect, 3=fillRect, 4=polygon,
             // 5=circle, 6=arc, 7=fillPolygon, 8=text, 9=fillComplexPolygon,
@@ -1166,6 +1205,7 @@ public enum EABWriter {
                     w.writeFloat64(vertex.startWidth)
                     w.writeFloat64(vertex.endWidth)
                 }
+                writeHatchPathMetadata(path)
                 writeColor(color)
             case .fillPolygon(let points, let color):
                 w.writeUInt8(7)
@@ -1269,6 +1309,7 @@ public enum EABWriter {
                         w.writeFloat64(vertex.startWidth)
                         w.writeFloat64(vertex.endWidth)
                     }
+                    writeHatchPathMetadata(path)
                 }
                 w.writeUInt8(19)
                 writePath(boundary)

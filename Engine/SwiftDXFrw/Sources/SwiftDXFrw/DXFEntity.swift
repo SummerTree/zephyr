@@ -730,6 +730,8 @@ public class DXFHatchLoop {
     public var type: Int        // 92: polyline=2, default=0
     public var numEdges: Int    // 93
     public var entities: [DXFEntity] = []
+    public var sourceBoundaryHandles: [UInt32] = []
+    public var sourceBoundaryEntities: [DXFEntity] = []
 
     public init(type: Int = 0) {
         self.type = type

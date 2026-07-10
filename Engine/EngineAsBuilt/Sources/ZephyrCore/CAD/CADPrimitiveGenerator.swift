@@ -577,6 +577,7 @@ public enum CADPrimitiveGenerator {
             specs.append(contentsOf: makePathSpecs(points: wp, dashPattern: dashPattern, scale: lineTypeScale, weight: lineWeight, z: z, color: finalColor))
 
         case .polyline(let path, _):
+            if path.isHatchBoundaryCarrier { break }
             let wp = path.tessellatedPoints().map { p -> SDL_FPoint in
                 let t = transform.transformPoint(p)
                 return SDL_FPoint(x: Float(t.x), y: Float(t.y))

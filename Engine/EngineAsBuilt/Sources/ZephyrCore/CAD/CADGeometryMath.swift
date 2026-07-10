@@ -512,7 +512,8 @@ public enum CADGeometryMath {
         case .polygon(let pts, _), .fillPolygon(let pts, _), .fillComplexPolygon(let pts, _, _), .gradient(let pts, _, _, _, _, _):
             return pts.map { transform.transformPoint($0) }
         case .polyline(let path, _):
-            return path.vertices.map { transform.transformPoint($0.position) }
+            let points = path.hatchEdges.isEmpty ? path.points : path.tessellatedPoints()
+            return points.map { transform.transformPoint($0) }
         case .circle(let center, let radius, _):
             let wc = transform.transformPoint(center)
             let s = transform.scale

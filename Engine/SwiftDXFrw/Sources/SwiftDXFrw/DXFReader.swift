@@ -860,11 +860,16 @@ extension DXFReader {
     func parseHatch(_ pairs: [(Int, String)]) -> DXFHatchEntity {
         let e = DXFHatchEntity()
         applyCommon(pairs, to: e)
+        if let owner = pairs.prefix(while: { $0.0 != 91 }).first(where: { $0.0 == 330 }) {
+            e.parentHandle = parseHandle(owner.1)
+        }
         var currentLoop: DXFHatchLoop?
         var isPolyline: Bool = false
         var splineDegree: Int = 0
         var splineNKnots: Int = 0
         var splineNControl: Int = 0
+        var splineFitCountSeen = false
+        var sourceHandlesRemaining = 0
         var currentPatternLine: DXFHatchPatternLineData?
 
         func flushPatternLine() {
@@ -917,6 +922,8 @@ extension DXFReader {
                 splineDegree = 0
                 splineNKnots = 0
                 splineNControl = 0
+                splineFitCountSeen = false
+                sourceHandlesRemaining = 0
                 switch edgeType {
                 case 1: e.addLine()
                 case 2: e.addArc()
@@ -938,6 +945,8 @@ extension DXFReader {
                 splineDegree = 0
                 splineNKnots = 0
                 splineNControl = 0
+                splineFitCountSeen = false
+                sourceHandlesRemaining = 0
                 if isPolyline, let lp = currentLoop {
                     let pl = DXFLWPolylineEntity()
                     e.pline = pl
@@ -1036,7 +1045,19 @@ extension DXFReader {
             case 96:
                 if e.spline != nil { splineNControl = i(v); e.spline?.nControl = Int32(splineNControl) }
             case 97:
-                if e.spline != nil { e.spline?.nFit = i32(v) }
+                if e.spline != nil && !splineFitCountSeen {
+                    e.spline?.nFit = i32(v)
+                    splineFitCountSeen = true
+                } else if let loop = currentLoop {
+                    sourceHandlesRemaining = max(0, i(v))
+                    loop.sourceBoundaryHandles.removeAll(keepingCapacity: true)
+                    loop.sourceBoundaryHandles.reserveCapacity(sourceHandlesRemaining)
+                }
+            case 330:
+                if sourceHandlesRemaining > 0, let loop = currentLoop {
+                    loop.sourceBoundaryHandles.append(parseHandle(v))
+                    sourceHandlesRemaining -= 1
+                }
             case 450: e.isGradient = i(v); e.gradientColors = []
             case 452: e.singleColorGrad = i(v)
             case 453: e.gradientColors.reserveCapacity(i(v))

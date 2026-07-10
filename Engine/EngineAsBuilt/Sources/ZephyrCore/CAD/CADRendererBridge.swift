@@ -1391,6 +1391,7 @@ public final class CADRendererBridge {
                     return
 
                 case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let c, let bg):
+                    guard boundary.hatchEdges.isEmpty else { return }
                     var newWorldPts = pts
                     newWorldPts[localIdx].x += Double(dx)
                     newWorldPts[localIdx].y += Double(dy)
@@ -1553,7 +1554,7 @@ public final class CADRendererBridge {
             }
 
         case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let color, let bg):
-            if editLoopIndex == 0 {
+            if editLoopIndex == 0, boundary.hatchEdges.isEmpty {
                 var newBoundary = boundary
                 let moved = moveNearestPoint(in: boundary.points)
                 if moved.count == newBoundary.vertices.count {

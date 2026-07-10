@@ -81,6 +81,24 @@ public enum DXFImporter {
             return layerNameToID[name] ?? layerNameToID["0"]!
         }
 
+        var sourceEntityByHandle: [UInt32: DXFEntity] = [:]
+        for entity in reader.entities where entity.handle != 0 {
+            sourceEntityByHandle[entity.handle] = entity
+        }
+        for block in reader.blocks {
+            for entity in block.entities where entity.handle != 0 {
+                sourceEntityByHandle[entity.handle] = entity
+            }
+        }
+        resolveAssociativeHatchBoundaries(
+            in: reader.entities,
+            sourceEntityByHandle: sourceEntityByHandle)
+        for block in reader.blocks {
+            resolveAssociativeHatchBoundaries(
+                in: block.entities,
+                sourceEntityByHandle: sourceEntityByHandle)
+        }
+
 
         var blockByName: [String: DXFBlockEntity] = [:]
         for block in reader.blocks where !block.name.isEmpty { blockByName[block.name] = block }
@@ -287,6 +305,9 @@ public enum DXFImporter {
                 }
             }
         }
+        for (key, value) in DXFEntityConverter.hatchXData(from: entity) {
+            xdata[key] = value
+        }
         return xdata
     }
 
@@ -374,6 +395,49 @@ public enum DXFImporter {
         }
 
         return nil
+    }
+
+    private static func resolveAssociativeHatchBoundaries(
+        in entities: [DXFEntity],
+        sourceEntityByHandle: [UInt32: DXFEntity]
+    ) {
+        for entity in entities {
+            guard let hatch = entity as? DXFHatchEntity,
+                  hatch.associative != 0 else { continue }
+
+            for loop in hatch.loops where !loop.sourceBoundaryHandles.isEmpty {
+                let resolved = loop.sourceBoundaryHandles.compactMap {
+                    sourceEntityByHandle[$0]
+                }
+                guard resolved.count == loop.sourceBoundaryHandles.count,
+                      resolved.allSatisfy(isSupportedHatchBoundarySource) else { continue }
+
+                let sourceHasAnalyticCurve = resolved.contains {
+                    $0 is DXFEllipseEntity
+                        || $0 is DXFSplineEntity
+                        || $0 is DXFArcEntity
+                        || $0 is DXFCircleEntity
+                }
+                let storedBoundaryIsLinearized = loop.entities.isEmpty
+                    || loop.entities.allSatisfy {
+                        $0 is DXFLWPolylineEntity || $0 is DXFPolylineEntity
+                    }
+
+                if sourceHasAnalyticCurve && storedBoundaryIsLinearized {
+                    loop.sourceBoundaryEntities = resolved
+                }
+            }
+        }
+    }
+
+    private static func isSupportedHatchBoundarySource(_ entity: DXFEntity) -> Bool {
+        entity is DXFLineEntity
+            || entity is DXFArcEntity
+            || entity is DXFCircleEntity
+            || entity is DXFEllipseEntity
+            || entity is DXFSplineEntity
+            || entity is DXFLWPolylineEntity
+            || entity is DXFPolylineEntity
     }
 
     private static func cadPoint(_ point: SwiftDXFrw.Vector3) -> Vector3 {
@@ -557,17 +621,6 @@ public enum DXFImporter {
     }
 
     private static func transformPolyline(_ path: CADPolyline, by transform: Transform3D) -> CADPolyline {
-        let raw = transform.rawElements
-        let reversesOrientation = raw[0] * raw[5] - raw[1] * raw[4] < 0
-        let s = transform.scale
-        let widthScale = (abs(s.x) + abs(s.y)) * 0.5
-        var out = path
-        for index in out.vertices.indices {
-            out.vertices[index].position = transform.transformPoint(out.vertices[index].position)
-            out.vertices[index].startWidth *= widthScale
-            out.vertices[index].endWidth *= widthScale
-            if reversesOrientation { out.vertices[index].bulge = -out.vertices[index].bulge }
-        }
-        return out
+        path.transformed(by: transform)
     }
 }

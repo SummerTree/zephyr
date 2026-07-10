@@ -945,6 +945,62 @@ public enum EABReader {
                 }
                 return nil
             }
+            let readHatchPathMetadata = { () -> (edges: [CADHatchEdge], carrier: Bool) in
+                guard version >= 11 else { return ([], false) }
+                let carrier = r.readUInt8() != 0
+                let edgeCount = Int(r.readUInt32())
+                var edges: [CADHatchEdge] = []
+                edges.reserveCapacity(edgeCount)
+                for _ in 0..<edgeCount {
+                    switch r.readUInt8() {
+                    case 0:
+                        let start = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
+                        let end = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
+                        edges.append(.line(start: start, end: end))
+                    case 1:
+                        let center = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
+                        edges.append(.circularArc(center: center,
+                                                  radius: r.readFloat64(),
+                                                  startAngle: r.readFloat64(),
+                                                  sweep: r.readFloat64()))
+                    case 2:
+                        let center = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
+                        let axisU = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
+                        let axisV = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
+                        edges.append(.ellipticalArc(center: center, axisU: axisU, axisV: axisV,
+                                                    startParam: r.readFloat64(), sweep: r.readFloat64()))
+                    case 3:
+                        let degree = Int(r.readUInt32())
+                        let closed = r.readUInt8() != 0
+                        let periodic = r.readUInt8() != 0
+                        let controlCount = Int(r.readUInt32())
+                        var controlPoints: [Vector3] = []
+                        controlPoints.reserveCapacity(controlCount)
+                        for _ in 0..<controlCount {
+                            controlPoints.append(Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64()))
+                        }
+                        let knotCount = Int(r.readUInt32())
+                        var knots: [Double] = []
+                        knots.reserveCapacity(knotCount)
+                        for _ in 0..<knotCount { knots.append(r.readFloat64()) }
+                        let hasWeights = r.readUInt8() != 0
+                        var weights: [Double]? = nil
+                        if hasWeights {
+                            let weightCount = Int(r.readUInt32())
+                            var values: [Double] = []
+                            values.reserveCapacity(weightCount)
+                            for _ in 0..<weightCount { values.append(r.readFloat64()) }
+                            weights = values
+                        }
+                        edges.append(.spline(controlPoints: controlPoints, knots: knots,
+                                             degree: degree, weights: weights,
+                                             closed: closed, periodic: periodic))
+                    default:
+                        break
+                    }
+                }
+                return (edges, carrier)
+            }
             switch type {
             case 0: // point
                 let pos = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
@@ -998,12 +1054,15 @@ public enum EABReader {
                         startWidth: r.readFloat64(),
                         endWidth: r.readFloat64()))
                 }
+                let metadata = readHatchPathMetadata()
                 let color = readColor()
                 prims.append(.polyline(
                     path: CADPolyline(
                         vertices: vertices,
                         isClosed: isClosed,
-                        lineTypeGenerationEnabled: lineTypeGenerationEnabled),
+                        lineTypeGenerationEnabled: lineTypeGenerationEnabled,
+                        hatchEdges: metadata.edges,
+                        isHatchBoundaryCarrier: metadata.carrier),
                     color: color))
             case 7: // fillPolygon
                 let ptCount = Int(r.readUInt32())
@@ -1107,9 +1166,12 @@ public enum EABReader {
                             startWidth: startWidth,
                             endWidth: endWidth))
                     }
+                    let metadata = readHatchPathMetadata()
                     return CADPolyline(vertices: vertices,
                                        isClosed: isClosed,
-                                       lineTypeGenerationEnabled: lineTypeGenerationEnabled)
+                                       lineTypeGenerationEnabled: lineTypeGenerationEnabled,
+                                       hatchEdges: metadata.edges,
+                                       isHatchBoundaryCarrier: metadata.carrier)
                 }
                 let boundary = readPath()
                 let holeCount = Int(r.readUInt32())

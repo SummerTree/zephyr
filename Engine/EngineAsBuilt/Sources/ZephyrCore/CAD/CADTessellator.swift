@@ -275,70 +275,11 @@ public enum CADTessellator {
             return pts
         }
 
-        func signedArea(_ pts: [SDL_FPoint]) -> Float {
-            var sum: Float = 0
-            for i in 0..<pts.count {
-                let p1 = pts[i]
-                let p2 = pts[(i + 1) % pts.count]
-                sum += (p1.x * p2.y - p2.x * p1.y)
-            }
-            return sum
-        }
-
-        func pointInPolygon(_ pt: SDL_FPoint, _ poly: [SDL_FPoint]) -> Bool {
-            let ptx = Double(pt.x)
-            let pty = Double(pt.y) + 1.2345e-4
-            var inside = false
-            var j = poly.count - 1
-            for i in 0..<poly.count {
-                let pi_x = Double(poly[i].x)
-                let pi_y = Double(poly[i].y)
-                let pj_x = Double(poly[j].x)
-                let pj_y = Double(poly[j].y)
-                if ((pi_y > pty) != (pj_y > pty)) &&
-                   (ptx < (pj_x - pi_x) * (pty - pi_y) / (pj_y - pi_y) + pi_x) {
-                    inside.toggle()
-                }
-                j = i
-            }
-            return inside
-        }
-
-        var allLoops = holes
-        if !outer.isEmpty { allLoops.insert(outer, at: 0) }
-        let cleanedLoops = allLoops.map { cleanLoop($0) }.filter { $0.count >= 3 }
-        guard !cleanedLoops.isEmpty else { return [] }
-
-        // Determine islands vs holes
-        var islandIndices: [Int] = []
-        var holeIndices: [Int] = []
-        for i in 0..<cleanedLoops.count {
-            var containerCount = 0
-            let testPt = cleanedLoops[i][0]
-            for j in 0..<cleanedLoops.count {
-                if i == j { continue }
-                if pointInPolygon(testPt, cleanedLoops[j]) { containerCount += 1 }
-            }
-            if containerCount % 2 == 0 { islandIndices.append(i) }
-            else { holeIndices.append(i) }
-        }
-
         struct TopoIsland { let outer: [SDL_FPoint]; var holes: [[SDL_FPoint]] }
-        var islands = islandIndices.map { TopoIsland(outer: cleanedLoops[$0], holes: []) }
-        for hIdx in holeIndices {
-            let holePoly = cleanedLoops[hIdx]
-            let pt = holePoly[0]
-            var bestIdx = -1
-            var minArea: Float = Float.infinity
-            for (idx, islandIdx) in islandIndices.enumerated() {
-                let outerPoly = cleanedLoops[islandIdx]
-                if pointInPolygon(pt, outerPoly) {
-                    let area = abs(signedArea(outerPoly))
-                    if area < minArea { minArea = area; bestIdx = idx }
-                }
-            }
-            if bestIdx != -1 { islands[bestIdx].holes.append(holePoly) }
-        }
+        let cleanedOuter = cleanLoop(outer)
+        guard cleanedOuter.count >= 3 else { return [] }
+        let cleanedHoles = holes.map(cleanLoop).filter { $0.count >= 3 }
+        let islands = [TopoIsland(outer: cleanedOuter, holes: cleanedHoles)]
 
         // Build gradient direction vector
         let cosA = cos(-angle)

@@ -18,6 +18,209 @@ import Foundation
 // MARK: - CADPrimitive
 // =========================================================================
 
+
+public enum CADHatchEdge: Hashable, Sendable {
+    case line(start: Vector3, end: Vector3)
+    case circularArc(center: Vector3, radius: Double, startAngle: Double, sweep: Double)
+    case ellipticalArc(center: Vector3, axisU: Vector3, axisV: Vector3, startParam: Double, sweep: Double)
+    case spline(controlPoints: [Vector3], knots: [Double], degree: Int, weights: [Double]?, closed: Bool, periodic: Bool)
+
+    public var startPoint: Vector3? {
+        switch self {
+        case .line(let start, _):
+            return start
+        case .circularArc(let center, let radius, let startAngle, _):
+            return Vector3(x: center.x + cos(startAngle) * radius,
+                           y: center.y + sin(startAngle) * radius,
+                           z: center.z)
+        case .ellipticalArc(let center, let axisU, let axisV, let startParam, _):
+            return center + axisU * cos(startParam) + axisV * sin(startParam)
+        case .spline:
+            return tessellatedPoints().first
+        }
+    }
+
+    public var endPoint: Vector3? {
+        switch self {
+        case .line(_, let end):
+            return end
+        case .circularArc(let center, let radius, let startAngle, let sweep):
+            let angle = startAngle + sweep
+            return Vector3(x: center.x + cos(angle) * radius,
+                           y: center.y + sin(angle) * radius,
+                           z: center.z)
+        case .ellipticalArc(let center, let axisU, let axisV, let startParam, let sweep):
+            let param = startParam + sweep
+            return center + axisU * cos(param) + axisV * sin(param)
+        case .spline:
+            return tessellatedPoints().last
+        }
+    }
+
+    public func tessellatedPoints(segmentsPerRadian: Double = 12.0) -> [Vector3] {
+        switch self {
+        case .line(let start, let end):
+            return [start, end]
+
+        case .circularArc(let center, let radius, let startAngle, let sweep):
+            guard radius > 1e-12, abs(sweep) > 1e-12 else { return [] }
+            let divisions = max(8, Int(ceil(abs(sweep) * segmentsPerRadian)))
+            return (0...divisions).map { index in
+                let t = Double(index) / Double(divisions)
+                let angle = startAngle + sweep * t
+                return Vector3(x: center.x + cos(angle) * radius,
+                               y: center.y + sin(angle) * radius,
+                               z: center.z)
+            }
+
+        case .ellipticalArc(let center, let axisU, let axisV, let startParam, let sweep):
+            guard axisU.magnitude > 1e-12, axisV.magnitude > 1e-12, abs(sweep) > 1e-12 else { return [] }
+            let divisions = max(12, Int(ceil(abs(sweep) * segmentsPerRadian)))
+            return (0...divisions).map { index in
+                let t = Double(index) / Double(divisions)
+                let param = startParam + sweep * t
+                return center + axisU * cos(param) + axisV * sin(param)
+            }
+
+        case .spline(let controlPoints, let knots, let degree, let weights, let closed, let periodic):
+            guard controlPoints.count >= 2 else { return controlPoints }
+            let safeDegree = max(1, degree)
+            var cps = controlPoints
+            var ws = weights ?? Array(repeating: 1.0, count: cps.count)
+            if ws.count != cps.count { ws = Array(repeating: 1.0, count: cps.count) }
+
+            let expectedControlCount = knots.count - safeDegree - 1
+            if periodic, expectedControlCount > cps.count, !cps.isEmpty {
+                let baseCPs = cps
+                let baseWeights = ws
+                for index in 0..<(expectedControlCount - cps.count) {
+                    cps.append(baseCPs[index % baseCPs.count])
+                    ws.append(baseWeights[index % baseWeights.count])
+                }
+            }
+
+            guard cps.count > safeDegree, knots.count == cps.count + safeDegree + 1 else {
+                var fallback = cps
+                if closed || periodic,
+                   let first = fallback.first,
+                   fallback.last != first {
+                    fallback.append(first)
+                }
+                return fallback
+            }
+
+            var points = NURBSEvaluator.evaluateAdaptiveByKnotSpans(
+                degree: safeDegree,
+                knots: knots,
+                controlPoints: cps,
+                weights: ws,
+                chordTolerance: 0.01,
+                maxDepth: 10,
+                maxSegments: 8192)
+            if points.count < 2 {
+                points = NURBSEvaluator.evaluateByKnotSpans(
+                    degree: safeDegree,
+                    knots: knots,
+                    controlPoints: cps,
+                    weights: ws,
+                    segmentsPerSpan: 16)
+            }
+            if closed || periodic,
+               let first = points.first,
+               let last = points.last,
+               first.distance(to: last) > 1e-9 {
+                points.append(first)
+            }
+            return points
+        }
+    }
+
+    public func reversed() -> CADHatchEdge {
+        switch self {
+        case .line(let start, let end):
+            return .line(start: end, end: start)
+        case .circularArc(let center, let radius, let startAngle, let sweep):
+            return .circularArc(center: center, radius: radius,
+                                startAngle: startAngle + sweep, sweep: -sweep)
+        case .ellipticalArc(let center, let axisU, let axisV, let startParam, let sweep):
+            return .ellipticalArc(center: center, axisU: axisU, axisV: axisV,
+                                  startParam: startParam + sweep, sweep: -sweep)
+        case .spline(let controlPoints, let knots, let degree, let weights, let closed, let periodic):
+            let reversedKnots: [Double]
+            if let first = knots.first, let last = knots.last {
+                reversedKnots = knots.reversed().map { first + last - $0 }
+            } else {
+                reversedKnots = knots
+            }
+            return .spline(controlPoints: Array(controlPoints.reversed()),
+                           knots: reversedKnots,
+                           degree: degree,
+                           weights: weights.map { Array($0.reversed()) },
+                           closed: closed,
+                           periodic: periodic)
+        }
+    }
+
+    public func transformed(by transform: Transform3D) -> CADHatchEdge {
+        let origin = transform.transformPoint(.zero)
+        func point(_ value: Vector3) -> Vector3 { transform.transformPoint(value) }
+        func vector(_ value: Vector3) -> Vector3 { transform.transformPoint(value) - origin }
+
+        switch self {
+        case .line(let start, let end):
+            return .line(start: point(start), end: point(end))
+        case .circularArc(let center, let radius, let startAngle, let sweep):
+            let worldCenter = point(center)
+            let axisU = vector(Vector3(x: radius, y: 0, z: 0))
+            let axisV = vector(Vector3(x: 0, y: radius, z: 0))
+            let lengthU = axisU.magnitude
+            let lengthV = axisV.magnitude
+            let denominator = max(lengthU * lengthV, 1e-12)
+            if lengthU > 1e-12, lengthV > 1e-12,
+               abs(lengthU - lengthV) <= max(lengthU, lengthV) * 1e-6,
+               abs(axisU.dot(axisV)) / denominator < 1e-6 {
+                let sourceStart = Vector3(
+                    x: center.x + cos(startAngle) * radius,
+                    y: center.y + sin(startAngle) * radius,
+                    z: center.z)
+                let worldStart = point(sourceStart)
+                let worldStartAngle = atan2(worldStart.y - worldCenter.y, worldStart.x - worldCenter.x)
+                let orientation = axisU.cross(axisV).z >= 0 ? 1.0 : -1.0
+                return .circularArc(
+                    center: worldCenter,
+                    radius: (lengthU + lengthV) * 0.5,
+                    startAngle: worldStartAngle,
+                    sweep: sweep * orientation)
+            }
+            return .ellipticalArc(
+                center: worldCenter,
+                axisU: axisU,
+                axisV: axisV,
+                startParam: startAngle,
+                sweep: sweep)
+        case .ellipticalArc(let center, let axisU, let axisV, let startParam, let sweep):
+            return .ellipticalArc(center: point(center), axisU: vector(axisU), axisV: vector(axisV),
+                                  startParam: startParam, sweep: sweep)
+        case .spline(let controlPoints, let knots, let degree, let weights, let closed, let periodic):
+            return .spline(controlPoints: controlPoints.map(point), knots: knots, degree: degree,
+                           weights: weights, closed: closed, periodic: periodic)
+        }
+    }
+
+    public var gripPoints: [Vector3] {
+        switch self {
+        case .line(let start, let end):
+            return [start, end]
+        case .circularArc(let center, _, _, _):
+            return [startPoint, Optional(center), endPoint].compactMap { $0 }
+        case .ellipticalArc(let center, let axisU, let axisV, _, _):
+            return [startPoint, Optional(center), Optional(center + axisU), Optional(center + axisV), endPoint].compactMap { $0 }
+        case .spline(let controlPoints, _, _, _, _, _):
+            return controlPoints
+        }
+    }
+}
+
 public struct CADPolylineVertex: Hashable, Sendable {
     public var position: Vector3
     public var bulge: Double
@@ -44,25 +247,35 @@ public struct CADPolyline: Hashable, Sendable, RandomAccessCollection, MutableCo
     public var vertices: [CADPolylineVertex]
     public var isClosed: Bool
     public var lineTypeGenerationEnabled: Bool
+    public var hatchEdges: [CADHatchEdge]
+    public var isHatchBoundaryCarrier: Bool
 
     public init(
         vertices: [CADPolylineVertex],
         isClosed: Bool = false,
-        lineTypeGenerationEnabled: Bool = false
+        lineTypeGenerationEnabled: Bool = false,
+        hatchEdges: [CADHatchEdge] = [],
+        isHatchBoundaryCarrier: Bool = false
     ) {
         self.vertices = vertices
         self.isClosed = isClosed
         self.lineTypeGenerationEnabled = lineTypeGenerationEnabled
+        self.hatchEdges = hatchEdges
+        self.isHatchBoundaryCarrier = isHatchBoundaryCarrier
     }
 
     public init(
         points: [Vector3],
         isClosed: Bool = false,
-        lineTypeGenerationEnabled: Bool = false
+        lineTypeGenerationEnabled: Bool = false,
+        hatchEdges: [CADHatchEdge] = [],
+        isHatchBoundaryCarrier: Bool = false
     ) {
         self.vertices = points.map { CADPolylineVertex(position: $0) }
         self.isClosed = isClosed
         self.lineTypeGenerationEnabled = lineTypeGenerationEnabled
+        self.hatchEdges = hatchEdges
+        self.isHatchBoundaryCarrier = isHatchBoundaryCarrier
     }
 
     public var startIndex: Int { vertices.startIndex }
@@ -136,6 +349,25 @@ public struct CADPolyline: Hashable, Sendable, RandomAccessCollection, MutableCo
     }
 
     public func tessellatedPoints(segmentsPerRadian: Double = 12.0) -> [Vector3] {
+        if !hatchEdges.isEmpty {
+            var result: [Vector3] = []
+            for edge in hatchEdges {
+                let points = edge.tessellatedPoints(segmentsPerRadian: segmentsPerRadian)
+                guard !points.isEmpty else { continue }
+                if let last = result.last, last.distance(to: points[0]) <= 1e-9 {
+                    result.append(contentsOf: points.dropFirst())
+                } else {
+                    result.append(contentsOf: points)
+                }
+            }
+            if isClosed, result.count > 1,
+               let first = result.first, let last = result.last,
+               first.distance(to: last) > 1e-9 {
+                result.append(first)
+            }
+            return result
+        }
+
         guard let first = vertices.first?.position else { return [] }
         guard segmentCount > 0 else { return [first] }
 
@@ -158,6 +390,9 @@ public struct CADPolyline: Hashable, Sendable, RandomAccessCollection, MutableCo
     }
 
     public func boundingPoints() -> [Vector3] {
+        if !hatchEdges.isEmpty {
+            return hatchEdges.flatMap { $0.tessellatedPoints(segmentsPerRadian: 8.0) }
+        }
         var result = points
         let twoPi = 2.0 * Double.pi
 
@@ -210,6 +445,7 @@ public struct CADPolyline: Hashable, Sendable, RandomAccessCollection, MutableCo
                 result.vertices[index].bulge = -result.vertices[index].bulge
             }
         }
+        result.hatchEdges = result.hatchEdges.map { $0.transformed(by: transform) }
         return result
     }
 }
@@ -811,9 +1047,17 @@ public struct CADEntity: Entity, Snappable, AttributeAttachable, Hashable, Senda
                     x: origin.x + size.x / 2, y: origin.y + size.y / 2, z: origin.z)))
 
             case .polyline(let path, _):
-                for vertex in path.vertices { addVertex(vertex.position) }
-                for segment in 0..<path.segmentCount {
-                    addMidpoint(path.segmentMidpoint(segment))
+                if !path.hatchEdges.isEmpty {
+                    for edge in path.hatchEdges {
+                        for point in edge.gripPoints { addVertex(point) }
+                        let samples = edge.tessellatedPoints(segmentsPerRadian: 4.0)
+                        if samples.count >= 2 { addMidpoint(samples[samples.count / 2]) }
+                    }
+                } else {
+                    for vertex in path.vertices { addVertex(vertex.position) }
+                    for segment in 0..<path.segmentCount {
+                        addMidpoint(path.segmentMidpoint(segment))
+                    }
                 }
 
             case .polygon(let points, _), .fillPolygon(let points, _):

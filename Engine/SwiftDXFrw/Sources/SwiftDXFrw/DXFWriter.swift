@@ -1051,39 +1051,114 @@ public class DXFWriter {
             out += "100\r\nAcDbEntity\r\n  8\r\n\(esc(layer: ht.layer))\r\n"
             writeCommonEntityData(ht, &out)
             out += "100\r\nAcDbHatch\r\n"
+            writePoint3(10, ht.basePoint, &out)
+            writeCoord3(210, ht.extrusion, &out)
             writeStr(2, ht.name, &out)
             writeInt(70, ht.solid, &out)
             writeInt(71, ht.associative, &out)
-            writeInt(75, ht.hStyle, &out)
-            writeInt(76, ht.hPattern, &out)
-            writeInt(77, ht.doubleFlag, &out)
             writeInt(91, ht.loops.count, &out)
+
             for loop in ht.loops {
                 writeInt(92, loop.type, &out)
-                writeInt(93, loop.numEdges, &out)
-                // Write boundary data - simplified
-                for ent in loop.entities {
-                    // Write edge data
-                    if let line = ent as? DXFLineEntity {
-                        out += " 72\r\n1\r\n"  // Line edge
-                        writePoint3(10, line.basePoint, &out)
-                        writePoint3(11, line.secPoint, &out)
+
+                if (loop.type & 2) != 0,
+                   let polyline = loop.entities.compactMap({ $0 as? DXFLWPolylineEntity }).first {
+                    let hasBulge = polyline.vertices.contains { abs($0.bulge) > 1e-12 }
+                    writeInt(72, hasBulge ? 1 : 0, &out)
+                    writeInt(73, (polyline.flags & 1) != 0 ? 1 : 0, &out)
+                    writeInt(93, polyline.vertices.count, &out)
+                    for vertex in polyline.vertices {
+                        writeDbl(10, vertex.x, &out)
+                        writeDbl(20, vertex.y, &out)
+                        if hasBulge { writeDbl(42, vertex.bulge, &out) }
+                    }
+                    continue
+                }
+
+                writeInt(93, loop.entities.count, &out)
+                for boundary in loop.entities {
+                    if let line = boundary as? DXFLineEntity {
+                        writeInt(72, 1, &out)
+                        writePoint(10, line.basePoint, &out)
+                        writePoint(11, line.secPoint, &out)
+                    } else if let arc = boundary as? DXFArcEntity {
+                        writeInt(72, 2, &out)
+                        writePoint(10, arc.basePoint, &out)
+                        writeDbl(40, arc.radius, &out)
+                        writeDbl(50, arc.startAngle * 180.0 / .pi, &out)
+                        writeDbl(51, arc.endAngle * 180.0 / .pi, &out)
+                        writeInt(73, arc.isCCW != 0 ? 1 : 0, &out)
+                    } else if let ellipse = boundary as? DXFEllipseEntity {
+                        writeInt(72, 3, &out)
+                        writePoint(10, ellipse.basePoint, &out)
+                        writePoint(11, ellipse.secPoint, &out)
+                        writeDbl(40, ellipse.ratio, &out)
+                        writeDbl(50, ellipse.startParam * 180.0 / .pi, &out)
+                        writeDbl(51, ellipse.endParam * 180.0 / .pi, &out)
+                        writeInt(73, ellipse.isCCW != 0 ? 1 : 0, &out)
+                    } else if let spline = boundary as? DXFSplineEntity {
+                        writeInt(72, 4, &out)
+                        writeInt(94, spline.degree, &out)
+                        writeInt(73, (spline.flags & 4) != 0 ? 1 : 0, &out)
+                        writeInt(74, (spline.flags & 2) != 0 ? 1 : 0, &out)
+                        writeInt(95, spline.knots.count, &out)
+                        writeInt(96, spline.controlPoints.count, &out)
+                        for knot in spline.knots { writeDbl(40, knot, &out) }
+                        if (spline.flags & 4) != 0 {
+                            for weight in spline.weights { writeDbl(42, weight, &out) }
+                        }
+                        for point in spline.controlPoints { writePoint(10, point, &out) }
+                        writeInt(97, spline.fitPoints.count, &out)
+                        for point in spline.fitPoints { writePoint(11, point, &out) }
+                        if !spline.fitPoints.isEmpty {
+                            writePoint(12, spline.tgStart, &out)
+                            writePoint(13, spline.tgEnd, &out)
+                        }
                     }
                 }
             }
-            writeDbl(41, ht.scale, &out)
-            writeDbl(52, ht.angle_p, &out)
-            if ht.bgColor >= 0 { writeInt(63, Int(ht.bgColor), &out) }
+
+            writeInt(75, ht.hStyle, &out)
+            writeInt(76, ht.hPattern, &out)
+            writeInt(77, ht.doubleFlag, &out)
+
+            if ht.solid == 0 {
+                writeDbl(52, ht.angle_p, &out)
+                writeDbl(41, ht.scale, &out)
+                let patternLines = ht.patternLines
+                writeInt(78, patternLines.count, &out)
+                for line in patternLines {
+                    writeDbl(53, line.angle, &out)
+                    writeDbl(43, line.base.x, &out)
+                    writeDbl(44, line.base.y, &out)
+                    writeDbl(45, line.offset.x, &out)
+                    writeDbl(46, line.offset.y, &out)
+                    writeInt(79, line.dashes.count, &out)
+                    for dash in line.dashes { writeDbl(49, dash, &out) }
+                }
+            }
+
+            if ht.isGradient == 0, ht.bgColor >= 0 {
+                writeInt(63, Int(ht.bgColor), &out)
+            }
+            writeDbl(47, 1.0, &out)
+            writeInt(98, 0, &out)
+
             writeInt(450, ht.isGradient, &out)
             if ht.isGradient != 0 {
-                writeDbl(460, ht.gradientAngle, &out)
+                writeInt(451, 0, &out)
+                writeDbl(460, ht.gradientAngle * .pi / 180.0, &out)
                 writeDbl(461, ht.gradientShift, &out)
                 writeInt(452, ht.singleColorGrad, &out)
                 writeDbl(462, ht.gradientTint, &out)
+                writeInt(453, ht.gradientColors.count, &out)
+                for stop in ht.gradientColors {
+                    writeDbl(463, stop.position, &out)
+                    writeInt(63, Int(stop.aci), &out)
+                    if stop.rgb >= 0 { writeInt(421, Int(stop.rgb), &out) }
+                }
                 writeStr(470, ht.gradientName, &out)
             }
-            writeDbl(47, 1.0, &out) // hatch pattern scale
-            writeInt(98, 0, &out)   // seed point count
 
         case .iMAGE:
             guard let im = e as? DXFImageEntity else { return }
