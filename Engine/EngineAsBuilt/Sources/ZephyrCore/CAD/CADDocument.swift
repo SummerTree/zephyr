@@ -454,6 +454,7 @@ public final class CADDocument {
         pushUndo()
         guard var block = blockTable[handle] else { return }
         block.geometry = geometry
+        block.primitiveStyles.removeAll(keepingCapacity: false)
         block.updateBoundingBox()
         blockTable[handle] = block
         for (entityHandle, var entity) in entityRegistry where entity.blockID == handle {
@@ -687,6 +688,7 @@ public final class CADDocument {
     public func updateBlockGeometryLive(handle: UUID, geometry: [CADPrimitive]) {
         guard var block = blockTable[handle] else { return }
         block.geometry = geometry
+        block.primitiveStyles.removeAll(keepingCapacity: false)
         block.updateBoundingBox()
         blockTable[handle] = block
         for (entityHandle, var entity) in entityRegistry where entity.blockID == handle {

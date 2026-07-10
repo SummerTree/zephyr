@@ -507,6 +507,9 @@ public class DXFWriter {
             writeStr(6, layer.lineType, &out)
             writeInt(370, layer.lWeight.dxfInt, &out)
             writeBool(290, layer.plotFlag, &out)
+            if layer.plotStyleHandle != 0 {
+                writeStr(390, String(format: "%X", layer.plotStyleHandle), &out)
+            }
             if layer.transparency >= 0 {
                 writeInt(440, Int(layer.transparency), &out)
             }
@@ -1151,6 +1154,11 @@ public class DXFWriter {
         if !e.visible { writeInt(60, 0, &out) }
         if e.space != 0 { writeInt(67, e.space, &out) }
         if e.lWeight != .byLayer { writeInt(370, e.lWeight.dxfInt, &out) }
+        if e.plotStyleHandle != 0 {
+            writeStr(390, String(format: "%X", e.plotStyleHandle), &out)
+        }
+        if !e.colorName.isEmpty { writeStr(430, e.colorName, &out) }
+        if e.transparency >= 0 { writeInt(440, Int(e.transparency), &out) }
         if e.haveExtrusion || e.extrusion != Vector3(x: 0, y: 0, z: 1) {
             writeCoord3(210, e.extrusion, &out)
         }

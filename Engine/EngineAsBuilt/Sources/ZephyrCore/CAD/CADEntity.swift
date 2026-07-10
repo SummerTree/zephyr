@@ -309,6 +309,8 @@ public struct Layer: Hashable, Sendable {
     public var lineWeight: Double          // mm
     public var color: ColorRGBA
     public var lineType: String
+    public var isPlottable: Bool
+    public var plotStyleHandle: String?
     /// Layer opacity 0.0 (fully transparent) to 1.0 (fully opaque).
     /// DXF group code 440. Rendered as an extra multiplier on color.a.
     public var opacity: Double
@@ -319,6 +321,8 @@ public struct Layer: Hashable, Sendable {
                 lineWeight: Double = 0.25,
                 color: ColorRGBA = .white,
                 lineType: String = "CONTINUOUS",
+                isPlottable: Bool = true,
+                plotStyleHandle: String? = nil,
                 opacity: Double = 1.0) {
         self.handle = handle
         self.name = name
@@ -326,7 +330,55 @@ public struct Layer: Hashable, Sendable {
         self.lineWeight = lineWeight
         self.color = color
         self.lineType = lineType
+        self.isPlottable = isPlottable
+        self.plotStyleHandle = plotStyleHandle
         self.opacity = max(0.0, min(1.0, opacity))
+    }
+}
+
+// =========================================================================
+// MARK: - CADPrimitiveStyle
+// =========================================================================
+
+/// DXF draw-style metadata retained for primitives inside flattened blocks.
+/// Block geometry alone cannot represent per-child layer, line type, or line weight.
+public struct CADPrimitiveStyle: Hashable, Sendable {
+    public var layerName: String?
+    public var color: ColorRGBA?
+    public var isColorByBlock: Bool
+    public var lineType: String?
+    public var isLineTypeByBlock: Bool
+    public var lineWeight: Double?
+    public var isLineWeightByBlock: Bool
+    public var lineTypeScale: Double?
+    public var geomWidth: Double?
+    public var opacity: Double?
+    public var plotStyleHandle: String?
+
+    public init(
+        layerName: String? = nil,
+        color: ColorRGBA? = nil,
+        isColorByBlock: Bool = false,
+        lineType: String? = nil,
+        isLineTypeByBlock: Bool = false,
+        lineWeight: Double? = nil,
+        isLineWeightByBlock: Bool = false,
+        lineTypeScale: Double? = nil,
+        geomWidth: Double? = nil,
+        opacity: Double? = nil,
+        plotStyleHandle: String? = nil
+    ) {
+        self.layerName = layerName
+        self.color = color
+        self.isColorByBlock = isColorByBlock
+        self.lineType = lineType
+        self.isLineTypeByBlock = isLineTypeByBlock
+        self.lineWeight = lineWeight
+        self.isLineWeightByBlock = isLineWeightByBlock
+        self.lineTypeScale = lineTypeScale
+        self.geomWidth = geomWidth
+        self.opacity = opacity
+        self.plotStyleHandle = plotStyleHandle
     }
 }
 
@@ -339,6 +391,7 @@ public struct CADBlock: Hashable, Sendable {
     public let handle: UUID
     public var name: String
     public var geometry: [CADPrimitive]
+    public var primitiveStyles: [Int: CADPrimitiveStyle]
 
     /// True if this block is an AutoCAD internal table display block (e.g. *T4).
     /// Such blocks are preserved for raw DXF passthrough but never rendered or edited.
@@ -351,10 +404,12 @@ public struct CADBlock: Hashable, Sendable {
     public init(handle: UUID = UUID(),
                 name: String,
                 geometry: [CADPrimitive],
+                primitiveStyles: [Int: CADPrimitiveStyle] = [:],
                 isInternalTableDisplayBlock: Bool = false) {
         self.handle = handle
         self.name = name
         self.geometry = geometry
+        self.primitiveStyles = primitiveStyles
         self.isInternalTableDisplayBlock = isInternalTableDisplayBlock
         self.localBoundingBox = CADBlock.computeBoundingBox(from: geometry)
     }

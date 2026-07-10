@@ -1193,6 +1193,7 @@ extension DXFReader {
             case 70:  entry.flags = i(v)
             case 290: entry.plotFlag = i(v) != 0
             case 370: entry.lWeight = dxfLineWeightVal(v)
+            case 390: entry.plotStyleHandle = parseHandle(v)
             case 420: entry.color24 = i32(v)
             case 440: entry.transparency = i32(v)
             default:  break
@@ -1585,7 +1586,10 @@ extension DXFReader {
             case 230: entity.extrusion.z = d(v)
             case 330: entity.parentHandle = parseHandle(v)
             case 370: entity.lWeight = dxfLineWeightVal(v)
+            case 390: entity.plotStyleHandle = parseHandle(v)
             case 420: entity.color24 = i32(v)
+            case 430: entity.colorName = decode(v)
+            case 440: entity.transparency = i32(v)
             case 1000, 1001, 1002, 1003, 1004, 1005:
                 entity.extendedData.append((c, decode(v)))
             case 1010, 1011, 1012, 1013:

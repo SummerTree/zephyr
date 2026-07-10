@@ -515,6 +515,13 @@ public enum EABWriter {
             w.writeFloat64(layer.opacity)
             // lineType (added in EAB v4)
             w.writeString(layer.lineType)
+            // Plot metadata (added in EAB v9)
+            var plotFlags: UInt8 = layer.isPlottable ? 0x01 : 0
+            if layer.plotStyleHandle != nil { plotFlags |= 0x02 }
+            w.writeUInt8(plotFlags)
+            if let plotStyleHandle = layer.plotStyleHandle {
+                w.writeString(plotStyleHandle)
+            }
         }
         return w.build()
     }
@@ -545,8 +552,47 @@ public enum EABWriter {
             w.writeFloat32(Float(block.localBoundingBox.max.z))
             // primitives (needed for round-tripping since PVA is lossy)
             serializePrimitives(block.geometry, to: w)
+            // Per-primitive DXF styles retained for flattened blocks (EAB v9).
+            serializePrimitiveStyles(block.primitiveStyles, to: w)
         }
         return w.build()
+    }
+
+    private static func serializePrimitiveStyles(
+        _ styles: [Int: CADPrimitiveStyle],
+        to w: BinaryWriter
+    ) {
+        let validStyles = styles.filter { $0.key >= 0 }
+        w.writeUInt32(UInt32(validStyles.count))
+        for (index, style) in validStyles.sorted(by: { $0.key < $1.key }) {
+            w.writeUInt32(UInt32(index))
+            var flags: UInt16 = 0
+            if style.layerName != nil { flags |= 1 << 0 }
+            if style.color != nil { flags |= 1 << 1 }
+            if style.isColorByBlock { flags |= 1 << 2 }
+            if style.lineType != nil { flags |= 1 << 3 }
+            if style.isLineTypeByBlock { flags |= 1 << 4 }
+            if style.lineWeight != nil { flags |= 1 << 5 }
+            if style.isLineWeightByBlock { flags |= 1 << 6 }
+            if style.lineTypeScale != nil { flags |= 1 << 7 }
+            if style.geomWidth != nil { flags |= 1 << 8 }
+            if style.opacity != nil { flags |= 1 << 9 }
+            if style.plotStyleHandle != nil { flags |= 1 << 10 }
+            w.writeUInt16(flags)
+
+            if let layerName = style.layerName { w.writeString(layerName) }
+            if let color = style.color {
+                let value = UInt32(color.r) << 24 | UInt32(color.g) << 16
+                    | UInt32(color.b) << 8 | UInt32(color.a)
+                w.writeUInt32(value)
+            }
+            if let lineType = style.lineType { w.writeString(lineType) }
+            if let lineWeight = style.lineWeight { w.writeFloat64(lineWeight) }
+            if let lineTypeScale = style.lineTypeScale { w.writeFloat64(lineTypeScale) }
+            if let geomWidth = style.geomWidth { w.writeFloat64(geomWidth) }
+            if let opacity = style.opacity { w.writeFloat64(opacity) }
+            if let plotStyleHandle = style.plotStyleHandle { w.writeString(plotStyleHandle) }
+        }
     }
 
     // MARK: - Entities

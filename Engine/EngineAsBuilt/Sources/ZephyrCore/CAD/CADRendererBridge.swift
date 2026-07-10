@@ -119,14 +119,131 @@ public final class CADRendererBridge {
         pendingLock.withLock { pendingResults = nil }
     }
 
+    private struct ResolvedPrimitiveStyle: Sendable {
+        let color: ColorRGBA
+        let lineType: String
+        let lineWeight: Double
+        let lineTypeScale: Double
+        let geomWidth: Double
+        let opacityMultiplier: Double
+    }
+
+    private nonisolated static func explicitColor(of primitive: CADPrimitive) -> ColorRGBA? {
+        switch primitive {
+        case .point(_, let color): return color
+        case .line(_, _, let color): return color
+        case .rect(_, _, let color): return color
+        case .fillRect(_, _, let color): return color
+        case .polygon(_, let color): return color
+        case .polyline(_, let color): return color
+        case .fillPolygon(_, let color): return color
+        case .fillComplexPolygon(_, _, let color): return color
+        case .gradient: return nil
+        case .circle(_, _, let color): return color
+        case .arc(_, _, _, _, let color): return color
+        case .spline(_, _, _, _, let color): return color
+        case .text(_, _, _, _, _, _, _, _, let color): return color
+        case .ellipse(_, _, _, let color): return color
+        case .hatch(_, _, _, _, let color, _): return color
+        case .hatchPath(_, _, _, _, _, let color, _): return color
+        case .ray(_, _, let color): return color
+        case .image(_, _, _, _, _, let color): return color
+        case .table(_, _, let color): return color
+        }
+    }
+
+    private nonisolated static func isFillPrimitive(_ primitive: CADPrimitive) -> Bool {
+        switch primitive {
+        case .fillRect, .fillPolygon, .fillComplexPolygon, .gradient, .hatch,
+             .hatchPath, .image:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private nonisolated static func resolvedPrimitiveStyle(
+        primitive: CADPrimitive,
+        style: CADPrimitiveStyle?,
+        entityColor: ColorRGBA,
+        entityLineType: String,
+        entityLineWeight: Double,
+        entityLineTypeScale: Double,
+        entityGeomWidth: Double,
+        entityLayerOpacity: Double,
+        layersByName: [String: Layer]
+    ) -> ResolvedPrimitiveStyle {
+        let styleLayer: Layer?
+        if let name = style?.layerName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !name.isEmpty,
+           name != "0" {
+            styleLayer = layersByName[name.uppercased()]
+        } else {
+            styleLayer = nil
+        }
+
+        let color: ColorRGBA
+        if let explicit = Self.explicitColor(of: primitive) ?? style?.color {
+            color = explicit
+        } else if style?.isColorByBlock == true {
+            color = entityColor
+        } else if let styleLayer {
+            color = styleLayer.color
+        } else {
+            color = entityColor
+        }
+
+        let lineType: String
+        if let style {
+            let raw = style.lineType?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "BYLAYER"
+            switch raw.uppercased() {
+            case "", "BYLAYER": lineType = styleLayer?.lineType ?? entityLineType
+            case "BYBLOCK": lineType = entityLineType
+            default: lineType = raw
+            }
+        } else {
+            lineType = entityLineType
+        }
+
+        let lineWeight: Double
+        if let style {
+            if style.isLineWeightByBlock {
+                lineWeight = entityLineWeight
+            } else if let explicit = style.lineWeight, explicit >= 0 {
+                lineWeight = explicit
+            } else {
+                lineWeight = styleLayer?.lineWeight ?? entityLineWeight
+            }
+        } else {
+            lineWeight = entityLineWeight
+        }
+
+        let sourceLayerOpacity = styleLayer?.opacity ?? entityLayerOpacity
+        let opacityMultiplier = max(0.0, min(1.0,
+            sourceLayerOpacity * (style?.opacity ?? 1.0)))
+        let adjustedColor = ColorRGBA(
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: UInt8(min(255, Double(color.a) * opacityMultiplier)))
+
+        return ResolvedPrimitiveStyle(
+            color: adjustedColor,
+            lineType: lineType,
+            lineWeight: lineWeight,
+            lineTypeScale: entityLineTypeScale * (style?.lineTypeScale ?? 1.0),
+            geomWidth: style?.geomWidth ?? entityGeomWidth,
+            opacityMultiplier: opacityMultiplier)
+    }
+
     /// Pure computation from a value-typed snapshot. Safe for any thread —
     /// the snapshot is an independent copy of all document state.
     nonisolated static func computeSpecs(fromSnapshot snapshot: CADDocumentSnapshot, simplifyComplexBlocks: Bool, splineTessellationDivisor: Double = 5000.0) async -> [EntityResult] {
         var visible:
             [(
                 index: Int, handle: UUID,
-                geometry: [CADPrimitive], transform: Transform3D,
-                color: ColorRGBA,
+                geometry: [CADPrimitive], primitiveStyles: [Int: CADPrimitiveStyle],
+                transform: Transform3D, color: ColorRGBA,
                 lineType: String,
                 lineWeight: Double,
                 lineTypeScale: Double,
@@ -137,6 +254,9 @@ public final class CADRendererBridge {
                             alignH: Int, alignV: Int, mtextWidth: Double?, transform: Transform3D, color: ColorRGBA,
                             formattedText: FormattedText?)] = []
         var index = 0
+        let layersByName = Dictionary(
+            snapshot.layers.values.map { ($0.name.uppercased(), $0) },
+            uniquingKeysWith: { first, _ in first })
 
         let sortedEntities = snapshot.entities.values.sorted { e1, e2 in
             let o1 = e1.drawOrder
@@ -159,14 +279,18 @@ public final class CADRendererBridge {
             } else {
                 entityColor = layer.color
             }
-            // Apply layer opacity to the final alpha
-            let effectiveColor: ColorRGBA
-            if layer.opacity < 1.0 {
-                let alpha = UInt8(min(255, Double(entityColor.a) * layer.opacity))
-                effectiveColor = ColorRGBA(r: entityColor.r, g: entityColor.g, b: entityColor.b, a: alpha)
+            let entityOpacity: Double
+            if let value = entity.xdata["dxf.opacity"], case .double(let opacity) = value {
+                entityOpacity = max(0.0, min(1.0, opacity))
             } else {
-                effectiveColor = entityColor
+                entityOpacity = 1.0
             }
+            let combinedLayerOpacity = layer.opacity * entityOpacity
+            let effectiveColor = ColorRGBA(
+                r: entityColor.r,
+                g: entityColor.g,
+                b: entityColor.b,
+                a: UInt8(min(255, Double(entityColor.a) * combinedLayerOpacity)))
 
             // Text entities
             if let tv = entity.xdata["dxf.text"], case .string(let text) = tv, !text.isEmpty {
@@ -209,19 +333,23 @@ public final class CADRendererBridge {
             }
             // Resolve geometry from block or local
             let resolved: [CADPrimitive]?
+            var primitiveStyles: [Int: CADPrimitiveStyle]
             if let bid = entity.blockID, let block = snapshot.blocks[bid] {
                 // Skip internal table display blocks (*T1, *T4) — these are
                 // rendered by the .table primitive, not as block geometry
                 if block.isInternalTableDisplayBlock { continue }
                 resolved = block.geometry
+                primitiveStyles = block.primitiveStyles
             } else {
                 resolved = entity.localGeometry
+                primitiveStyles = [:]
             }
             guard var geometry = resolved else { continue }
             
             if simplifyComplexBlocks && geometry.count > 50 {
                 if let localBox = entity.localBoundingBox {
                     geometry = [.rect(origin: localBox.min, size: localBox.size, color: nil)]
+                    primitiveStyles = [:]
                 }
             }
             
@@ -253,7 +381,9 @@ public final class CADRendererBridge {
                 geomWidth = 0.0
             }
 
-            visible.append((index, entity.handle, geometry, entity.transform, effectiveColor, lineType, lineWeight, lineTypeScale, geomWidth, layer.opacity))
+            visible.append((index, entity.handle, geometry, primitiveStyles,
+                            entity.transform, entityColor, lineType, lineWeight,
+                            lineTypeScale, geomWidth, combinedLayerOpacity))
             index += 1
         }
 
@@ -284,51 +414,47 @@ public final class CADRendererBridge {
                             var specs: [PrimitiveSpec] = []
                             var currentZ = baseZ
                             
-                            // Separate fills from non-fills so hatches are always drawn in the background
-                            let orderedGeometry: [CADPrimitive]
-                            if v.geometry.count <= 1 {
-                                orderedGeometry = v.geometry
+                            // Separate fills from non-fills while retaining original indices.
+                            let indexedGeometry = v.geometry.enumerated().map {
+                                (index: $0.offset, primitive: $0.element)
+                            }
+                            let orderedGeometry: [(index: Int, primitive: CADPrimitive)]
+                            if indexedGeometry.count <= 1 {
+                                orderedGeometry = indexedGeometry
                             } else {
-                                let fills = v.geometry.filter { p in
-                                    switch p {
-                                    case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .hatchPath, .image: return true
-                                    default: return false
-                                    }
-                                }
-                                let nonFills = v.geometry.filter { p in
-                                    switch p {
-                                    case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .hatchPath: return false
-                                    default: return true
-                                    }
-                                }
+                                let fills = indexedGeometry.filter { Self.isFillPrimitive($0.primitive) }
+                                let nonFills = indexedGeometry.filter { !Self.isFillPrimitive($0.primitive) }
                                 orderedGeometry = fills + nonFills
                             }
-                            
+
                             var textSprites: [TextSpriteSpec] = []
-                            let entityColor = (v.color.r, v.color.g, v.color.b, v.color.a)
-                            
-                            // Process all primitives using cleaner custom layout weights
-                            for primitive in orderedGeometry {
-                                let isFill: Bool
-                                switch primitive {
-                                case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .hatchPath, .image: isFill = true
-                                default: isFill = false
-                                }
-                                let primZ = isFill ? currentZ : currentZ + 1000000.0
-                                
-                                if case .text(let pos, let text, let height, let rotation, let style, let alignH, let alignV, let mtextWidth, let primitiveColor) = primitive {
+
+                            for item in orderedGeometry {
+                                let primitive = item.primitive
+                                let drawStyle = Self.resolvedPrimitiveStyle(
+                                    primitive: primitive,
+                                    style: v.primitiveStyles[item.index],
+                                    entityColor: v.color,
+                                    entityLineType: v.lineType,
+                                    entityLineWeight: v.lineWeight,
+                                    entityLineTypeScale: v.lineTypeScale,
+                                    entityGeomWidth: v.geomWidth,
+                                    entityLayerOpacity: v.layerOpacity,
+                                    layersByName: layersByName)
+                                let primZ = Self.isFillPrimitive(primitive)
+                                    ? currentZ
+                                    : currentZ + 1000000.0
+
+                                if case .text(let pos, let text, let height, let rotation, let style, let alignH, let alignV, let mtextWidth, _) = primitive {
                                     let fontFile = style.flatMap { snapshot.textStyleFonts[$0] } ?? "simplex.shx"
-                                    let resolvedColor = primitiveColor ?? v.color
-                                    let resolvedAlpha = primitiveColor == nil
-                                        ? resolvedColor.a
-                                        : UInt8(min(255, Double(resolvedColor.a) * v.layerOpacity))
-                                    let spriteColor = (resolvedColor.r, resolvedColor.g, resolvedColor.b, resolvedAlpha)
-                                    
-                                    if resolvedAlpha == 0 {
+                                    let resolvedColor = drawStyle.color
+                                    let spriteColor = (resolvedColor.r, resolvedColor.g, resolvedColor.b, resolvedColor.a)
+
+                                    if resolvedColor.a == 0 {
                                         currentZ += 0.01
                                         continue
                                     }
-                                    
+
                                     if CADFontManager.getOrLoadSHXFont(filename: fontFile) == nil,
                                        let ttfPath = CADFontManager.getTTFEquivalent(filename: fontFile) {
                                         let origin = v.transform.transformPoint(pos)
@@ -339,7 +465,7 @@ public final class CADRendererBridge {
                                         let finalRotation = atan2(worldX.y, worldX.x)
                                         let heightScale = max(worldY.magnitude, 1e-12)
                                         let widthScale = max(worldX.magnitude, 1e-12)
-                                        
+
                                         textSprites.append(TextSpriteSpec(
                                             text: text,
                                             fontPath: ttfPath,
@@ -354,24 +480,25 @@ public final class CADRendererBridge {
                                             alignV: alignV,
                                             color: spriteColor
                                         ))
-                                        
+
                                         currentZ += 0.01
                                         continue
                                     }
                                 }
-                                
+
                                 let s = CADPrimitiveGenerator.computePrimitiveSpecs(
                                     from: primitive,
                                     transform: v.transform,
-                                    color: entityColor,
+                                    color: (drawStyle.color.r, drawStyle.color.g,
+                                            drawStyle.color.b, drawStyle.color.a),
                                     z: primZ,
-                                    lineType: v.lineType,
-                                    lineWeight: v.lineWeight,
-                                    lineTypeScale: v.lineTypeScale,
-                                    geomWidth: v.geomWidth,
+                                    lineType: drawStyle.lineType,
+                                    lineWeight: drawStyle.lineWeight,
+                                    lineTypeScale: drawStyle.lineTypeScale,
+                                    geomWidth: drawStyle.geomWidth,
                                     textStyleFonts: snapshot.textStyleFonts,
                                     linetypePatterns: snapshot.linetypePatterns,
-                                    opacityMultiplier: v.layerOpacity,
+                                    opacityMultiplier: drawStyle.opacityMultiplier,
                                     splineTessellationDivisor: splineTessellationDivisor)
                                 if s.count > 10000 {
                                     let typeStr: String
@@ -393,9 +520,9 @@ public final class CADRendererBridge {
                                     case .rect: typeStr = "rect"
                                     case .fillRect: typeStr = "fillRect"
                                     case .image: typeStr = "image"
-                    case .table: typeStr = "table"
+                                    case .table: typeStr = "table"
                                     }
-                                    print("[CADBridge]   EXPLOSION: \(typeStr) → \(s.count) specs (lineType=\(v.lineType), lw=\(v.lineWeight), ltScale=\(v.lineTypeScale))")
+                                    print("[CADBridge]   EXPLOSION: \(typeStr) → \(s.count) specs (lineType=\(drawStyle.lineType), lw=\(drawStyle.lineWeight), ltScale=\(drawStyle.lineTypeScale))")
                                 }
                                 specs.append(contentsOf: s)
                                 currentZ += 0.01
@@ -403,30 +530,23 @@ public final class CADRendererBridge {
 
                             // Collect image specs from .image primitives
                             var imageSpecs: [ImageSpec] = []
-                            for primitive in v.geometry {
+                            for (primitiveIndex, primitive) in v.geometry.enumerated() {
                                 if case .image = primitive {
-                                    let primColor: ColorRGBA?
-                                    switch primitive {
-                                    case .image(_, _, _, _, _, let c): primColor = c
-                                    default: primColor = nil
-                                    }
-                                    // Use primitive's own tint, or fall back to entity color
-                                    // (which has layer opacity already applied)
-                                    let effectiveTint: ColorRGBA
-                                    if let primColor {
-                                        effectiveTint = ColorRGBA(
-                                            r: primColor.r,
-                                            g: primColor.g,
-                                            b: primColor.b,
-                                            a: UInt8(min(255, Double(primColor.a) * v.layerOpacity)))
-                                    } else {
-                                        effectiveTint = v.color
-                                    }
+                                    let drawStyle = Self.resolvedPrimitiveStyle(
+                                        primitive: primitive,
+                                        style: v.primitiveStyles[primitiveIndex],
+                                        entityColor: v.color,
+                                        entityLineType: v.lineType,
+                                        entityLineWeight: v.lineWeight,
+                                        entityLineTypeScale: v.lineTypeScale,
+                                        entityGeomWidth: v.geomWidth,
+                                        entityLayerOpacity: v.layerOpacity,
+                                        layersByName: layersByName)
                                     if let imgSpec = CADPrimitiveGenerator.computeImageSpec(
                                         from: primitive,
                                         transform: v.transform,
                                         z: baseZ + 500000.0,
-                                        tint: effectiveTint
+                                        tint: drawStyle.color
                                     ) {
                                         imageSpecs.append(imgSpec)
                                     }

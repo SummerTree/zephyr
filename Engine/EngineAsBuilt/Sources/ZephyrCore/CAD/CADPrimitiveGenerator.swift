@@ -273,19 +273,10 @@ public enum CADPrimitiveGenerator {
                 }
 
                 let isSigned = pattern.contains { $0 <= 0 }
-                var cycleLength: Double = isSigned
-                    ? pattern.reduce(0.0) { $0 + abs($1) } * scale
-                    : pattern.reduce(0.0, +) * scale
-
-                // Fallback: If the entity is shorter than one full dash cycle,
-                // dynamically scale down the pattern so it looks dashed anyway.
-                var effectiveScale = scale
-                if cycleLength > 1e-6 && pathLength < cycleLength {
-                    // Force it to fit at least 2 cycles
-                    let newCycleLength = pathLength / 2.0
-                    effectiveScale = scale * (newCycleLength / cycleLength)
-                    cycleLength = newCycleLength
-                }
+                let effectiveScale = scale > 0 ? scale : 1.0
+                let cycleLength: Double = isSigned
+                    ? pattern.reduce(0.0) { $0 + abs($1) } * effectiveScale
+                    : pattern.reduce(0.0, +) * effectiveScale
 
                 var steps: [(len: Double, draw: Bool)] = []
                 if isSigned {

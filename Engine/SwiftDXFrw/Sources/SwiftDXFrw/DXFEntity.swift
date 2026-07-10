@@ -234,6 +234,9 @@ open class DXFEntity {
     public var lineType: String
     public var color: Int32     // ACI color, 256=BYLAYER, 0=BYBLOCK
     public var color24: Int32   // 24-bit color, -1=not set
+    public var colorName: String // named color, group 430
+    public var transparency: Int32 // entity transparency, group 440; -1=not set
+    public var plotStyleHandle: UInt32 // hard-pointer handle, group 390
     public var lWeight: DXFLineWidth
     public var ltypeScale: Double
     public var visible: Bool
@@ -289,6 +292,9 @@ open class DXFEntity {
         self.lineType = "BYLAYER"
         self.color = 256       // BYLAYER
         self.color24 = -1
+        self.colorName = ""
+        self.transparency = -1
+        self.plotStyleHandle = 0
         self.lWeight = .byLayer
         self.ltypeScale = 1.0
         self.visible = true
@@ -1024,6 +1030,7 @@ public class DXFLayerEntry: DXFTableEntry {
     public var color: Int32           // 62
     public var color24: Int32         // 420
     public var plotFlag: Bool         // 290
+    public var plotStyleHandle: UInt32 // 390
     public var lWeight: DXFLineWidth  // 370
     public var transparency: Int32    // 440
 
@@ -1032,6 +1039,7 @@ public class DXFLayerEntry: DXFTableEntry {
         self.color = 7
         self.color24 = -1
         self.plotFlag = true
+        self.plotStyleHandle = 0
         self.lWeight = .byDefault
         self.transparency = -1
         super.init(tType: .layer)

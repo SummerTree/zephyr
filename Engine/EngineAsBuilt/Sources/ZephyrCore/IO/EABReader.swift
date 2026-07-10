@@ -483,10 +483,22 @@ public enum EABReader {
             // Opacity added in EAB version 3
             let opacity: Double = version >= 3 ? r.readFloat64() : 1.0
             let lineType = r.readString()
+            let isPlottable: Bool
+            let plotStyleHandle: String?
+            if version >= 9 {
+                let plotFlags = r.readUInt8()
+                isPlottable = (plotFlags & 0x01) != 0
+                plotStyleHandle = (plotFlags & 0x02) != 0 ? r.readString() : nil
+            } else {
+                isPlottable = true
+                plotStyleHandle = nil
+            }
             layers.append(Layer(handle: handle, name: name, isVisible: isVisible,
                                 lineWeight: lineWeight,
                                 color: ColorRGBA(r: rComp, g: gComp, b: bComp, a: aComp),
                                 lineType: lineType,
+                                isPlottable: isPlottable,
+                                plotStyleHandle: plotStyleHandle,
                                 opacity: opacity))
         }
         return layers
@@ -514,11 +526,54 @@ public enum EABReader {
                                       max: Vector3(x: bmaxX, y: bmaxY, z: bmaxZ))
             // Parse inline primitives (PVA is lossy, so we store originals too)
             let geometry = try parsePrimitives(r, version: version)
-            var block = CADBlock(handle: handle, name: name, geometry: geometry)
+            let primitiveStyles = version >= 9 ? parsePrimitiveStyles(r) : [:]
+            var block = CADBlock(handle: handle, name: name, geometry: geometry,
+                                 primitiveStyles: primitiveStyles)
             block.localBoundingBox = bbox
             blocks.append(block)
         }
         return blocks
+    }
+
+    private static func parsePrimitiveStyles(_ r: BinaryReader) -> [Int: CADPrimitiveStyle] {
+        let count = Int(r.readUInt32())
+        var styles: [Int: CADPrimitiveStyle] = [:]
+        styles.reserveCapacity(count)
+        for _ in 0..<count {
+            let index = Int(r.readUInt32())
+            let flags = r.readUInt16()
+            let layerName = (flags & (1 << 0)) != 0 ? r.readString() : nil
+            let color: ColorRGBA?
+            if (flags & (1 << 1)) != 0 {
+                let value = r.readUInt32()
+                color = ColorRGBA(
+                    r: UInt8((value >> 24) & 0xFF),
+                    g: UInt8((value >> 16) & 0xFF),
+                    b: UInt8((value >> 8) & 0xFF),
+                    a: UInt8(value & 0xFF))
+            } else {
+                color = nil
+            }
+            let lineType = (flags & (1 << 3)) != 0 ? r.readString() : nil
+            let lineWeight = (flags & (1 << 5)) != 0 ? r.readFloat64() : nil
+            let lineTypeScale = (flags & (1 << 7)) != 0 ? r.readFloat64() : nil
+            let geomWidth = (flags & (1 << 8)) != 0 ? r.readFloat64() : nil
+            let opacity = (flags & (1 << 9)) != 0 ? r.readFloat64() : nil
+            let plotStyleHandle = (flags & (1 << 10)) != 0 ? r.readString() : nil
+            styles[index] = CADPrimitiveStyle(
+                layerName: layerName,
+                color: color,
+                isColorByBlock: (flags & (1 << 2)) != 0,
+                lineType: lineType,
+                isLineTypeByBlock: (flags & (1 << 4)) != 0,
+                lineWeight: lineWeight,
+                isLineWeightByBlock: (flags & (1 << 6)) != 0,
+                lineTypeScale: lineTypeScale,
+                geomWidth: geomWidth,
+                opacity: opacity,
+                plotStyleHandle: plotStyleHandle)
+        }
+        return styles
     }
 
     // MARK: - Entity Parsing

@@ -30,6 +30,11 @@ public struct DXFImportResult: Sendable {
 
 public enum DXFImporter {
 
+    private struct StyledPrimitive {
+        var primitive: CADPrimitive
+        var style: CADPrimitiveStyle?
+    }
+
     public static func importDXF(filePath: String) throws -> (layers: [Layer], blocks: [CADBlock], entities: [CADEntity], textStyleFonts: [String: String], linetypePatterns: [String: [Double]]) {
         let result = try importDXFViews(filePath: filePath)
         return (result.layers, result.blocks, result.entities, result.textStyleFonts, result.linetypePatterns)
@@ -42,9 +47,9 @@ public enum DXFImporter {
     }
 
     private static func convertDXFToCAD(reader: DXFReader) -> DXFImportResult {
+        let globalLineTypeScale = reader.header.ltScale > 0 ? reader.header.ltScale : 1.0
         var layers: [Layer] = []
         var layerNameToID: [String: UUID] = [:]
-        var layerStyleByName: [String: Layer] = [:]
 
         for table in reader.layers {
             let handle = UUID()
@@ -57,16 +62,18 @@ public enum DXFImporter {
                               lineWeight: DXFColorTable.lineWeightToMM(Double(table.lWeight.dxfInt)),
                               color: color,
                               lineType: table.lineType.isEmpty ? "CONTINUOUS" : table.lineType,
+                              isPlottable: table.plotFlag,
+                              plotStyleHandle: table.plotStyleHandle == 0
+                                  ? nil
+                                  : String(table.plotStyleHandle, radix: 16).uppercased(),
                               opacity: DXFColorTable.transparencyToOpacity(table.transparency))
             layers.append(layer)
-            layerStyleByName[name] = layer
         }
         if layerNameToID["0"] == nil {
             let handle = UUID()
             layerNameToID["0"] = handle
             let layer = Layer(handle: handle, name: "0", isVisible: true, lineWeight: 0.25, color: .white)
             layers.append(layer)
-            layerStyleByName["0"] = layer
         }
 
         func layerID(for entity: DXFEntity) -> UUID {
@@ -74,9 +81,6 @@ public enum DXFImporter {
             return layerNameToID[name] ?? layerNameToID["0"]!
         }
 
-        func bylayerColor(for entity: DXFEntity) -> ColorRGBA? {
-            layerStyleByName[entity.layer.isEmpty ? "0" : entity.layer]?.color
-        }
 
         var blockByName: [String: DXFBlockEntity] = [:]
         for block in reader.blocks where !block.name.isEmpty { blockByName[block.name] = block }
@@ -87,15 +91,15 @@ public enum DXFImporter {
             blockBaseByName[block.name] = Self.cadPoint(block.basePoint)
         }
 
-        var blockGeometryCache: [String: [CADPrimitive]] = [:]
+        var blockGeometryCache: [String: [StyledPrimitive]] = [:]
 
-        func convertBlockGeometry(named name: String, visited: Set<String> = []) -> [CADPrimitive] {
+        func convertBlockGeometry(named name: String, visited: Set<String> = []) -> [StyledPrimitive] {
             if let cached = blockGeometryCache[name] { return cached }
             guard let block = blockByName[name], !visited.contains(name) else { return [] }
 
             var nextVisited = visited
             nextVisited.insert(name)
-            var geometry: [CADPrimitive] = []
+            var geometry: [StyledPrimitive] = []
 
             for entity in block.entities {
                 if let insert = entity as? DXFInsertEntity, blockByName[insert.name] != nil {
@@ -107,7 +111,10 @@ public enum DXFImporter {
                     for row in 0..<rows {
                         for column in 0..<columns {
                             let transform = Self.insertTransform(insert, blockBase: base, column: column, row: row)
-                            geometry.append(contentsOf: child.map { Self.transformPrimitive($0, by: transform) })
+                            geometry.append(contentsOf: Self.transformStyledPrimitives(
+                                child,
+                                by: transform,
+                                nestedInsertStyle: Self.primitiveStyle(from: insert)))
                         }
                     }
                     continue
@@ -119,9 +126,11 @@ public enum DXFImporter {
                     continue
                 }
 
-                geometry.append(contentsOf: DXFEntityConverter.convertEntityToPrimitives(
-                    entity,
-                    bylayerColor: bylayerColor(for: entity)))
+                let style = Self.primitiveStyle(from: entity)
+                let primitives = DXFEntityConverter.convertEntityToPrimitives(entity, bylayerColor: nil)
+                geometry.append(contentsOf: primitives.map {
+                    StyledPrimitive(primitive: $0, style: style)
+                })
             }
 
             blockGeometryCache[name] = geometry
@@ -132,10 +141,17 @@ public enum DXFImporter {
         var blockByID: [UUID: CADBlock] = [:]
         for block in reader.blocks {
             guard let handle = blockNameToID[block.name] else { continue }
-            let cadBlock = CADBlock(handle: handle,
-                                    name: block.name,
-                                    geometry: convertBlockGeometry(named: block.name),
-                                    isInternalTableDisplayBlock: block.name.hasPrefix("*T"))
+            let styledGeometry = convertBlockGeometry(named: block.name)
+            let cadBlock = CADBlock(
+                handle: handle,
+                name: block.name,
+                geometry: styledGeometry.map(\.primitive),
+                primitiveStyles: Dictionary(uniqueKeysWithValues:
+                    styledGeometry.enumerated().compactMap { index, item in
+                        guard let style = item.style else { return nil }
+                        return (index, style)
+                    }),
+                isInternalTableDisplayBlock: block.name.hasPrefix("*T"))
             blocks.append(cadBlock)
             blockByID[handle] = cadBlock
         }
@@ -155,6 +171,7 @@ public enum DXFImporter {
                                                blockID: blockID,
                                                localGeometry: nil,
                                                transform: Self.insertTransform(insert, blockBase: blockBase, column: column, row: row),
+                                               xdata: Self.entityStyleXData(from: entity, globalLineTypeScale: globalLineTypeScale),
                                                drawOrder: drawOrder,
                                                localBoundingBox: block.localBoundingBox)
                         cadEnt.drawOrder = drawOrder
@@ -172,6 +189,7 @@ public enum DXFImporter {
                                        blockID: blockID,
                                        localGeometry: nil,
                                        transform: .identity,
+                                       xdata: Self.entityStyleXData(from: entity, globalLineTypeScale: globalLineTypeScale),
                                        drawOrder: drawOrder,
                                        localBoundingBox: block.localBoundingBox)
                 cadEnt.drawOrder = drawOrder
@@ -179,13 +197,14 @@ public enum DXFImporter {
                 continue
             }
 
-            let prims = DXFEntityConverter.convertEntityToPrimitives(entity, bylayerColor: bylayerColor(for: entity))
+            let prims = DXFEntityConverter.convertEntityToPrimitives(entity, bylayerColor: nil)
             guard !prims.isEmpty || entity.eType == .pOINT else { continue }
             var cadEnt = CADEntity(handle: UUID(),
                                    layerID: layerID(for: entity),
                                    blockID: nil,
                                    localGeometry: prims,
-                                   transform: .identity)
+                                   transform: .identity,
+                                   xdata: Self.entityStyleXData(from: entity, globalLineTypeScale: globalLineTypeScale))
             cadEnt.drawOrder = drawOrder
             looseEntities.append(cadEnt)
         }
@@ -196,13 +215,120 @@ public enum DXFImporter {
         }
 
         var linetypePatterns: [String: [Double]] = [:]
-        for ltype in reader.ltypes where !ltype.name.isEmpty {
-            linetypePatterns[ltype.name] = ltype.path
+        for ltype in reader.ltypes {
+            let key = ltype.name
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .uppercased()
+            if !key.isEmpty {
+                linetypePatterns[key] = ltype.path
+            }
         }
 
         return DXFImportResult(layers: layers, blocks: blocks, entities: looseEntities,
                               textStyleFonts: textStyleFonts, linetypePatterns: linetypePatterns,
                               views: [DXFDrawingView(name: "Model", kind: .model, entities: looseEntities)])
+    }
+
+    private static func entityStyleXData(
+        from entity: DXFEntity,
+        globalLineTypeScale: Double
+    ) -> [String: XDataValue] {
+        var xdata: [String: XDataValue] = [:]
+
+        if entity.color24 >= 0 || (entity.color > 0 && entity.color < 256) {
+            let color = DXFColorTable.aciToRGBA(entity.color, color24: entity.color24)
+            xdata["dxf.color"] = .string(String(
+                format: "#%02X%02X%02X", color.r, color.g, color.b))
+        }
+        if entity.transparency >= 0 {
+            xdata["dxf.opacity"] = .double(
+                DXFColorTable.transparencyToOpacity(entity.transparency))
+        }
+
+        let lineType = entity.lineType.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !lineType.isEmpty {
+            xdata["dxf.lineType"] = .string(lineType)
+        }
+
+        if entity.lWeight.dxfInt >= 0 {
+            xdata["dxf.lineWeight"] = .double(
+                DXFColorTable.lineWeightToMM(Double(entity.lWeight.dxfInt)))
+        }
+
+        let entityLineTypeScale = entity.ltypeScale > 0 ? entity.ltypeScale : 1.0
+        xdata["dxf.lineTypeScale"] = .double(entityLineTypeScale * globalLineTypeScale)
+
+        if let width = Self.polylineDisplayWidth(from: entity) {
+            xdata["dxf.polylineWidth"] = .double(width)
+        }
+
+        if entity.plotStyleHandle != 0 {
+            xdata["dxf.plotStyleHandle"] = .string(
+                String(entity.plotStyleHandle, radix: 16).uppercased())
+        }
+        if !entity.colorName.isEmpty {
+            xdata["dxf.colorName"] = .string(entity.colorName)
+        }
+        return xdata
+    }
+
+    private static func primitiveStyle(from entity: DXFEntity) -> CADPrimitiveStyle {
+        let explicitColor: ColorRGBA?
+        if entity.color24 >= 0 || (entity.color > 0 && entity.color < 256) {
+            explicitColor = DXFColorTable.aciToRGBA(entity.color, color24: entity.color24)
+        } else {
+            explicitColor = nil
+        }
+
+        let rawLineType = entity.lineType.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lineType = rawLineType.isEmpty ? "BYLAYER" : rawLineType
+
+        let explicitLineWeight: Double?
+        if entity.lWeight.dxfInt >= 0 {
+            explicitLineWeight = DXFColorTable.lineWeightToMM(Double(entity.lWeight.dxfInt))
+        } else {
+            explicitLineWeight = nil
+        }
+
+        let geomWidth = Self.polylineDisplayWidth(from: entity)
+
+        return CADPrimitiveStyle(
+            layerName: entity.layer.isEmpty ? "0" : entity.layer,
+            color: explicitColor,
+            isColorByBlock: entity.color == 0,
+            lineType: lineType,
+            isLineTypeByBlock: lineType.uppercased() == "BYBLOCK",
+            lineWeight: explicitLineWeight,
+            isLineWeightByBlock: entity.lWeight == .byBlock,
+            lineTypeScale: entity.ltypeScale > 0 ? entity.ltypeScale : nil,
+            geomWidth: geomWidth,
+            opacity: entity.transparency >= 0
+                ? DXFColorTable.transparencyToOpacity(entity.transparency)
+                : nil,
+            plotStyleHandle: entity.plotStyleHandle == 0
+                ? nil
+                : String(entity.plotStyleHandle, radix: 16).uppercased())
+    }
+
+    private static func polylineDisplayWidth(from entity: DXFEntity) -> Double? {
+        if let lw = entity as? DXFLWPolylineEntity {
+            let vertexWidth = lw.vertices.reduce(0.0) { current, vertex in
+                max(current, max(abs(vertex.startWidth), abs(vertex.endWidth)))
+            }
+            let width = max(abs(lw.width), vertexWidth)
+            return width > 0 ? width : nil
+        }
+
+        if let poly = entity as? DXFPolylineEntity {
+            let vertexWidth = poly.vertices.reduce(0.0) { current, vertex in
+                max(current, max(abs(vertex.startWidth), abs(vertex.endWidth)))
+            }
+            let defaultWidth = max(abs(poly.defStartWidth), abs(poly.defEndWidth))
+            let width = max(defaultWidth, vertexWidth)
+            return width > 0 ? width : nil
+        }
+
+        return nil
     }
 
     private static func cadPoint(_ point: SwiftDXFrw.Vector3) -> Vector3 {
@@ -287,6 +413,52 @@ public enum DXFImporter {
             x: ax.x * point.x + ay.x * point.y + az.x * point.z,
             y: ax.y * point.x + ay.y * point.y + az.y * point.z,
             z: ax.z * point.x + ay.z * point.y + az.z * point.z)
+    }
+
+    private static func transformStyledPrimitives(
+        _ values: [StyledPrimitive],
+        by transform: Transform3D,
+        nestedInsertStyle: CADPrimitiveStyle
+    ) -> [StyledPrimitive] {
+        values.map { item in
+            var style = item.style
+            if style?.isColorByBlock == true {
+                style?.color = nestedInsertStyle.color
+                style?.isColorByBlock = nestedInsertStyle.isColorByBlock
+                if style?.color == nil && !nestedInsertStyle.isColorByBlock {
+                    style?.layerName = nestedInsertStyle.layerName
+                }
+            }
+            if style?.isLineTypeByBlock == true {
+                style?.lineType = nestedInsertStyle.lineType
+                style?.isLineTypeByBlock = nestedInsertStyle.isLineTypeByBlock
+                let nestedLineType = nestedInsertStyle.lineType?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .uppercased() ?? "BYLAYER"
+                if !nestedInsertStyle.isLineTypeByBlock
+                    && (nestedLineType.isEmpty || nestedLineType == "BYLAYER") {
+                    style?.layerName = nestedInsertStyle.layerName
+                }
+            }
+            if style?.isLineWeightByBlock == true {
+                style?.lineWeight = nestedInsertStyle.lineWeight
+                style?.isLineWeightByBlock = nestedInsertStyle.isLineWeightByBlock
+                if style?.lineWeight == nil && !nestedInsertStyle.isLineWeightByBlock {
+                    style?.layerName = nestedInsertStyle.layerName
+                }
+            }
+            if let nestedScale = nestedInsertStyle.lineTypeScale {
+                let currentScale = style?.lineTypeScale ?? 1.0
+                style?.lineTypeScale = currentScale * nestedScale
+            }
+            if let nestedOpacity = nestedInsertStyle.opacity {
+                let currentOpacity = style?.opacity ?? 1.0
+                style?.opacity = currentOpacity * nestedOpacity
+            }
+            return StyledPrimitive(
+                primitive: transformPrimitive(item.primitive, by: transform),
+                style: style)
+        }
     }
 
     private static func transformPrimitive(_ primitive: CADPrimitive, by transform: Transform3D) -> CADPrimitive {
