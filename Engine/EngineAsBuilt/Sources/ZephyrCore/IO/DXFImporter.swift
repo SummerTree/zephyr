@@ -215,7 +215,7 @@ public enum DXFImporter {
     }
 
     private static func insertTransform(_ insert: DXFInsertEntity, blockBase: Vector3, column: Int = 0, row: Int = 0) -> Transform3D {
-        let insertion = Self.cadPoint(insert.basePoint, extrusion: insert.haveExtrusion ? insert.extrusion : nil)
+        let insertion = Self.cadPoint(insert.basePoint)
         let translate = Transform3D.translated(by: insertion)
         let rotate = Transform3D.rotated(by: -insert.angle)
         let arrayOffset = Transform3D.translated(by: Vector3(
@@ -308,6 +308,8 @@ public enum DXFImporter {
             return .ellipse(center: p(center), majorAxis: v(majorAxis), minorRatio: minorRatio, color: color)
         case .hatch(let boundary, let pattern, let scale, let angle, let color, let backgroundColor):
             return .hatch(boundary: boundary.map(p), pattern: pattern, scale: scalar(scale), angle: angle + transform.rotation, color: color, backgroundColor: backgroundColor)
+        case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let color, let backgroundColor):
+            return .hatchPath(boundary: transformPolyline(boundary, by: transform), holes: holes.map { transformPolyline($0, by: transform) }, pattern: pattern, scale: scalar(scale), angle: angle + transform.rotation, color: color, backgroundColor: backgroundColor)
         case .ray(let start, let direction, let color):
             return .ray(start: p(start), direction: v(direction), color: color)
         case .image(let insertion, let uAxis, let vAxis, let imageName, let clipBoundary, let tint):

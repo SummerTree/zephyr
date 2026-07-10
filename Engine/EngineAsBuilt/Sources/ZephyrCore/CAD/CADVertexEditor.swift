@@ -162,6 +162,12 @@ public final class CADVertexEditor {
                 }
             case .hatch(_, let pattern, let scale, let angle, let c, _):
                 prim = .hatch(boundary: localPts, pattern: pattern, scale: scale, angle: angle, color: c, backgroundColor: nil)
+            case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let c, let bg):
+                var newBoundary = boundary
+                if localPts.count == newBoundary.vertices.count {
+                    for i in localPts.indices { newBoundary.vertices[i].position = localPts[i] }
+                }
+                prim = .hatchPath(boundary: newBoundary, holes: holes, pattern: pattern, scale: scale, angle: angle, color: c, backgroundColor: bg)
             case .ray(_, _, let c):
                 if localPts.count >= 2 {
                     let dir = Vector3(x: localPts[1].x - localPts[0].x, y: localPts[1].y - localPts[0].y, z: 0)

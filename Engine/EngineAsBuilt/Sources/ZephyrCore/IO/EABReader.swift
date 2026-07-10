@@ -1019,6 +1019,40 @@ public enum EABReader {
                 let angle = r.readFloat64()
                 let color = readColor()
                 prims.append(.hatch(boundary: boundary, pattern: pattern, scale: scale, angle: angle, color: color, backgroundColor: nil))
+            case 19: // hatchPath
+                func readPath() -> CADPolyline {
+                    let count = Int(r.readUInt32())
+                    let isClosed = r.readUInt8() != 0
+                    let lineTypeGenerationEnabled = r.readUInt8() != 0
+                    var vertices: [CADPolylineVertex] = []
+                    vertices.reserveCapacity(count)
+                    for _ in 0..<count {
+                        let position = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
+                        let bulge = r.readFloat64()
+                        let startWidth = r.readFloat64()
+                        let endWidth = r.readFloat64()
+                        vertices.append(CADPolylineVertex(
+                            position: position,
+                            bulge: bulge,
+                            startWidth: startWidth,
+                            endWidth: endWidth))
+                    }
+                    return CADPolyline(vertices: vertices,
+                                       isClosed: isClosed,
+                                       lineTypeGenerationEnabled: lineTypeGenerationEnabled)
+                }
+                let boundary = readPath()
+                let holeCount = Int(r.readUInt32())
+                var holes: [CADPolyline] = []
+                holes.reserveCapacity(holeCount)
+                for _ in 0..<holeCount { holes.append(readPath()) }
+                let pattern = r.readString()
+                let scale = r.readFloat64()
+                let angle = r.readFloat64()
+                let color = readColor()
+                let backgroundColor = readColor()
+                prims.append(.hatchPath(boundary: boundary, holes: holes, pattern: pattern, scale: scale, angle: angle, color: color, backgroundColor: backgroundColor))
+
             case 14: // ray
                 let start = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())
                 let direction = Vector3(x: r.readFloat64(), y: r.readFloat64(), z: r.readFloat64())

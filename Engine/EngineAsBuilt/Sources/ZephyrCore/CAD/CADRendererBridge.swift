@@ -291,13 +291,13 @@ public final class CADRendererBridge {
                             } else {
                                 let fills = v.geometry.filter { p in
                                     switch p {
-                                    case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .image: return true
+                                    case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .hatchPath, .image: return true
                                     default: return false
                                     }
                                 }
                                 let nonFills = v.geometry.filter { p in
                                     switch p {
-                                    case .fillPolygon, .fillComplexPolygon, .gradient, .hatch: return false
+                                    case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .hatchPath: return false
                                     default: return true
                                     }
                                 }
@@ -311,7 +311,7 @@ public final class CADRendererBridge {
                             for primitive in orderedGeometry {
                                 let isFill: Bool
                                 switch primitive {
-                                case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .image: isFill = true
+                                case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .hatchPath, .image: isFill = true
                                 default: isFill = false
                                 }
                                 let primZ = isFill ? currentZ : currentZ + 1000000.0
@@ -381,7 +381,7 @@ public final class CADRendererBridge {
                                     case .polyline(let pts, _): typeStr = "polyline(\(pts.count)pts)"
                                     case .fillComplexPolygon(let outer, let holes, _): typeStr = "fillComplexPolygon(outer:\(outer.count),holes:\(holes.count))"
                                     case .fillPolygon(let pts, _): typeStr = "fillPolygon(\(pts.count)pts)"
-                                    case .hatch: typeStr = "hatch"
+                                    case .hatch, .hatchPath: typeStr = "hatch"
                                     case .spline: typeStr = "spline"
                                     case .circle: typeStr = "circle"
                                     case .arc: typeStr = "arc"
@@ -547,7 +547,7 @@ public final class CADRendererBridge {
                         case .polyline(let pts, _): typeStr = "polyline(\(pts.count)pts)"
                         case .fillComplexPolygon(let outer, let holes, _): typeStr = "fillComplexPolygon(outer:\(outer.count),holes:\(holes.count))"
                         case .fillPolygon(let pts, _): typeStr = "fillPolygon(\(pts.count)pts)"
-                        case .hatch: typeStr = "hatch"
+                        case .hatch, .hatchPath: typeStr = "hatch"
                         case .spline: typeStr = "spline"
                         case .circle: typeStr = "circle"
                         case .arc: typeStr = "arc"
@@ -762,7 +762,12 @@ public final class CADRendererBridge {
 
         var offset = 0
         for (primIdx, prim) in geometry.enumerated() {
-            let pts = CADGeometryMath.worldPointsForPrimitive(prim, transform: entity.transform)
+            let pts: [Vector3]
+            if case .hatchPath(let boundary, _, _, _, _, _, _) = prim {
+                pts = boundary.points.map { entity.transform.transformPoint($0) }
+            } else {
+                pts = CADGeometryMath.worldPointsForPrimitive(prim, transform: entity.transform)
+            }
             let localIdx = vertexIndex - offset
             if localIdx >= 0 && localIdx < pts.count {
                 var newGeom = geometry
@@ -1113,6 +1118,23 @@ public final class CADRendererBridge {
                     }
                     return
 
+                case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let c, let bg):
+                    var newWorldPts = pts
+                    newWorldPts[localIdx].x += Double(dx)
+                    newWorldPts[localIdx].y += Double(dy)
+                    guard localIdx < boundary.vertices.count else { return }
+                    var newBoundary = boundary
+                    let wp = newWorldPts[localIdx]
+                    let moved = Vector3(x: wp.x, y: wp.y, z: 0)
+                    newBoundary.vertices[localIdx].position = invTransform.transformPoint(moved)
+                    writeLiveGeometry(.hatchPath(boundary: newBoundary, holes: holes, pattern: pattern, scale: scale, angle: angle, color: c, backgroundColor: bg))
+                    if rebuildSinglePrimitiveEntityLive(
+                        handle: handle, in: gm, document: document
+                    ) {
+                        return
+                    }
+                    return
+
                 case .ray(let start, let direction, let c):
                     var newWorldPts = pts
                     newWorldPts[localIdx].x += Double(dx)
@@ -1176,7 +1198,7 @@ public final class CADRendererBridge {
 
         guard let visibleIndex = geometry[..<editPrimitiveIndex].lastIndex(where: { prim in
             switch prim {
-            case .fillPolygon, .fillComplexPolygon, .gradient, .hatch:
+            case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .hatchPath:
                 return true
             default:
                 return false
@@ -1256,6 +1278,16 @@ public final class CADRendererBridge {
         case .hatch(let boundary, let pattern, let scale, let angle, let color, _):
             if editLoopIndex == 0 {
                 result[visibleIndex] = .hatch(boundary: moveNearestPoint(in: boundary), pattern: pattern, scale: scale, angle: angle, color: color, backgroundColor: nil)
+            }
+
+        case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let color, let bg):
+            if editLoopIndex == 0 {
+                var newBoundary = boundary
+                let moved = moveNearestPoint(in: boundary.points)
+                if moved.count == newBoundary.vertices.count {
+                    for i in moved.indices { newBoundary.vertices[i].position = moved[i] }
+                }
+                result[visibleIndex] = .hatchPath(boundary: newBoundary, holes: holes, pattern: pattern, scale: scale, angle: angle, color: color, backgroundColor: bg)
             }
 
         default:

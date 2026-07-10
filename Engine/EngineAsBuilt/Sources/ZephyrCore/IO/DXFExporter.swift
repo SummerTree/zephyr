@@ -758,6 +758,7 @@ public enum DXFExporter {
         case .text(_, _, _, _, _, _, _, _, let c): primColor = c
         case .ellipse(_, _, _, let c): primColor = c
         case .hatch(_, _, _, _, let c, _): primColor = c
+        case .hatchPath(_, _, _, _, _, let c, _): primColor = c
         case .ray(_, _, let c): primColor = c
         case .image(_, _, _, _, _, let c): primColor = c
         case .table(_, _, let c): primColor = c
@@ -1121,6 +1122,49 @@ public enum DXFExporter {
             for pt in wBoundary {
                 output += " 10\r\n\(dxfDouble(pt.x))\r\n"
                 output += " 20\r\n\(dxfDouble(-pt.y))\r\n"
+            }
+            output += " 75\r\n0\r\n"
+            let hatchPatternType = DXFHatchGenerator.predefinedPatterns[pattern.uppercased()] == nil ? 0 : 1
+            output += " 76\r\n\(hatchPatternType)\r\n"
+            if hatchScale > 0 {
+                output += " 41\r\n\(dxfDouble(hatchScale))\r\n"
+            }
+            if hatchAngle != 0 {
+                output += " 52\r\n\(dxfDouble(hatchAngle * 180.0 / .pi))\r\n"
+            }
+            if let bg = backgroundColor {
+                let rgb24 = Int32((Int32(bg.r) << 16) | (Int32(bg.g) << 8) | Int32(bg.b))
+                output += " 63\r\n\(-rgb24)\r\n"
+            }
+            output += " 98\r\n0\r\n"
+
+        case .hatchPath(let boundaryPath, let holePaths, let pattern, let hatchScale, let hatchAngle, _, let backgroundColor):
+            let loops = [boundaryPath] + holePaths
+            guard loops.first?.vertices.count ?? 0 >= 3 else { break }
+            writeEntityHeaderWithColor(entityType: "HATCH", subclass: "AcDbHatch",
+                                        handle: handle, layerName: layer, color: primColor,
+                                        into: &output)
+            if pattern.uppercased() == "SOLID" || pattern.isEmpty {
+                output += "  2\r\nSOLID\r\n"
+                output += " 70\r\n1\r\n"
+            } else {
+                output += "  2\r\n\(pattern)\r\n"
+                output += " 70\r\n0\r\n"
+            }
+            output += " 71\r\n0\r\n"
+            output += " 91\r\n\(loops.count)\r\n"
+            for loop in loops {
+                output += " 92\r\n2\r\n"
+                let hasBulge = loop.vertices.contains { abs($0.bulge) > 1e-12 }
+                output += " 72\r\n\(hasBulge ? 1 : 0)\r\n"
+                output += " 73\r\n\(loop.isClosed ? 1 : 0)\r\n"
+                output += " 93\r\n\(loop.vertices.count)\r\n"
+                for vertex in loop.vertices {
+                    let wp = t.transformPoint(vertex.position)
+                    output += " 10\r\n\(dxfDouble(wp.x))\r\n"
+                    output += " 20\r\n\(dxfDouble(-wp.y))\r\n"
+                    if hasBulge { output += " 42\r\n\(dxfDouble(vertex.bulge))\r\n" }
+                }
             }
             output += " 75\r\n0\r\n"
             let hatchPatternType = DXFHatchGenerator.predefinedPatterns[pattern.uppercased()] == nil ? 0 : 1

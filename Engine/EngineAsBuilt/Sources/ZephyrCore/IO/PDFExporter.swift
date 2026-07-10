@@ -407,6 +407,9 @@ public enum PDFExporter {
                 grow(Vector3(x: c.x + m, y: c.y + m, z: c.z))
             case .hatch(let boundary, _, _, _, _, _):
                 for pt in boundary { grow(pt) }
+            case .hatchPath(let boundary, let holes, _, _, _, _, _):
+                for pt in boundary.boundingPoints() { grow(pt) }
+                for hole in holes { for pt in hole.boundingPoints() { grow(pt) } }
             case .gradient(let outer, _, _, _, _, _):
                 for pt in outer { grow(pt) }
             case .text(let pos, _, let h, _, _, _, _, _, _):

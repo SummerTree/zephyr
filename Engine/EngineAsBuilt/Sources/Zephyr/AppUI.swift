@@ -282,8 +282,17 @@ struct AppUI {
         }
 
         let hatch = geometry.compactMap { prim -> (boundary: [Vector3], pattern: String, scale: Double, angle: Double, color: ColorRGBA?, background: ColorRGBA?)? in
-            guard case .hatch(let boundary, let pattern, let scale, let angle, let color, let background) = prim else { return nil }
-            return (boundary, pattern, scale, angle, color, background)
+            switch prim {
+            case .hatch(let boundary, let pattern, let scale, let angle, let color, let background):
+                return (boundary, pattern, scale, angle, color, background)
+            case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let color, let background):
+                let outer = boundary.tessellatedPoints()
+                let holeLoops = holes.map { $0.tessellatedPoints() }.filter { $0.count >= 3 }
+                let connected = holeLoops.isEmpty ? outer : DXFHatchGenerator.connectHoles(outer: outer, holes: holeLoops)
+                return (connected, pattern, scale, angle, color, background)
+            default:
+                return nil
+            }
         }.first
 
         let complex = geometry.compactMap { prim -> (outer: [Vector3], holes: [[Vector3]], color: ColorRGBA?)? in

@@ -72,7 +72,7 @@ struct GeometryPanelUI {
         case .spline: return "Spline"
         case .text: return "Text"
         case .ellipse: return "Ellipse"
-        case .hatch: return "Hatch"
+        case .hatch, .hatchPath: return "Hatch"
         case .ray: return "Ray"
         case .image: return "Image"
         case .table: return "Table"
@@ -169,6 +169,13 @@ struct GeometryPanelUI {
             return (
                 "Hatch #\(i)",
                 "boundary: \(boundary.count) pts  pattern=\(pattern.isEmpty ? "SOLID" : pattern)  scale=\(String(format: "%.2f", scale))  angle=\(String(format: "%.1f", angle))\u{00B0}  \(color.map { UIFormatting.colorStr($0) } ?? "\u{2014}")"
+            )
+
+        case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let color, _):
+            let edgeCount = boundary.segmentCount + holes.reduce(0) { $0 + $1.segmentCount }
+            return (
+                "Hatch #\(i)",
+                "boundary: \(edgeCount) edges  pattern=\(pattern.isEmpty ? "SOLID" : pattern)  scale=\(String(format: "%.2f", scale))  angle=\(String(format: "%.1f", angle))\u{00B0}  \(color.map { UIFormatting.colorStr($0) } ?? "\u{2014}")"
             )
 
         case .ray(let start, let direction, let color):

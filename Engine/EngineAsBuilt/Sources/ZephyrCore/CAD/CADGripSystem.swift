@@ -138,6 +138,41 @@ public enum CADGripSystem {
                     continue
                 }
 
+                if case .hatchPath(let boundary, _, _, _, _, _, _) = prim {
+                    if hasEditableBoundary {
+                        globalIdx += boundary.vertices.count
+                        continue
+                    }
+                    let worldVertices = boundary.vertices.map {
+                        entity.transform.transformPoint($0.position)
+                    }
+                    for (index, point) in worldVertices.enumerated() {
+                        let screen = EngineCameraManager.worldToScreen(
+                            worldX: point.x, worldY: point.y, cam: cam)
+                        results.append(CADSelectionManager.CadGripInfo(
+                            handle: handle,
+                            grip: .vertex(entity: handle, index: globalIdx + index),
+                            screenPos: screen,
+                            worldPos: point))
+                    }
+                    for segment in 0..<boundary.segmentCount {
+                        let midpoint = entity.transform.transformPoint(
+                            boundary.segmentMidpoint(segment))
+                        let screen = EngineCameraManager.worldToScreen(
+                            worldX: midpoint.x, worldY: midpoint.y, cam: cam)
+                        results.append(CADSelectionManager.CadGripInfo(
+                            handle: handle,
+                            grip: .midpoint(
+                                entity: handle,
+                                betweenA: globalIdx + segment,
+                                andB: globalIdx + boundary.endVertexIndex(forSegment: segment)),
+                            screenPos: screen,
+                            worldPos: midpoint))
+                    }
+                    globalIdx += boundary.vertices.count
+                    continue
+                }
+
                 let pts = CADGeometryMath.worldPointsForPrimitive(prim, transform: entity.transform)
                 defer { globalIdx += pts.count }
                 if hasEditableBoundary && !isInvisibleEditBoundary(prim) { continue }
@@ -334,7 +369,7 @@ public enum CADGripSystem {
         switch prim {
         case .table: return false
         case .line, .rect, .polygon, .polyline, .fillRect, .fillPolygon,
-             .fillComplexPolygon, .gradient, .hatch, .ray:
+             .fillComplexPolygon, .gradient, .hatch, .hatchPath, .ray:
             return true
         case .point, .circle, .arc, .spline, .text, .ellipse, .image:
             return false

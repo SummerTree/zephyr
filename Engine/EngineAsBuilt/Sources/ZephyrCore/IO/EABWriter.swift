@@ -826,6 +826,10 @@ public enum EABWriter {
             case .hatch(let boundary, _, _, _, let color, _):
                 let c = color ?? .white
                 for pt in boundary { verts.append(PVAVertex(position: pt, color: c)) }
+            case .hatchPath(let boundary, let holes, _, _, _, let color, _):
+                let c = color ?? .white
+                for pt in boundary.boundingPoints() { verts.append(PVAVertex(position: pt, color: c)) }
+                for hole in holes { for pt in hole.boundingPoints() { verts.append(PVAVertex(position: pt, color: c)) } }
             case .ray(let start, let direction, let color):
                 let c = color ?? .white
                 verts.append(PVAVertex(position: start, color: c))
@@ -1197,6 +1201,27 @@ public enum EABWriter {
                 w.writeFloat64(scale)
                 w.writeFloat64(angle)
                 writeColor(color)
+            case .hatchPath(let boundary, let holes, let pattern, let scale, let angle, let color, let backgroundColor):
+                func writePath(_ path: CADPolyline) {
+                    w.writeUInt32(UInt32(path.vertices.count))
+                    w.writeUInt8(path.isClosed ? 1 : 0)
+                    w.writeUInt8(path.lineTypeGenerationEnabled ? 1 : 0)
+                    for vertex in path.vertices {
+                        w.writeFloat64(vertex.position.x); w.writeFloat64(vertex.position.y); w.writeFloat64(vertex.position.z)
+                        w.writeFloat64(vertex.bulge)
+                        w.writeFloat64(vertex.startWidth)
+                        w.writeFloat64(vertex.endWidth)
+                    }
+                }
+                w.writeUInt8(19)
+                writePath(boundary)
+                w.writeUInt32(UInt32(holes.count))
+                for hole in holes { writePath(hole) }
+                w.writeString(pattern)
+                w.writeFloat64(scale)
+                w.writeFloat64(angle)
+                writeColor(color)
+                writeColor(backgroundColor)
             case .ray(let start, let direction, let color):
                 w.writeUInt8(14)
                 w.writeFloat64(start.x); w.writeFloat64(start.y); w.writeFloat64(start.z)

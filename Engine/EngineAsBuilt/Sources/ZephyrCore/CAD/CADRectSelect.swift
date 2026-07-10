@@ -266,6 +266,17 @@ public enum CADRectSelect {
                                  y: (rectMin.y + rectMax.y) / 2, z: 0)
             return isPointInPolygon(center, polygon: wpts)
 
+        case .hatchPath(let boundary, _, _, _, _, _, _):
+            let wpts = boundary.tessellatedPoints().map { transform.transformPoint($0) }
+            guard wpts.count >= 3 else { return false }
+            for i in 0..<wpts.count {
+                if segmentIntersectsRect(p1: wpts[i], p2: wpts[(i + 1) % wpts.count],
+                                         rectMin: rectMin, rectMax: rectMax) { return true }
+            }
+            let center = Vector3(x: (rectMin.x + rectMax.x) / 2,
+                                 y: (rectMin.y + rectMax.y) / 2, z: 0)
+            return isPointInPolygon(center, polygon: wpts)
+
         case .ray(let start, let direction, _):
             let ws = transform.transformPoint(start)
             let dirNorm = direction.magnitude

@@ -218,6 +218,13 @@ public final class HatchCommand: FeatureCommand {
             return classified.outer.count >= 3 ? classified : nil
         }
 
+        if let hatchPath = geometry.compactMap({ prim -> (outer: [Vector3], holes: [[Vector3]])? in
+            guard case .hatchPath(let boundary, let holes, _, _, _, _, _) = prim else { return nil }
+            return (normalizedLoop(boundary.tessellatedPoints()), holes.map { normalizedLoop($0.tessellatedPoints()) }.filter { $0.count >= 3 })
+        }).first {
+            return hatchPath.outer.count >= 3 ? hatchPath : nil
+        }
+
         if let hatchBoundary = geometry.compactMap({ prim -> [Vector3]? in
             guard case .hatch(let boundary, _, _, _, _, _) = prim else { return nil }
             return boundary
@@ -421,4 +428,3 @@ public final class HatchCommand: FeatureCommand {
         }
     }
 }
-

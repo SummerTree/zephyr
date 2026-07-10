@@ -242,6 +242,7 @@ public enum CADPrimitive: Hashable, Sendable {
     )
     case ellipse(center: Vector3, majorAxis: Vector3, minorRatio: Double, color: ColorRGBA? = nil)
     case hatch(boundary: [Vector3], pattern: String, scale: Double, angle: Double, color: ColorRGBA? = nil, backgroundColor: ColorRGBA? = nil)
+    case hatchPath(boundary: CADPolyline, holes: [CADPolyline], pattern: String, scale: Double, angle: Double, color: ColorRGBA? = nil, backgroundColor: ColorRGBA? = nil)
     case ray(start: Vector3, direction: Vector3, color: ColorRGBA? = nil)
     case image(
         insertion: Vector3,
@@ -421,6 +422,9 @@ public struct CADBlock: Hashable, Sendable {
                 points.append(Vector3(x: center.x + extentX, y: center.y + extentY, z: center.z))
             case .hatch(let boundary, _, _, _, _, _):
                 points.append(contentsOf: boundary)
+            case .hatchPath(let boundary, let holes, _, _, _, _, _):
+                points.append(contentsOf: boundary.boundingPoints())
+                for hole in holes { points.append(contentsOf: hole.boundingPoints()) }
             case .ray(let start, _, _):
                 points.append(start)
             case .image(let insertion, let uAxis, let vAxis, _, _, _):
@@ -815,6 +819,10 @@ public struct CADEntity: Entity, Snappable, AttributeAttachable, Hashable, Senda
 
             case .hatch(let boundary, _, _, _, _, _):
                 addChain(boundary, closed: true)
+
+            case .hatchPath(let boundary, let holes, _, _, _, _, _):
+                addChain(boundary.points, closed: boundary.isClosed)
+                for hole in holes { addChain(hole.points, closed: hole.isClosed) }
 
             case .ray(let start, _, _):
                 addVertex(start)

@@ -499,6 +499,10 @@ public final class SnapEngine {
                     localNearest = CADGeometryMath.nearestPointOnPolyline(
                         to: localCursor, points: boundary, closed: true)
 
+                case .hatchPath(let boundary, _, _, _, _, _, _):
+                    localNearest = CADGeometryMath.nearestPointOnPolyline(
+                        to: localCursor, points: boundary.tessellatedPoints(), closed: true)
+
                 case .ray(let start, let direction, _):
                     let dirNorm = direction.normalized
                     let v = localCursor - start

@@ -82,6 +82,15 @@ public enum DXFWriterBridge {
             let loop = DXFHatchLoop(type: 0); let pl = DXFLWPolylineEntity()
             for pt in boundary { let v = DXFVertex2D(); v.x = pt.x; v.y = pt.y; pl.vertices.append(v) }
             loop.entities.append(pl); h.loops.append(loop); return h
+        case .hatchPath(let boundary, _, let pattern, let scale, let angle, _, _):
+            let h = DXFHatchEntity(); h.name = pattern; h.scale = scale; h.angle_p = angle
+            h.solid = pattern.uppercased() == "SOLID" ? 1 : 0
+            let loop = DXFHatchLoop(type: 0); let pl = DXFLWPolylineEntity()
+            for vertex in boundary.vertices {
+                let v = DXFVertex2D(); v.x = vertex.position.x; v.y = vertex.position.y; v.bulge = vertex.bulge; pl.vertices.append(v)
+            }
+            pl.flags = boundary.isClosed ? 1 : 0
+            loop.entities.append(pl); h.loops.append(loop); return h
         case .fillPolygon(let pts, _):
             let s = DXFSolidEntity()
             if pts.count >= 1 { s.basePoint = toDXF(pts[0]) }

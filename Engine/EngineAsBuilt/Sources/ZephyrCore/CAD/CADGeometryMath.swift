@@ -563,6 +563,8 @@ public enum CADGeometryMath {
             ]
         case .hatch(let boundary, _, _, _, _, _):
             return boundary.map { transform.transformPoint($0) }
+        case .hatchPath(let boundary, _, _, _, _, _, _):
+            return boundary.tessellatedPoints().map { transform.transformPoint($0) }
         case .ray(let start, let direction, _):
             let ws = transform.transformPoint(start)
             let wd = transform.transformPoint(Vector3(x: start.x + direction.x, y: start.y + direction.y, z: start.z))
@@ -666,6 +668,8 @@ public enum CADGeometryMath {
                 out.append(.ellipse(center: tp(center), majorAxis: tp(majorAxis), minorRatio: minorRatio, color: color))
             case let .hatch(boundary, pattern, scale, angle, color, backgroundColor):
                 out.append(.hatch(boundary: boundary.map(tp), pattern: pattern, scale: scale, angle: angle + rot, color: color, backgroundColor: backgroundColor))
+            case let .hatchPath(boundary, holes, pattern, scale, angle, color, backgroundColor):
+                out.append(.hatchPath(boundary: boundary.transformed(by: t), holes: holes.map { $0.transformed(by: t) }, pattern: pattern, scale: scale, angle: angle + rot, color: color, backgroundColor: backgroundColor))
             case let .ray(start, direction, color):
                 out.append(.ray(start: tp(start), direction: tp(direction), color: color))
             case let .image(insertion, uAxis, vAxis, imageName, clipBoundary, tint):

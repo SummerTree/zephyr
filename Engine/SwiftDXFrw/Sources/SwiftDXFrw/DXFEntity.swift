@@ -610,7 +610,8 @@ public class DXFMTextEntity: DXFTextEntity {
     public override init(eType: DXFEType = .mTEXT) {
         self.interlin = 1
         super.init(eType: eType)
-        self.alignV = 1  // TopLeft default for MText
+        self.alignH = 0
+        self.alignV = 3
         self.textGen = 1
     }
 }

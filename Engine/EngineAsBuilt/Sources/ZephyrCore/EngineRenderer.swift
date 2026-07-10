@@ -1676,6 +1676,8 @@ public final class EngineRenderer {
 
         case .hatch(let boundary, _, _, _, _, _):
             drawPath(boundary, closed: true)
+        case .hatchPath(let boundary, _, _, _, _, _, _):
+            drawPath(boundary.tessellatedPoints(), closed: true)
 
         case .ray(let start, let direction, _):
             let end = Vector3(x: start.x + direction.x * 1000.0, y: start.y + direction.y * 1000.0, z: start.z + direction.z * 1000.0)

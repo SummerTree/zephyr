@@ -637,10 +637,25 @@ extension DXFReader {
             case 44:  e.interlin = d(v)    // line spacing
             case 50:  e.angle_p = d(v)     // rotation in degrees
             case 71:  e.textGen = i(v)     // attachment point
-            case 72:  e.alignH = i(v)      // drawing direction
+            case 72:  break                 // drawing direction, not alignment
             default: break
             }
         }
+
+        switch e.textGen {
+        case 1, 4, 7: e.alignH = 0
+        case 2, 5, 8: e.alignH = 1
+        case 3, 6, 9: e.alignH = 2
+        default: e.alignH = 0
+        }
+
+        switch e.textGen {
+        case 1...3: e.alignV = 3
+        case 4...6: e.alignV = 2
+        case 7...9: e.alignV = 1
+        default: e.alignV = 3
+        }
+
         return e
     }
 

@@ -47,7 +47,7 @@ private func isHatchEntity(_ entity: CADEntity, document: CADDocument) -> Bool {
     guard let geometry = document.resolvedGeometry(for: entity) else { return false }
     for prim in geometry {
         switch prim {
-        case .hatch, .fillPolygon, .fillComplexPolygon, .gradient:
+        case .hatch, .hatchPath, .fillPolygon, .fillComplexPolygon, .gradient:
             return true
         default:
             break

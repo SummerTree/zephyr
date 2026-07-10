@@ -160,17 +160,47 @@ public enum DXFEntityConverter {
         let cleaned = cleanMTextFormatting(tx.text)
         let height = tx.height > 0 ? tx.height : 2.5
         let isText = e.eType == .tEXT
-        let useSec = isText && (tx.alignH == 1 || tx.alignH == 2 || tx.alignH == 4 || tx.alignV != 0)
+        let isMText = e.eType == .mTEXT
+        let useSec = isText && (tx.alignH != 0 || tx.alignV != 0)
         let ref = useSec ? tx.secPoint : tx.basePoint
         var pos = yflip(ref)
         var angle = -tx.angle_p * .pi / 180.0
+
+        if isText && (tx.alignH == 3 || tx.alignH == 5) {
+            let start = yflip(tx.basePoint)
+            let end = yflip(tx.secPoint)
+            let dx = end.x - start.x
+            let dy = end.y - start.y
+            if abs(dx) > 1e-12 || abs(dy) > 1e-12 {
+                angle = atan2(dy, dx)
+            }
+        }
+
         if isText, abs(tx.extrusion.x) < 0.015625, abs(tx.extrusion.y) < 0.015625, tx.extrusion.z < 0 {
             pos = Vector3(x: -pos.x, y: pos.y, z: pos.z)
             angle = tx.angle_p * .pi / 180.0 - .pi
         }
-        let isMText = e.eType == .mTEXT
+
+        var alignH = tx.alignH
+        var alignV = tx.alignV
+        if isMText {
+            switch tx.textGen {
+            case 1, 4, 7: alignH = 0
+            case 2, 5, 8: alignH = 1
+            case 3, 6, 9: alignH = 2
+            default: alignH = 0
+            }
+
+            switch tx.textGen {
+            case 1...3: alignV = 3
+            case 4...6: alignV = 2
+            case 7...9: alignV = 1
+            default: alignV = 3
+            }
+        }
+
         return [.text(position: pos, text: cleaned, height: height, rotation: angle,
-                      style: tx.style, alignH: tx.alignH, alignV: tx.alignV,
+                      style: tx.style, alignH: alignH, alignV: alignV,
                       mtextWidth: isMText && tx.widthScale > 0 ? tx.widthScale : nil, color: color)]
     }
 
@@ -208,6 +238,15 @@ public enum DXFEntityConverter {
         }
 
         let background = h.bgColor >= 0 ? DXFColorTable.aciToRGBA(h.bgColor, color24: -1) : nil
+        let pathRegions = extractHatchPathRegions(from: h)
+        if !pathRegions.isEmpty {
+            return pathRegions.map { region in
+                .hatchPath(boundary: region.outer, holes: region.holes, pattern: pattern,
+                           scale: scale, angle: angle,
+                           color: color, backgroundColor: background)
+            }
+        }
+
         return regions.map { region in
             let boundary = region.holes.isEmpty
                 ? region.outer
@@ -252,6 +291,248 @@ public enum DXFEntityConverter {
         }
 
         return DXFHatchGenerator.registerImportedPatternDefinition(name: fallback, lines: lines)
+    }
+
+    private struct HatchPathRegion {
+        var outer: CADPolyline
+        var holes: [CADPolyline]
+    }
+
+    private static func extractHatchPathRegions(from h: DXFHatchEntity) -> [HatchPathRegion] {
+        guard !h.loops.isEmpty else { return [] }
+
+        let candidates: [(loop: DXFHatchLoop, path: CADPolyline, points: [Vector3])] = h.loops.compactMap { loop in
+            guard let path = buildHatchLoopPath(loop) else { return nil }
+            let points = cleanAdjacentPoints(path.tessellatedPoints())
+            return points.count >= 3 ? (loop: loop, path: path, points: points) : nil
+        }
+        guard !candidates.isEmpty else { return [] }
+
+        let explicitOuterIndices = candidates.indices.filter { hatchLoopLooksOuter(candidates[$0].loop) }
+        let outerIndices = explicitOuterIndices.isEmpty ? Array(candidates.indices) : explicitOuterIndices
+        var consumed = Set<Int>()
+        var regions: [HatchPathRegion] = []
+
+        for outerIndex in outerIndices.sorted(by: { abs(signedArea(candidates[$0].points)) > abs(signedArea(candidates[$1].points)) }) {
+            guard !consumed.contains(outerIndex) else { continue }
+            let outerPoints = candidates[outerIndex].points
+            var holes: [CADPolyline] = []
+
+            for index in candidates.indices where index != outerIndex && !consumed.contains(index) {
+                let points = candidates[index].points
+                guard points.count >= 3 else { continue }
+                guard pointInPolygon(centroid(points), outerPoints) || pointInPolygon(points[0], outerPoints) else { continue }
+                holes.append(candidates[index].path)
+                consumed.insert(index)
+            }
+
+            consumed.insert(outerIndex)
+            regions.append(HatchPathRegion(outer: candidates[outerIndex].path, holes: holes))
+        }
+
+        for index in candidates.indices where !consumed.contains(index) {
+            regions.append(HatchPathRegion(outer: candidates[index].path, holes: []))
+        }
+
+        return regions
+    }
+
+    private static func buildHatchLoopPath(_ loop: DXFHatchLoop) -> CADPolyline? {
+        var edges: [CADPolyline] = []
+        edges.reserveCapacity(loop.entities.count)
+
+        for ent in loop.entities {
+            if let path = hatchEdgePath(ent), path.vertices.count >= 2 {
+                edges.append(path)
+            }
+        }
+
+        return stitchHatchPaths(edges)
+    }
+
+    private static func hatchEdgePath(_ ent: DXFEntity) -> CADPolyline? {
+        if let lw = ent as? DXFLWPolylineEntity {
+            return hatchLWPolylinePath(lw)
+        }
+        if let pl = ent as? DXFPolylineEntity {
+            return hatchPolylinePath(pl)
+        }
+        if let line = ent as? DXFLineEntity {
+            return CADPolyline(points: [yflip(line.basePoint), yflip(line.secPoint)], isClosed: false)
+        }
+        if let arc = ent as? DXFArcEntity {
+            return hatchArcPath(arc)
+        }
+        if let ellipse = ent as? DXFEllipseEntity {
+            let pts = ellipseToPolyline(ellipse)
+            return pts.count >= 2 ? CADPolyline(points: pts, isClosed: false) : nil
+        }
+        if let spline = ent as? DXFSplineEntity {
+            let pts = splineToPolyline(spline)
+            return pts.count >= 2 ? CADPolyline(points: pts, isClosed: false) : nil
+        }
+        return nil
+    }
+
+    private static func hatchLWPolylinePath(_ polyline: DXFLWPolylineEntity) -> CADPolyline? {
+        guard !polyline.vertices.isEmpty else { return nil }
+        let vertices = polyline.vertices.map {
+            var bulge = -$0.bulge
+            if !isDefaultExtrusion(polyline.extPoint) && polyline.extPoint.z < 0 { bulge = -bulge }
+            return CADPolylineVertex(position: cadLWPoint($0, in: polyline),
+                                     bulge: bulge,
+                                     startWidth: $0.startWidth,
+                                     endWidth: $0.endWidth)
+        }
+        return CADPolyline(vertices: vertices, isClosed: (polyline.flags & 1) != 0)
+    }
+
+    private static func hatchPolylinePath(_ polyline: DXFPolylineEntity) -> CADPolyline? {
+        guard !polyline.vertices.isEmpty else { return nil }
+        let vertices = polyline.vertices.map {
+            var bulge = -$0.bulge
+            if polyline.haveExtrusion && polyline.extrusion.z < 0 { bulge = -bulge }
+            return CADPolylineVertex(position: cadPolylinePoint($0, in: polyline),
+                                     bulge: bulge,
+                                     startWidth: $0.startWidth,
+                                     endWidth: $0.endWidth)
+        }
+        return CADPolyline(vertices: vertices, isClosed: (polyline.flags & 1) != 0)
+    }
+
+    private static func hatchArcPath(_ arc: DXFArcEntity) -> CADPolyline? {
+        guard arc.radius > 1e-12 else { return nil }
+        let center = yflip(arc.basePoint)
+        let startAngle = -arc.endAngle
+        let endAngle = -arc.startAngle
+        var sweep = endAngle - startAngle
+        if sweep < 0 { sweep += .pi * 2.0 }
+        guard abs(sweep) > 1e-12 else { return nil }
+        let start = Vector3(x: center.x + arc.radius * cos(startAngle),
+                            y: center.y + arc.radius * sin(startAngle), z: 0)
+        let end = Vector3(x: center.x + arc.radius * cos(startAngle + sweep),
+                          y: center.y + arc.radius * sin(startAngle + sweep), z: 0)
+        let bulge = tan(sweep * 0.25)
+        return CADPolyline(vertices: [
+            CADPolylineVertex(position: start, bulge: bulge),
+            CADPolylineVertex(position: end)
+        ], isClosed: false)
+    }
+
+    private static func stitchHatchPaths(_ paths: [CADPolyline]) -> CADPolyline? {
+        guard !paths.isEmpty else { return nil }
+        var used = Array(repeating: false, count: paths.count)
+        var out = paths[0]
+        used[0] = true
+        var usedCount = 1
+        let toleranceSquared = hatchPathStitchToleranceSquared(for: paths)
+
+        func distSq(_ a: Vector3, _ b: Vector3) -> Double {
+            let dx = a.x - b.x
+            let dy = a.y - b.y
+            let dz = a.z - b.z
+            return dx * dx + dy * dy + dz * dz
+        }
+
+        while usedCount < paths.count {
+            guard let tail = out.vertices.last?.position else { break }
+            var bestIndex: Int?
+            var reverse = false
+            var bestDistance = Double.infinity
+
+            for index in paths.indices where !used[index] && !paths[index].vertices.isEmpty {
+                let path = paths[index]
+                let startDistance = distSq(tail, path.vertices[0].position)
+                if startDistance < bestDistance {
+                    bestDistance = startDistance
+                    bestIndex = index
+                    reverse = false
+                }
+                if let end = path.vertices.last?.position {
+                    let endDistance = distSq(tail, end)
+                    if endDistance < bestDistance {
+                        bestDistance = endDistance
+                        bestIndex = index
+                        reverse = true
+                    }
+                }
+            }
+
+            guard let index = bestIndex, bestDistance <= toleranceSquared else { break }
+            used[index] = true
+            usedCount += 1
+            appendHatchPath(reverse ? reversedHatchPath(paths[index]) : paths[index], to: &out, toleranceSquared: toleranceSquared)
+        }
+
+        closeHatchPath(&out, toleranceSquared: toleranceSquared)
+        return out.vertices.count >= 3 ? out : nil
+    }
+
+    private static func appendHatchPath(_ path: CADPolyline, to out: inout CADPolyline, toleranceSquared: Double) {
+        guard !path.vertices.isEmpty else { return }
+        guard !out.vertices.isEmpty else {
+            out = path
+            return
+        }
+
+        if nearlySamePoint(out.vertices.last!.position, path.vertices[0].position, toleranceSquared: toleranceSquared) {
+            out.vertices[out.vertices.count - 1].bulge = path.vertices[0].bulge
+            out.vertices[out.vertices.count - 1].endWidth = path.vertices[0].endWidth
+            out.vertices.append(contentsOf: path.vertices.dropFirst())
+        } else {
+            out.vertices.append(contentsOf: path.vertices)
+        }
+    }
+
+    private static func reversedHatchPath(_ path: CADPolyline) -> CADPolyline {
+        guard !path.vertices.isEmpty else { return path }
+        let old = path.vertices
+        var reversed: [CADPolylineVertex] = []
+        reversed.reserveCapacity(old.count)
+        for newIndex in old.indices {
+            let oldIndex = old.count - 1 - newIndex
+            var vertex = old[oldIndex]
+            if oldIndex > 0 {
+                vertex.bulge = -old[oldIndex - 1].bulge
+                vertex.startWidth = old[oldIndex - 1].endWidth
+                vertex.endWidth = old[oldIndex - 1].startWidth
+            } else {
+                vertex.bulge = path.isClosed ? -old.last!.bulge : 0.0
+            }
+            reversed.append(vertex)
+        }
+        return CADPolyline(vertices: reversed, isClosed: path.isClosed,
+                           lineTypeGenerationEnabled: path.lineTypeGenerationEnabled)
+    }
+
+    private static func closeHatchPath(_ path: inout CADPolyline, toleranceSquared: Double) {
+        guard path.vertices.count >= 3,
+              let first = path.vertices.first?.position,
+              let last = path.vertices.last?.position else { return }
+        if nearlySamePoint(first, last, toleranceSquared: toleranceSquared) {
+            path.vertices.removeLast()
+            path.isClosed = true
+        } else {
+            path.isClosed = true
+        }
+    }
+
+    private static func hatchPathStitchToleranceSquared(for paths: [CADPolyline]) -> Double {
+        let points = paths.flatMap { $0.points }
+        guard let first = points.first else { return 1e-4 }
+        var minX = first.x, maxX = first.x
+        var minY = first.y, maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        let dx = maxX - minX
+        let dy = maxY - minY
+        let diagonal = sqrt(dx * dx + dy * dy)
+        let tolerance = min(max(diagonal * 1e-3, 1e-2), 10.0)
+        return tolerance * tolerance
     }
 
     /// Extract hatch regions. A single DXF HATCH can contain several disconnected

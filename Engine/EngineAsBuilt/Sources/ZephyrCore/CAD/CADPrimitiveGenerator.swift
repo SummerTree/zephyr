@@ -245,6 +245,7 @@ public enum CADPrimitiveGenerator {
         case .text(_, _, _, _, _, _, _, _, let c): primColor = c
         case .ellipse(_, _, _, let c): primColor = c
         case .hatch(_, _, _, _, let c, _): primColor = c
+        case .hatchPath(_, _, _, _, _, let c, _): primColor = c
         case .ray(_, _, let c): primColor = c
         case .image(_, _, _, _, _, let c): primColor = c
         case .table(_, _, let c): primColor = c
@@ -772,6 +773,74 @@ public enum CADPrimitiveGenerator {
                 }
             }
 
+        case .hatchPath(let boundaryPath, let holePaths, let pattern, let hatchScale, let hatchAngle, _, let backgroundColor):
+            let outer = cleanLoop(boundaryPath.tessellatedPoints())
+            let holes = holePaths.map { cleanLoop($0.tessellatedPoints()) }.filter { $0.count >= 3 }
+            guard outer.count >= 3 else { break }
+            let backgroundZ = z - 0.001
+            let foregroundZ = z
+
+            if let bg = backgroundColor {
+                let bgColor = applyingOpacity(bg)
+                specs.append(CADTessellator.computeMultiLoopFillSpecs(
+                    outer: outer,
+                    holes: holes,
+                    transform: transform,
+                    color: bgColor,
+                    z: backgroundZ))
+            }
+            if pattern.uppercased() == "SOLID" || pattern.isEmpty {
+                specs.append(CADTessellator.computeMultiLoopFillSpecs(
+                    outer: outer,
+                    holes: holes,
+                    transform: transform,
+                    color: finalColor,
+                    z: foregroundZ))
+            } else {
+                let transformedOuter = outer.map { transform.transformPoint($0) }
+                let transformedHoles = holes.map { $0.map { transform.transformPoint($0) } }
+                let patternPolygon = transformedHoles.isEmpty
+                    ? transformedOuter
+                    : DXFHatchGenerator.connectHoles(outer: transformedOuter, holes: transformedHoles)
+                let adaptiveMinimumSpacing = DXFHatchGenerator.adaptiveMinimumSpacing(for: patternPolygon)
+                let nominalSpacing = DXFHatchGenerator.effectiveSpacing(patternName: pattern, scale: hatchScale)
+                let spacing = max(nominalSpacing, adaptiveMinimumSpacing)
+
+                let hatchLines = DXFHatchGenerator.generatePatternHatch(
+                    polygon: patternPolygon,
+                    patternName: pattern,
+                    scale: hatchScale,
+                    angleDegrees: hatchAngle * 180.0 / .pi,
+                    minimumSpacing: adaptiveMinimumSpacing
+                )
+
+                for hline in hatchLines {
+                    switch hline {
+                    case .line(let s, let e, _):
+                        specs.append(PrimitiveSpec(
+                            type: .line,
+                            points: [SDL_FPoint(x: Float(s.x), y: Float(s.y)),
+                                     SDL_FPoint(x: Float(e.x), y: Float(e.y))],
+                            rects: [], corners: [],
+                            z: foregroundZ, color: finalColor,
+                            lineWeight: 0.0, geomWidth: 0.0,
+                            isHatchLine: true,
+                            hatchSpacing: spacing))
+                    case .point(let p, _):
+                        specs.append(PrimitiveSpec(
+                            type: .point,
+                            points: [SDL_FPoint(x: Float(p.x), y: Float(p.y))],
+                            rects: [], corners: [],
+                            z: foregroundZ, color: finalColor,
+                            lineWeight: 0.0, geomWidth: 0.0,
+                            isHatchLine: true,
+                            hatchSpacing: spacing))
+                    default:
+                        break
+                    }
+                }
+            }
+
         case .ray(let start, let direction, _):
             let ws = transform.transformPoint(start)
             _ = transform.transformPoint(Vector3(x: start.x + direction.x, y: start.y + direction.y, z: start.z))
@@ -808,6 +877,30 @@ public enum CADPrimitiveGenerator {
         return specs
     }
 
+
+    private static func cleanLoop(_ points: [Vector3]) -> [Vector3] {
+        guard !points.isEmpty else { return [] }
+        var out: [Vector3] = []
+        out.reserveCapacity(points.count)
+        for point in points {
+            if let last = out.last {
+                let dx = point.x - last.x
+                let dy = point.y - last.y
+                let dz = point.z - last.z
+                if dx * dx + dy * dy + dz * dz < 1.0e-12 { continue }
+            }
+            out.append(point)
+        }
+        if out.count > 1,
+           let first = out.first,
+           let last = out.last {
+            let dx = first.x - last.x
+            let dy = first.y - last.y
+            let dz = first.z - last.z
+            if dx * dx + dy * dy + dz * dz < 1.0e-12 { out.removeLast() }
+        }
+        return out
+    }
 
     private static func splitConnectedHatchBoundary(_ boundary: [Vector3]) -> (outer: [Vector3], holes: [[Vector3]]) {
         var points = normalizedLoop(boundary)

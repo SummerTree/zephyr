@@ -54,7 +54,7 @@ enum PDFPrimitives {
         var texts: [CADPrimitive] = []
         for prim in geometry {
             switch prim {
-            case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .fillRect, .image:
+            case .fillPolygon, .fillComplexPolygon, .gradient, .hatch, .hatchPath, .fillRect, .image:
                 fills.append(prim)
             case .text:
                 texts.append(prim)
@@ -280,6 +280,38 @@ enum PDFPrimitives {
                 cb.raw("S\n")
             }
 
+        case .hatchPath(let boundaryPath, let holePaths, let pat, let hatchScale, let hatchAngle, _, _):
+            let boundary = boundaryPath.tessellatedPoints()
+            let holes = holePaths.map { $0.tessellatedPoints() }.filter { $0.count >= 3 }
+            guard boundary.count >= 3 else { break }
+            if pat.uppercased() == "SOLID" || pat.isEmpty {
+                subpath(boundary, close: true, to: cb)
+                for hole in holes { subpath(hole, close: true, to: cb) }
+                cb.raw("f*\n")
+            } else {
+                let patternPolygon = holes.isEmpty ? boundary : DXFHatchGenerator.connectHoles(outer: boundary, holes: holes)
+                let adaptiveMinimumSpacing = DXFHatchGenerator.adaptiveMinimumSpacing(for: patternPolygon)
+                let hatchLines = DXFHatchGenerator.generatePatternHatch(
+                    polygon: patternPolygon,
+                    patternName: pat,
+                    scale: hatchScale,
+                    angleDegrees: hatchAngle * 180.0 / .pi,
+                    minimumSpacing: adaptiveMinimumSpacing
+                )
+                for hline in hatchLines {
+                    switch hline {
+                    case .line(let s, let e, _):
+                        cb.num(s.x); cb.num(s.y); cb.raw("m ")
+                        cb.num(e.x); cb.num(e.y); cb.raw("l S\n")
+                    case .point(let p, _):
+                        cb.num(p.x); cb.num(p.y); cb.raw("m ")
+                        cb.num(p.x + 0.01); cb.num(p.y); cb.raw("l S\n")
+                    default:
+                        break
+                    }
+                }
+            }
+
         case .ray(let start, let dir, _):
             let mag = dir.magnitude
             guard mag > 1e-12 else { break }
@@ -398,6 +430,8 @@ enum PDFPrimitives {
         case .text(_, _, _, _, _, _, _, _, let c):
             return c
         case .hatch(_, _, _, _, let c, _):
+            return c
+        case .hatchPath(_, _, _, _, _, let c, _):
             return c
         case .ray(_, _, let c):
             return c

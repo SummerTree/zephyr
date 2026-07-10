@@ -350,6 +350,11 @@ public enum CADHitTesting {
             if pointInConvexPolygon(point, corners) { return 0 }
             return minEdgeDistSq(point, corners)
 
+        case .hatchPath(let boundary, _, _, _, _, _, _):
+            let corners = boundary.tessellatedPoints().map { transform.transformPoint($0) }
+            if pointInConvexPolygon(point, corners) { return 0 }
+            return minEdgeDistSq(point, corners)
+
         case .ray(let start, let direction, _):
             let ws = transform.transformPoint(start)
             let dx = direction.x
