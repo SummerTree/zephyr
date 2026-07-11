@@ -40,6 +40,11 @@ struct AppUI {
         let bottomOffset = AppLayout.statusBarHeight
             + (showsDrawingViewTabs ? AppLayout.drawingViewTabBarHeight : 0)
         let workH = dh - topOffset - bottomOffset
+        engine.ui.beginDrawingViewportFrame(
+            x: 0,
+            y: topOffset,
+            width: dw,
+            height: workH)
 
         ImGuiSetNextWindowPos(ImVec2(x: 0, y: topOffset), Int32(ImGuiCond_Always.rawValue), ImVec2(x: 0, y: 0))
         ImGuiSetNextWindowSize(ImVec2(x: dw, y: workH), Int32(ImGuiCond_Always.rawValue))

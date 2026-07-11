@@ -45,15 +45,15 @@ struct DataTablePanelUI {
             ImGuiPushStyleVar(Int32(ImGuiStyleVar_WindowBorderSize.rawValue), 1.0)
             entered = igBegin("Data Tables##DataTablePanel", &opened, flags)
         }
+        _isDocked = ImGuiIsWindowDocked()
+        AppLayout.reportCurrentDockedPanel(engine: engine)
 
         guard entered else {
-            _isDocked = ImGuiIsWindowDocked()
             ImGuiEnd()
             ImGuiPopStyleVar(1)
             ImGuiPopStyleColor(1)
             return
         }
-        _isDocked = ImGuiIsWindowDocked()
         defer {
             ImGuiEnd()
             ImGuiPopStyleVar(1)

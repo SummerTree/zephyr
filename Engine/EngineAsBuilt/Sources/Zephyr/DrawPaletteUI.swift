@@ -70,9 +70,10 @@ struct DrawPaletteUI {
             ImGuiPushStyleVar(Int32(ImGuiStyleVar_WindowBorderSize.rawValue), 1.0)
             entered = igBegin("Draw Tools##DrawPalette", &opened, flags)
         }
+        _isDocked = ImGuiIsWindowDocked()
+        AppLayout.reportCurrentDockedPanel(engine: engine)
 
         if entered {
-            _isDocked = ImGuiIsWindowDocked()
             defer { 
                 ImGuiEnd() 
                 ImGuiPopStyleVar(1)

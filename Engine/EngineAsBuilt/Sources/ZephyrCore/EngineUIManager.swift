@@ -50,6 +50,9 @@ public final class EngineUIManager {
     public var layerMoveMatches: [Layer] = []
     
     public var topChromeExcludeRect: SDL_Rect? = nil
+    public private(set) var drawingViewportRect: SDL_FRect? = nil
+    private var drawingViewportBaseRect: SDL_FRect? = nil
+    private var dockedPanelRects: [SDL_FRect] = []
 
     
     public var boldFont: UnsafeMutablePointer<ImFont>? = nil
@@ -83,6 +86,122 @@ public final class EngineUIManager {
     public internal(set) var displayPaletteGeneration: Int = 0
     
     public init() {}
+
+    public func beginDrawingViewportFrame(
+        x: Float, y: Float, width: Float, height: Float
+    ) {
+        let rect = SDL_FRect(
+            x: x,
+            y: y,
+            w: max(width, 1.0),
+            h: max(height, 1.0))
+        drawingViewportBaseRect = rect
+        dockedPanelRects.removeAll(keepingCapacity: true)
+        drawingViewportRect = rect
+    }
+
+    public func excludeDockedPanelRect(
+        x: Float, y: Float, width: Float, height: Float
+    ) {
+        guard width > 1.0, height > 1.0 else { return }
+        dockedPanelRects.append(SDL_FRect(x: x, y: y, w: width, h: height))
+        recomputeDrawingViewport()
+    }
+
+    private func recomputeDrawingViewport() {
+        guard let base = drawingViewportBaseRect else { return }
+
+        let baseLeft = base.x
+        let baseTop = base.y
+        let baseRight = base.x + base.w
+        let baseBottom = base.y + base.h
+        var panels: [SDL_FRect] = []
+        var xEdges = [baseLeft, baseRight]
+        var yEdges = [baseTop, baseBottom]
+
+        for rect in dockedPanelRects {
+            let left = max(baseLeft, rect.x)
+            let top = max(baseTop, rect.y)
+            let right = min(baseRight, rect.x + rect.w)
+            let bottom = min(baseBottom, rect.y + rect.h)
+            guard right - left > 1.0, bottom - top > 1.0 else { continue }
+            panels.append(SDL_FRect(
+                x: left,
+                y: top,
+                w: right - left,
+                h: bottom - top))
+            xEdges.append(left)
+            xEdges.append(right)
+            yEdges.append(top)
+            yEdges.append(bottom)
+        }
+
+        func uniqueSorted(_ values: [Float]) -> [Float] {
+            let sorted = values.sorted()
+            var result: [Float] = []
+            for value in sorted {
+                if let last = result.last, abs(last - value) <= 0.5 { continue }
+                result.append(value)
+            }
+            return result
+        }
+
+        let xs = uniqueSorted(xEdges)
+        let ys = uniqueSorted(yEdges)
+        var best = base
+        var bestArea: Float = panels.isEmpty ? base.w * base.h : 0
+        let baseCenterX = base.x + base.w * 0.5
+        let baseCenterY = base.y + base.h * 0.5
+        var bestCenterDistance = Float.infinity
+
+        if xs.count >= 2, ys.count >= 2 {
+            for leftIndex in 0..<(xs.count - 1) {
+                for rightIndex in (leftIndex + 1)..<xs.count {
+                    let left = xs[leftIndex]
+                    let right = xs[rightIndex]
+                    let width = right - left
+                    guard width > 1.0 else { continue }
+
+                    for topIndex in 0..<(ys.count - 1) {
+                        for bottomIndex in (topIndex + 1)..<ys.count {
+                            let top = ys[topIndex]
+                            let bottom = ys[bottomIndex]
+                            let height = bottom - top
+                            guard height > 1.0 else { continue }
+
+                            let isBlocked = panels.contains { panel in
+                                let overlapWidth = min(right, panel.x + panel.w)
+                                    - max(left, panel.x)
+                                let overlapHeight = min(bottom, panel.y + panel.h)
+                                    - max(top, panel.y)
+                                return overlapWidth > 0.5 && overlapHeight > 0.5
+                            }
+                            if isBlocked { continue }
+
+                            let area = width * height
+                            let centerX = (left + right) * 0.5
+                            let centerY = (top + bottom) * 0.5
+                            let centerDistance = abs(centerX - baseCenterX)
+                                + abs(centerY - baseCenterY)
+                            if area > bestArea + 0.5
+                                || (abs(area - bestArea) <= 0.5
+                                    && centerDistance < bestCenterDistance) {
+                                bestArea = area
+                                bestCenterDistance = centerDistance
+                                best = SDL_FRect(
+                                    x: left,
+                                    y: top,
+                                    w: width,
+                                    h: height)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        drawingViewportRect = bestArea > 1.0 ? best : base
+    }
     
     // MARK: - Theme Management
     

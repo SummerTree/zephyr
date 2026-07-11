@@ -690,10 +690,39 @@ public struct CADBlock: Hashable, Sendable {
                 // AABB of a circle: center ± radius
                 points.append(Vector3(x: center.x - radius, y: center.y - radius, z: center.z))
                 points.append(Vector3(x: center.x + radius, y: center.y + radius, z: center.z))
-            case .arc(let center, let radius, _, _, _):
-                // Conservative: full circle AABB
-                points.append(Vector3(x: center.x - radius, y: center.y - radius, z: center.z))
-                points.append(Vector3(x: center.x + radius, y: center.y + radius, z: center.z))
+            case .arc(let center, let radius, let startAngle, let endAngle, _):
+                guard radius.isFinite, radius > 0,
+                      startAngle.isFinite, endAngle.isFinite else { continue }
+
+                let twoPi = 2.0 * Double.pi
+                let rawSpan = endAngle - startAngle
+                if abs(rawSpan) >= twoPi - 1e-12 {
+                    points.append(Vector3(x: center.x - radius, y: center.y - radius, z: center.z))
+                    points.append(Vector3(x: center.x + radius, y: center.y + radius, z: center.z))
+                } else {
+                    var span = rawSpan
+                    if span < 0 { span += twoPi }
+
+                    func point(at angle: Double) -> Vector3 {
+                        Vector3(
+                            x: center.x + cos(angle) * radius,
+                            y: center.y + sin(angle) * radius,
+                            z: center.z)
+                    }
+
+                    points.append(point(at: startAngle))
+                    points.append(point(at: startAngle + span))
+
+                    for quadrant in 0..<4 {
+                        let angle = Double(quadrant) * Double.pi / 2.0
+                        var distance = (angle - startAngle)
+                            .truncatingRemainder(dividingBy: twoPi)
+                        if distance < 0 { distance += twoPi }
+                        if distance <= span + 1e-12 {
+                            points.append(point(at: angle))
+                        }
+                    }
+                }
             case .spline(let controlPoints, _, _, _, _):
                 // Conservative AABB from control points convex hull
                 points.append(contentsOf: controlPoints)

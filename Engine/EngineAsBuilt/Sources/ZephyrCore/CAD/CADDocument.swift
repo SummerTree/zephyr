@@ -158,6 +158,38 @@ public final class UndoManager {
 // MARK: - CADDocument
 // =========================================================================
 
+private struct CADRenderBoundsAccumulator {
+    var minX = Double.infinity
+    var minY = Double.infinity
+    var minZ = Double.infinity
+    var maxX = -Double.infinity
+    var maxY = -Double.infinity
+    var maxZ = -Double.infinity
+    var hasPoints = false
+
+    mutating func include(_ point: Vector3) {
+        guard point.x.isFinite, point.y.isFinite, point.z.isFinite else { return }
+        hasPoints = true
+        minX = min(minX, point.x)
+        minY = min(minY, point.y)
+        minZ = min(minZ, point.z)
+        maxX = max(maxX, point.x)
+        maxY = max(maxY, point.y)
+        maxZ = max(maxZ, point.z)
+    }
+
+    mutating func include(contentsOf points: [Vector3]) {
+        for point in points { include(point) }
+    }
+
+    var boundingBox: BoundingBox3D? {
+        guard hasPoints else { return nil }
+        return BoundingBox3D(
+            min: Vector3(x: minX, y: minY, z: minZ),
+            max: Vector3(x: maxX, y: maxY, z: maxZ))
+    }
+}
+
 public final class CADDocument {
     // MARK: Tables
 
@@ -582,6 +614,481 @@ public final class CADDocument {
     // Fast O(1) properties for UI and Rendering
     public var entityCount: Int { entityRegistry.count }
     public var entitiesView: Dictionary<UUID, CADEntity>.Values { entityRegistry.values }
+
+    /// World-space bounds of geometry that can actually be drawn in the current document.
+    /// This walks the renderable primitives instead of trusting cached entity boxes so rotated
+    /// text, SHX glyphs, dimension blocks, arcs, ellipses, and splines match what is displayed.
+    public func renderableWorldBoundingBox(visibleLayersOnly: Bool = true) -> BoundingBox3D? {
+        var bounds = CADRenderBoundsAccumulator()
+
+        for entity in entityRegistry.values {
+            guard let layer = layerTable[entity.layerID] else { continue }
+            if visibleLayersOnly && !layer.isVisible { continue }
+
+            let entityBackgroundScale: Double?
+            if let value = entity.xdata["dxf.mtextBackgroundScale"],
+               case .double(let scale) = value {
+                entityBackgroundScale = scale
+            } else {
+                entityBackgroundScale = nil
+            }
+            let entityBackgroundUsesViewportColor: Bool
+            if let value = entity.xdata["dxf.mtextBackgroundUsesViewportColor"],
+               case .int(let flag) = value {
+                entityBackgroundUsesViewportColor = flag != 0
+            } else {
+                entityBackgroundUsesViewportColor = false
+            }
+            let entityHasBackgroundColor: Bool
+            if let value = entity.xdata["dxf.mtextBackgroundColor"],
+               case .string(let hex) = value {
+                entityHasBackgroundColor = ColorRGBA(hex: hex) != nil
+            } else {
+                entityHasBackgroundColor = false
+            }
+
+            if let value = entity.xdata["dxf.text"],
+               case .string(let rawText) = value,
+               !rawText.isEmpty {
+                let displayText: String
+                if let formattedValue = entity.xdata["dxf.formattedText"],
+                   case .string(let json) = formattedValue,
+                   let data = json.data(using: .utf8),
+                   let formatted = try? JSONDecoder().decode(FormattedText.self, from: data) {
+                    displayText = formatted.toPlainText()
+                } else {
+                    displayText = rawText
+                }
+
+                let height: Double
+                if let heightValue = entity.xdata["dxf.textHeight"],
+                   case .double(let value) = heightValue {
+                    height = value
+                } else {
+                    height = 2.5
+                }
+                let style: String?
+                if let styleValue = entity.xdata["dxf.textStyle"],
+                   case .string(let value) = styleValue {
+                    style = value
+                } else {
+                    style = nil
+                }
+                let alignH: Int
+                if let alignValue = entity.xdata["dxf.alignH"],
+                   case .int(let value) = alignValue {
+                    alignH = value
+                } else {
+                    alignH = 0
+                }
+                let alignV: Int
+                if let alignValue = entity.xdata["dxf.alignV"],
+                   case .int(let value) = alignValue {
+                    alignV = value
+                } else {
+                    alignV = 0
+                }
+                let width: Double?
+                if let widthValue = entity.xdata["dxf.mtextWidth"],
+                   case .double(let value) = widthValue {
+                    width = value
+                } else {
+                    width = nil
+                }
+
+                includeRenderedTextBounds(
+                    text: displayText,
+                    position: .zero,
+                    height: height,
+                    rotation: 0,
+                    style: style,
+                    alignH: alignH,
+                    alignV: alignV,
+                    mtextWidth: width,
+                    transform: entity.transform,
+                    backgroundScale: entityBackgroundScale,
+                    hasVisibleBackground: entityBackgroundUsesViewportColor || entityHasBackgroundColor,
+                    into: &bounds)
+                continue
+            }
+
+            let geometry: [CADPrimitive]
+            let primitiveStyles: [Int: CADPrimitiveStyle]
+            if let blockID = entity.blockID {
+                guard let block = blockTable[blockID],
+                      !block.isInternalTableDisplayBlock,
+                      !block.geometry.isEmpty else { continue }
+                geometry = block.geometry
+                primitiveStyles = block.primitiveStyles
+            } else {
+                guard let localGeometry = entity.localGeometry,
+                      !localGeometry.isEmpty else { continue }
+                geometry = localGeometry
+                primitiveStyles = [:]
+            }
+
+            for (index, primitive) in geometry.enumerated() {
+                let primitiveStyle = primitiveStyles[index]
+                let backgroundScale = primitiveStyle?.textBackgroundScale
+                    ?? entityBackgroundScale
+                let hasVisibleBackground =
+                    primitiveStyle?.textBackgroundUsesViewportColor == true
+                    || primitiveStyle?.textBackgroundColor != nil
+                    || entityBackgroundUsesViewportColor
+                    || entityHasBackgroundColor
+                includePrimitiveRenderBounds(
+                    primitive,
+                    transform: entity.transform,
+                    backgroundScale: backgroundScale,
+                    hasVisibleBackground: hasVisibleBackground,
+                    into: &bounds)
+            }
+        }
+
+        return bounds.boundingBox
+    }
+
+    private func includePrimitiveRenderBounds(
+        _ primitive: CADPrimitive,
+        transform: Transform3D,
+        backgroundScale: Double?,
+        hasVisibleBackground: Bool,
+        into bounds: inout CADRenderBoundsAccumulator
+    ) {
+        func includeTransformed(_ points: [Vector3]) {
+            for point in points {
+                bounds.include(transform.transformPoint(point))
+            }
+        }
+
+        switch primitive {
+        case .point(let position, _):
+            bounds.include(transform.transformPoint(position))
+
+        case .line(let start, let end, _):
+            bounds.include(transform.transformPoint(start))
+            bounds.include(transform.transformPoint(end))
+
+        case .rect(let origin, let size, _),
+             .fillRect(let origin, let size, _):
+            includeTransformed([
+                origin,
+                Vector3(x: origin.x + size.x, y: origin.y, z: origin.z),
+                Vector3(x: origin.x + size.x, y: origin.y + size.y, z: origin.z),
+                Vector3(x: origin.x, y: origin.y + size.y, z: origin.z),
+            ])
+
+        case .polygon(let points, _),
+             .fillPolygon(let points, _):
+            includeTransformed(points)
+
+        case .polyline(let path, _):
+            guard !path.isHatchBoundaryCarrier else { return }
+            let hasCurves = !path.hatchEdges.isEmpty
+                || path.vertices.contains { abs($0.bulge) > 1e-12 }
+            let points = hasCurves
+                ? path.tessellatedPoints(segmentsPerRadian: 16.0)
+                : path.vertices.map { $0.position }
+            includeTransformed(points)
+
+        case .fillComplexPolygon(let outer, let holes, _),
+             .gradient(let outer, let holes, _, _, _, _):
+            includeTransformed(outer)
+            for hole in holes { includeTransformed(hole) }
+
+        case .circle(let center, let radius, _):
+            includeConicBounds(
+                center: center,
+                axisX: Vector3(x: radius, y: 0, z: 0),
+                axisY: Vector3(x: 0, y: radius, z: 0),
+                transform: transform,
+                into: &bounds)
+
+        case .arc(let center, let radius, let startAngle, let endAngle, _):
+            includeArcBounds(
+                center: center,
+                radius: radius,
+                startAngle: startAngle,
+                endAngle: endAngle,
+                transform: transform,
+                into: &bounds)
+
+        case .spline(let controlPoints, let knots, let degree, let weights, _):
+            guard !controlPoints.isEmpty else { return }
+            let worldControlPoints = controlPoints.map { transform.transformPoint($0) }
+            guard worldControlPoints.count >= 2 else {
+                bounds.include(contentsOf: worldControlPoints)
+                return
+            }
+            var minPoint = worldControlPoints[0]
+            var maxPoint = worldControlPoints[0]
+            for point in worldControlPoints.dropFirst() {
+                minPoint.x = min(minPoint.x, point.x)
+                minPoint.y = min(minPoint.y, point.y)
+                minPoint.z = min(minPoint.z, point.z)
+                maxPoint.x = max(maxPoint.x, point.x)
+                maxPoint.y = max(maxPoint.y, point.y)
+                maxPoint.z = max(maxPoint.z, point.z)
+            }
+            let diagonal = max((maxPoint - minPoint).magnitude, 1.0)
+            let evaluated = NURBSEvaluator.evaluateAdaptiveByKnotSpans(
+                degree: degree,
+                knots: knots,
+                controlPoints: worldControlPoints,
+                weights: weights ?? Array(repeating: 1.0, count: worldControlPoints.count),
+                chordTolerance: max(0.001, diagonal / 5000.0),
+                maxDepth: 10,
+                maxSegments: 4096)
+            bounds.include(contentsOf: evaluated.isEmpty ? worldControlPoints : evaluated)
+
+        case .text(
+            let position, let text, let height, let rotation, let style,
+            let alignH, let alignV, let mtextWidth, _
+        ):
+            includeRenderedTextBounds(
+                text: text,
+                position: position,
+                height: height,
+                rotation: rotation,
+                style: style,
+                alignH: alignH,
+                alignV: alignV,
+                mtextWidth: mtextWidth,
+                transform: transform,
+                backgroundScale: backgroundScale,
+                hasVisibleBackground: hasVisibleBackground,
+                into: &bounds)
+
+        case .ellipse(let center, let majorAxis, let minorRatio, _):
+            let minorAxis = Vector3(
+                x: -majorAxis.y * minorRatio,
+                y: majorAxis.x * minorRatio,
+                z: 0)
+            includeConicBounds(
+                center: center,
+                axisX: majorAxis,
+                axisY: minorAxis,
+                transform: transform,
+                into: &bounds)
+
+        case .hatch(let boundary, _, _, _, _, _):
+            includeTransformed(boundary)
+
+        case .hatchPath(let boundary, let holes, _, _, _, _, _):
+            includeTransformed(boundary.tessellatedPoints(segmentsPerRadian: 16.0))
+            for hole in holes {
+                includeTransformed(hole.tessellatedPoints(segmentsPerRadian: 16.0))
+            }
+
+        case .ray(let start, _, _):
+            bounds.include(transform.transformPoint(start))
+
+        case .image(let insertion, let uAxis, let vAxis, _, let clipBoundary, _):
+            if let clipBoundary, clipBoundary.count >= 2 {
+                includeTransformed(clipBoundary)
+            } else {
+                includeTransformed([
+                    insertion,
+                    insertion + uAxis,
+                    insertion + uAxis + vAxis,
+                    insertion + vAxis,
+                ])
+            }
+
+        case .table(let data, let origin, _):
+            let size = DataTableTessellator.computeSize(data: data)
+            includeTransformed([
+                origin,
+                Vector3(x: origin.x + size.width, y: origin.y, z: origin.z),
+                Vector3(x: origin.x + size.width, y: origin.y + size.height, z: origin.z),
+                Vector3(x: origin.x, y: origin.y + size.height, z: origin.z),
+            ])
+        }
+    }
+
+    private func includeConicBounds(
+        center: Vector3,
+        axisX: Vector3,
+        axisY: Vector3,
+        transform: Transform3D,
+        into bounds: inout CADRenderBoundsAccumulator
+    ) {
+        let worldCenter = transform.transformPoint(center)
+        let worldAxisX = transform.transformPoint(center + axisX) - worldCenter
+        let worldAxisY = transform.transformPoint(center + axisY) - worldCenter
+        let extentX = hypot(worldAxisX.x, worldAxisY.x)
+        let extentY = hypot(worldAxisX.y, worldAxisY.y)
+        let extentZ = hypot(worldAxisX.z, worldAxisY.z)
+        bounds.include(Vector3(
+            x: worldCenter.x - extentX,
+            y: worldCenter.y - extentY,
+            z: worldCenter.z - extentZ))
+        bounds.include(Vector3(
+            x: worldCenter.x + extentX,
+            y: worldCenter.y + extentY,
+            z: worldCenter.z + extentZ))
+    }
+
+    private func includeArcBounds(
+        center: Vector3,
+        radius: Double,
+        startAngle: Double,
+        endAngle: Double,
+        transform: Transform3D,
+        into bounds: inout CADRenderBoundsAccumulator
+    ) {
+        guard center.x.isFinite, center.y.isFinite, radius.isFinite,
+              startAngle.isFinite, endAngle.isFinite, radius > 0 else { return }
+
+        let twoPi = 2.0 * Double.pi
+        let rawSweep = endAngle - startAngle
+        if abs(rawSweep) >= twoPi - 1e-12 {
+            includeConicBounds(
+                center: center,
+                axisX: Vector3(x: radius, y: 0, z: 0),
+                axisY: Vector3(x: 0, y: radius, z: 0),
+                transform: transform,
+                into: &bounds)
+            return
+        }
+
+        var sweep = rawSweep
+        if sweep < 0 { sweep += twoPi }
+        let worldCenter = transform.transformPoint(center)
+        let worldAxisX = transform.transformPoint(
+            Vector3(x: center.x + radius, y: center.y, z: center.z)) - worldCenter
+        let worldAxisY = transform.transformPoint(
+            Vector3(x: center.x, y: center.y + radius, z: center.z)) - worldCenter
+
+        func positiveRemainder(_ value: Double) -> Double {
+            let remainder = value.truncatingRemainder(dividingBy: twoPi)
+            return remainder < 0 ? remainder + twoPi : remainder
+        }
+        func isOnSweep(_ angle: Double) -> Bool {
+            positiveRemainder(angle - startAngle) <= sweep + 1e-12
+        }
+        func worldPoint(at angle: Double) -> Vector3 {
+            worldCenter
+                + worldAxisX * cos(angle)
+                + worldAxisY * sin(angle)
+        }
+
+        var candidates = [startAngle, startAngle + sweep]
+        let xExtremum = atan2(worldAxisY.x, worldAxisX.x)
+        let yExtremum = atan2(worldAxisY.y, worldAxisX.y)
+        let zExtremum = atan2(worldAxisY.z, worldAxisX.z)
+        candidates.append(contentsOf: [
+            xExtremum, xExtremum + Double.pi,
+            yExtremum, yExtremum + Double.pi,
+            zExtremum, zExtremum + Double.pi,
+        ])
+        for angle in candidates where isOnSweep(angle) {
+            bounds.include(worldPoint(at: angle))
+        }
+    }
+
+    private func includeRenderedTextBounds(
+        text: String,
+        position: Vector3,
+        height: Double,
+        rotation: Double,
+        style: String?,
+        alignH: Int,
+        alignV: Int,
+        mtextWidth: Double?,
+        transform: Transform3D,
+        backgroundScale: Double?,
+        hasVisibleBackground: Bool,
+        into bounds: inout CADRenderBoundsAccumulator
+    ) {
+        guard !text.isEmpty, height.isFinite, height > 0, rotation.isFinite else { return }
+
+        let origin = transform.transformPoint(position)
+        let localX = Vector3(x: cos(rotation), y: sin(rotation), z: 0)
+        let localY = Vector3(x: -sin(rotation), y: cos(rotation), z: 0)
+        let worldX = transform.transformPoint(position + localX) - origin
+        let worldY = transform.transformPoint(position + localY) - origin
+        let worldHeight = height * max(worldY.magnitude, 1e-12)
+        let worldWidth = mtextWidth.map { $0 * max(worldX.magnitude, 1e-12) }
+        let worldRotation = atan2(worldX.y, worldX.x)
+        let fontFile = style.flatMap { textStyleFonts[$0] } ?? "simplex.shx"
+
+        if let font = CADFontManager.getOrLoadSHXFont(filename: fontFile) {
+            let primitives = font.renderText(
+                text,
+                origin: origin,
+                height: worldHeight,
+                rotation: worldRotation,
+                alignH: alignH,
+                alignV: alignV,
+                maxWidth: worldWidth)
+            for primitive in primitives {
+                if case .line(let start, let end, _) = primitive {
+                    bounds.include(start)
+                    bounds.include(end)
+                }
+            }
+        } else {
+            includeEstimatedTextRectangle(
+                text: text,
+                origin: origin,
+                height: worldHeight,
+                rotation: worldRotation,
+                alignH: alignH,
+                alignV: alignV,
+                mtextWidth: worldWidth,
+                margin: 0,
+                into: &bounds)
+        }
+
+        if let scale = backgroundScale,
+           scale >= 1.0,
+           hasVisibleBackground {
+            includeEstimatedTextRectangle(
+                text: text,
+                origin: origin,
+                height: worldHeight,
+                rotation: worldRotation,
+                alignH: alignH,
+                alignV: alignV,
+                mtextWidth: worldWidth,
+                margin: max(0.0, (scale - 1.0) * worldHeight * 0.5),
+                into: &bounds)
+        }
+    }
+
+    private func includeEstimatedTextRectangle(
+        text: String,
+        origin: Vector3,
+        height: Double,
+        rotation: Double,
+        alignH: Int,
+        alignV: Int,
+        mtextWidth: Double?,
+        margin: Double,
+        into bounds: inout CADRenderBoundsAccumulator
+    ) {
+        let textBounds = CADEntity.estimateTextLocalBounds(
+            text: text,
+            height: height,
+            alignH: alignH,
+            alignV: alignV,
+            mtextWidth: mtextWidth)
+        let cosRotation = cos(rotation)
+        let sinRotation = sin(rotation)
+        let corners = [
+            (textBounds.minX - margin, textBounds.minY - margin),
+            (textBounds.maxX + margin, textBounds.minY - margin),
+            (textBounds.maxX + margin, textBounds.maxY + margin),
+            (textBounds.minX - margin, textBounds.maxY + margin),
+        ]
+        for corner in corners {
+            bounds.include(Vector3(
+                x: origin.x + corner.0 * cosRotation - corner.1 * sinRotation,
+                y: origin.y + corner.0 * sinRotation + corner.1 * cosRotation,
+                z: origin.z))
+        }
+    }
 
     public func updateTransform(for handle: UUID, to newTransform: Transform3D) {
         pushUndo()

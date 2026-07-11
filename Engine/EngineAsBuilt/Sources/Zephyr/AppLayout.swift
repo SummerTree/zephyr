@@ -43,4 +43,15 @@ struct AppLayout {
     static var belowChromeY: Float { topChromeHeight }
     /// Y-coordinate just below the tab bar — where the canvas area begins.
     static var belowTabBarY: Float { topChromeHeight + tabBarHeight }
+
+    static func reportCurrentDockedPanel(engine: PhrostEngine) {
+        guard ImGuiIsWindowDocked() else { return }
+        let position = igGetWindowPos()
+        let size = igGetWindowSize()
+        engine.ui.excludeDockedPanelRect(
+            x: position.x,
+            y: position.y,
+            width: size.x,
+            height: size.y)
+    }
 }

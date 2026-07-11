@@ -52,9 +52,10 @@ struct LayerPanelUI {
         let entered = wasDocked
             ? igBegin("Layers##LayersPanel", nil, flags)
             : igBegin("Layers##LayersPanel", &opened, flags)
+        _isDocked = ImGuiIsWindowDocked()
+        AppLayout.reportCurrentDockedPanel(engine: engine)
 
         if entered {
-            _isDocked = ImGuiIsWindowDocked()
 
             if !wasDocked && !opened {
                 engine.ui.layersPanelVisible = false

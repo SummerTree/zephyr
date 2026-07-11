@@ -502,41 +502,61 @@ public final class PhrostEngine {
         cadSelection.selectAll(in: tabManager.activeDocument)
     }
 
-    /// Zoom to fit all CAD entities in the scene.
+    /// Zoom to fit all visible, renderable CAD geometry in the unobscured viewport.
     public func zoomExtents() {
-        var minX = Double.infinity
-        var minY = Double.infinity
-        var maxX = -Double.infinity
-        var maxY = -Double.infinity
-        var hasObjects = false
-
-        // Use zero-allocation entitiesView
-        for entity in tabManager.activeDocument.entitiesView {
-            guard let bb = entity.worldBoundingBox else { continue }
-            hasObjects = true
-            minX = min(minX, bb.min.x)
-            minY = min(minY, bb.min.y)
-            maxX = max(maxX, bb.max.x)
-            maxY = max(maxY, bb.max.y)
+        guard let bounds = tabManager.activeDocument.renderableWorldBoundingBox() else {
+            return
         }
 
-        guard hasObjects else { return }
+        let rawWidth = max(0.0, bounds.max.x - bounds.min.x)
+        let rawHeight = max(0.0, bounds.max.y - bounds.min.y)
+        let dominantSpan = max(rawWidth, rawHeight)
+        let minimumSpan = max(dominantSpan * 0.01, 1e-6)
 
-        let pad = 40.0
-        minX -= pad
-        minY -= pad
-        maxX += pad
-        maxY += pad
+        let cosRotation = abs(cos(camera.rotation))
+        let sinRotation = abs(sin(camera.rotation))
+        let rotatedWidth = rawWidth * cosRotation + rawHeight * sinRotation
+        let rotatedHeight = rawWidth * sinRotation + rawHeight * cosRotation
+        let fittedWidth = max(rotatedWidth, minimumSpan)
+        let fittedHeight = max(rotatedHeight, minimumSpan)
 
-        let objW = maxX - minX
-        let objH = maxY - minY
-        let viewW = Double(windowWidth)
-        let viewH = Double(windowHeight)
+        let viewportX: Double
+        let viewportY: Double
+        let viewportWidth: Double
+        let viewportHeight: Double
+        if let viewport = ui.drawingViewportRect {
+            viewportX = Double(viewport.x)
+            viewportY = Double(viewport.y)
+            viewportWidth = max(Double(viewport.w), 1.0)
+            viewportHeight = max(Double(viewport.h), 1.0)
+        } else {
+            viewportX = 0
+            viewportY = 0
+            viewportWidth = max(Double(windowWidth), 1.0)
+            viewportHeight = max(Double(windowHeight), 1.0)
+        }
 
-        let zoomX = viewW / objW
-        let zoomY = viewH / objH
-        camera.zoom = min(zoomX, zoomY)
-        camera.offset = ((minX + maxX) / 2.0, (minY + maxY) / 2.0)
+        let fitZoom = min(
+            viewportWidth / fittedWidth,
+            viewportHeight / fittedHeight)
+        camera.zoom = max(0.000001, min(fitZoom * 0.92, 1e15))
+
+        let boundsCenterX = (bounds.min.x + bounds.max.x) * 0.5
+        let boundsCenterY = (bounds.min.y + bounds.max.y) * 0.5
+        let viewportCenterX = viewportX + viewportWidth * 0.5
+        let viewportCenterY = viewportY + viewportHeight * 0.5
+        let windowCenterX = Double(windowWidth) * 0.5
+        let windowCenterY = Double(windowHeight) * 0.5
+        let cameraSpaceX = (viewportCenterX - windowCenterX) / camera.zoom
+        let cameraSpaceY = (viewportCenterY - windowCenterY) / camera.zoom
+        let rotationCos = cos(camera.rotation)
+        let rotationSin = sin(camera.rotation)
+        let worldShiftX = cameraSpaceX * rotationCos - cameraSpaceY * rotationSin
+        let worldShiftY = cameraSpaceX * rotationSin + cameraSpaceY * rotationCos
+
+        camera.offset = (
+            boundsCenterX - worldShiftX,
+            boundsCenterY - worldShiftY)
     }
 
     // MARK: - ImGui Frame Callback

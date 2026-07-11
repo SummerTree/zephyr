@@ -87,17 +87,17 @@ struct PropertiesPanelUI {
             ImGuiPushStyleVar(Int32(ImGuiStyleVar_WindowBorderSize.rawValue), 1.0)
             entered = igBegin("Properties##PropsPanel", &opened, flags)
         }
+        _isDocked = ImGuiIsWindowDocked()
+        AppLayout.reportCurrentDockedPanel(engine: engine)
 
         guard entered else {
             print("[PropsPanel] igBegin returned false, isDocked=\(isDocked), ImGuiIsWindowDocked=\(ImGuiIsWindowDocked())")
-            _isDocked = ImGuiIsWindowDocked()
             ImGuiEnd()
             ImGuiPopStyleVar(1)
             ImGuiPopStyleColor(1)
             return
         }
         print("[PropsPanel] igBegin returned true, isDocked=\(ImGuiIsWindowDocked()), handle=\(entity.handle)")
-        _isDocked = ImGuiIsWindowDocked()
         defer {
             ImGuiEnd()
             ImGuiPopStyleVar(1)
