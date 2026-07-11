@@ -56,6 +56,8 @@ public final class EngineLoopController {
                 interaction.dragActive || interaction.panActive || interaction.touchPanActive
                 || engine.commandProcessor.activeCommand != nil || engine.commandProcessor.activeFeatureCommand != nil
                 || engine.commandProcessor.commandLineActive || engine.document.needsRegeneration
+                || engine._regenerationInFlight != nil
+                || engine.renderer._vbInFlightToken != nil
             
             if framesToRender <= 0 && !isActionActive {
                 SDL_WaitEventTimeout(nil, 16)

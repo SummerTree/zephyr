@@ -456,6 +456,7 @@ public final class PhrostEngine {
             // fresh regeneration for the newly active tab and applies ONLY its results.
             self._regenerationGeneration &+= 1
             self._appliedGeneration = -1
+            self.tabManager.activeDocument.needsRegeneration = true
             self.cadSelection.clearSelection()
             self.snap.snapTrackingEngine.clear()
         }
