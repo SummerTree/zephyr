@@ -34,21 +34,23 @@ public struct CADDimensionStyle: Sendable, Hashable, Codable {
     public var suppressFirstDimLine: Bool = false
     public var suppressSecondDimLine: Bool = false
 
+    public var firstArrowhead: CADDimensionArrowhead? = nil
+    public var secondArrowhead: CADDimensionArrowhead? = nil
+    public var firstArrowBlockName: String? = nil
+    public var secondArrowBlockName: String? = nil
+    public var linearScaleFactor: Double? = nil
+    public var dimensionPrefix: String? = nil
+    public var dimensionSuffix: String? = nil
+    public var zeroSuppression: Int? = nil
     public static let `default` = CADDimensionStyle()
     
     public init() {}
     
     public func formatMeasurement(_ value: Double, prefix: String = "", suffix: String = "") -> String {
-        // Basic decimal formatting for now, expanding based on unitsFormat/precision if needed
-        let formatStr = "%.\(unitsPrecision)f"
-        let formatted = String(format: formatStr, value)
-        return "\(prefix)\(formatted)\(suffix)"
+        formatDXFMeasurement(value, prefix: prefix, suffix: suffix)
     }
     
     public func formatAngle(_ radians: Double) -> String {
-        let degrees = radians * 180.0 / .pi
-        let formatStr = "%.\(anglePrecision)f"
-        let formatted = String(format: formatStr, degrees)
-        return "\(formatted)°"
+        formatDXFAngle(radians)
     }
 }

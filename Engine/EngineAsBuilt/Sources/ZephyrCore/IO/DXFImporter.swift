@@ -17,12 +17,14 @@ public struct DXFDrawingView: Sendable {
 public struct DXFImportResult: Sendable {
     public let layers: [Layer]; public let blocks: [CADBlock]; public let entities: [CADEntity]
     public let textStyleFonts: [String: String]; public let linetypePatterns: [String: [Double]]
+    public let dimensionStyles: [String: CADDimensionStyle]
     public let views: [DXFDrawingView]
     public init(layers: [Layer], blocks: [CADBlock], entities: [CADEntity],
                 textStyleFonts: [String: String], linetypePatterns: [String: [Double]],
-                views: [DXFDrawingView]) {
+                dimensionStyles: [String: CADDimensionStyle], views: [DXFDrawingView]) {
         self.layers = layers; self.blocks = blocks; self.entities = entities
         self.textStyleFonts = textStyleFonts; self.linetypePatterns = linetypePatterns
+        self.dimensionStyles = dimensionStyles
         self.views = views
     }
 }
@@ -34,9 +36,9 @@ public enum DXFImporter {
         var style: CADPrimitiveStyle?
     }
 
-    public static func importDXF(filePath: String) throws -> (layers: [Layer], blocks: [CADBlock], entities: [CADEntity], textStyleFonts: [String: String], linetypePatterns: [String: [Double]]) {
+    public static func importDXF(filePath: String) throws -> (layers: [Layer], blocks: [CADBlock], entities: [CADEntity], textStyleFonts: [String: String], linetypePatterns: [String: [Double]], dimensionStyles: [String: CADDimensionStyle]) {
         let result = try importDXFViews(filePath: filePath)
-        return (result.layers, result.blocks, result.entities, result.textStyleFonts, result.linetypePatterns)
+        return (result.layers, result.blocks, result.entities, result.textStyleFonts, result.linetypePatterns, result.dimensionStyles)
     }
 
     public static func importDXFViews(filePath: String) throws -> DXFImportResult {
@@ -107,6 +109,19 @@ public enum DXFImporter {
             blockNameToID[block.name] = UUID()
             blockBaseByName[block.name] = Self.cadPoint(block.basePoint)
         }
+
+        var blockNameByHandle: [UInt32: String] = [:]
+        for record in reader.blockRecords where record.handle != 0 && !record.name.isEmpty {
+            blockNameByHandle[record.handle] = record.name
+        }
+        var textStyleNameByHandle: [UInt32: String] = [:]
+        for textStyle in reader.textstyles where textStyle.handle != 0 && !textStyle.name.isEmpty {
+            textStyleNameByHandle[textStyle.handle] = textStyle.name
+        }
+        let dimensionStyles = Self.convertDimensionStyles(
+            reader.dimstyles,
+            blockNameByHandle: blockNameByHandle,
+            textStyleNameByHandle: textStyleNameByHandle)
 
         var blockGeometryCache: [String: [StyledPrimitive]] = [:]
 
@@ -198,17 +213,34 @@ public enum DXFImporter {
                 continue
             }
 
-            if let dimension = entity as? DXFDimensionEntity,
-               let blockID = blockNameToID[dimension.name],
-               let block = blockByID[blockID] {
+            if let dimension = entity as? DXFDimensionEntity {
+                var metadata = Self.dimensionMetadata(from: dimension)
+                if let blockID = blockNameToID[dimension.name],
+                   let block = blockByID[blockID] {
+                    metadata = Self.preservingCachedDimensionText(
+                        metadata, block: block, dimensionStyles: dimensionStyles)
+                    var cadEnt = CADEntity(handle: UUID(),
+                                           layerID: layerID(for: entity),
+                                           blockID: blockID,
+                                           localGeometry: nil,
+                                           transform: .identity,
+                                           xdata: Self.entityStyleXData(from: entity, globalLineTypeScale: globalLineTypeScale),
+                                           drawOrder: drawOrder,
+                                           localBoundingBox: block.localBoundingBox)
+                    cadEnt.dimensionMetadata = metadata.map(CADDimensionMetadataBox.init)
+                    cadEnt.drawOrder = drawOrder
+                    looseEntities.append(cadEnt)
+                    continue
+                }
+
+                let prims = DXFEntityConverter.convertEntityToPrimitives(entity, bylayerColor: nil)
                 var cadEnt = CADEntity(handle: UUID(),
                                        layerID: layerID(for: entity),
-                                       blockID: blockID,
-                                       localGeometry: nil,
+                                       blockID: nil,
+                                       localGeometry: prims,
                                        transform: .identity,
-                                       xdata: Self.entityStyleXData(from: entity, globalLineTypeScale: globalLineTypeScale),
-                                       drawOrder: drawOrder,
-                                       localBoundingBox: block.localBoundingBox)
+                                       xdata: Self.entityStyleXData(from: entity, globalLineTypeScale: globalLineTypeScale))
+                cadEnt.dimensionMetadata = metadata.map(CADDimensionMetadataBox.init)
                 cadEnt.drawOrder = drawOrder
                 looseEntities.append(cadEnt)
                 continue
@@ -243,6 +275,7 @@ public enum DXFImporter {
 
         return DXFImportResult(layers: layers, blocks: blocks, entities: looseEntities,
                               textStyleFonts: textStyleFonts, linetypePatterns: linetypePatterns,
+                              dimensionStyles: dimensionStyles,
                               views: [DXFDrawingView(name: "Model", kind: .model, entities: looseEntities)])
     }
 
@@ -437,6 +470,317 @@ public enum DXFImporter {
             || entity is DXFSplineEntity
             || entity is DXFLWPolylineEntity
             || entity is DXFPolylineEntity
+    }
+
+    private static func convertDimensionStyles(
+        _ source: [DXFDimstyleEntry],
+        blockNameByHandle: [UInt32: String],
+        textStyleNameByHandle: [UInt32: String]
+    ) -> [String: CADDimensionStyle] {
+        var result: [String: CADDimensionStyle] = [:]
+
+        for dimstyle in source where !dimstyle.name.isEmpty {
+            var style = CADDimensionStyle()
+            let scale = dimstyle.dimscale == 0 ? 1.0 : abs(dimstyle.dimscale)
+
+            style.arrowSize = max(0, dimstyle.dimasz * scale)
+            style.textHeight = max(0, dimstyle.dimtxt * scale)
+            style.textOffset = abs(dimstyle.dimgap * scale)
+            style.extensionLineOffset = max(0, dimstyle.dimexo * scale)
+            style.extensionLineExtend = max(0, dimstyle.dimexe * scale)
+            style.dimLineOffset = max(0, dimstyle.dimdli * scale)
+            style.tickSize = max(0, dimstyle.dimtsz * scale)
+            style.unitsFormat = DimUnitsFormat(rawValue: dimstyle.dimlunit) ?? .decimal
+            style.unitsPrecision = max(0, dimstyle.dimdec)
+            style.angleFormat = DimAngleFormat(rawValue: dimstyle.dimaunit) ?? .decimalDegrees
+            style.anglePrecision = max(0, dimstyle.dimadec)
+            style.linearScaleFactor = dimstyle.dimlfac
+            style.zeroSuppression = dimstyle.dimzin
+            style.suppressFirstExtension = dimstyle.dimse1 != 0
+            style.suppressSecondExtension = dimstyle.dimse2 != 0
+            style.suppressFirstDimLine = dimstyle.dimsd1 != 0
+            style.suppressSecondDimLine = dimstyle.dimsd2 != 0
+
+            if let textStyle = textStyleNameByHandle[dimstyle.dimtxstyHandle] {
+                style.textStyle = textStyle
+            } else if !dimstyle.dimtxsty.isEmpty {
+                style.textStyle = dimstyle.dimtxsty
+            }
+
+            if let markerRange = dimstyle.dimpost.range(of: "<>") {
+                let prefix = String(dimstyle.dimpost[..<markerRange.lowerBound])
+                let suffix = String(dimstyle.dimpost[markerRange.upperBound...])
+                style.dimensionPrefix = prefix.isEmpty ? nil : prefix
+                style.dimensionSuffix = suffix.isEmpty ? nil : suffix
+            } else if !dimstyle.dimpost.isEmpty {
+                style.dimensionSuffix = dimstyle.dimpost
+            }
+
+            let generalArrowName = blockNameByHandle[dimstyle.dimblkHandle] ?? dimstyle.dimblk
+            let firstArrowName: String
+            let secondArrowName: String
+            if dimstyle.dimsah != 0 {
+                firstArrowName = blockNameByHandle[dimstyle.dimblk1Handle] ?? dimstyle.dimblk1
+                secondArrowName = blockNameByHandle[dimstyle.dimblk2Handle] ?? dimstyle.dimblk2
+            } else {
+                firstArrowName = generalArrowName
+                secondArrowName = generalArrowName
+            }
+
+            if style.tickSize > 0 {
+                style.firstArrowhead = .architecturalTick
+                style.secondArrowhead = .architecturalTick
+            } else {
+                style.firstArrowhead = CADDimensionArrowhead.fromDXFBlockName(firstArrowName)
+                style.secondArrowhead = CADDimensionArrowhead.fromDXFBlockName(secondArrowName)
+            }
+            style.firstArrowBlockName = firstArrowName.isEmpty ? nil : firstArrowName
+            style.secondArrowBlockName = secondArrowName.isEmpty ? nil : secondArrowName
+            result[dimstyle.name] = style
+        }
+
+        if result["STANDARD"] == nil {
+            result["STANDARD"] = .default
+        }
+        return result
+    }
+
+    private static func dimensionMetadata(from dimension: DXFDimensionEntity) -> CADDimensionMetadata? {
+        let baseType = dimension.type & 0x0F
+        let type: CADDimensionType
+        switch baseType {
+        case 0: type = .linearOrRotated
+        case 1: type = .aligned
+        case 2: type = .angular
+        case 3: type = .diameter
+        case 4: type = .radius
+        case 5: type = .angular3Point
+        case 6: type = .ordinate
+        case 8: type = .arcLength
+        default: return nil
+        }
+
+        let definition = cadPoint(dimension.defPoint)
+        let point13 = cadPoint(dimension.def1)
+        let point14 = cadPoint(dimension.def2)
+        let point15 = cadPoint(dimension.circlePoint)
+        let point16 = cadPoint(dimension.arcPoint)
+        let textMidpoint = cadPoint(dimension.textPoint, extrusion: dimension.extPoint)
+        let rotation: Double
+        if type == .aligned {
+            rotation = atan2(point14.y - point13.y, point14.x - point13.x)
+        } else {
+            rotation = -dimension.angle_p * .pi / 180.0
+        }
+
+        let measurement: Double
+        if dimension.measurement.isFinite {
+            measurement = dimension.measurement
+        } else {
+            measurement = fallbackDimensionMeasurement(
+                type: type,
+                definition: definition,
+                point13: point13,
+                point14: point14,
+                point15: point15,
+                rotation: rotation)
+        }
+
+        let text = dimension.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let textOverride = text.isEmpty || text == "<>" ? nil : dimension.text
+        let flags = (dimension.type & ~0x0F) & ~32
+        let styleName = dimension.style.isEmpty ? "STANDARD" : dimension.style
+
+        switch type {
+        case .linearOrRotated, .aligned:
+            return CADDimensionMetadata(
+                styleName: styleName,
+                type: type,
+                measurement: measurement,
+                defPoint: definition,
+                defPoint2: point13,
+                defPoint3: point14,
+                textMidpoint: textMidpoint,
+                textOverride: textOverride,
+                rotationAngle: rotation,
+                textRotationAngle: dimension.hasTextRotation
+                    ? -dimension.rot * .pi / 180.0
+                    : nil,
+                flags: flags)
+
+        case .angular:
+            let center = lineIntersection(point13, point14, point15, point16) ?? point15
+            return CADDimensionMetadata(
+                styleName: styleName,
+                type: type,
+                measurement: measurement,
+                defPoint: definition,
+                defPoint2: point14,
+                defPoint3: point16,
+                defPoint4: center,
+                textMidpoint: textMidpoint,
+                textOverride: textOverride,
+                rotationAngle: rotation,
+                textRotationAngle: dimension.hasTextRotation
+                    ? -dimension.rot * .pi / 180.0
+                    : nil,
+                flags: flags)
+
+        case .angular3Point:
+            return CADDimensionMetadata(
+                styleName: styleName,
+                type: type,
+                measurement: measurement,
+                defPoint: definition,
+                defPoint2: point13,
+                defPoint3: point14,
+                defPoint4: point15,
+                textMidpoint: textMidpoint,
+                textOverride: textOverride,
+                rotationAngle: rotation,
+                textRotationAngle: dimension.hasTextRotation
+                    ? -dimension.rot * .pi / 180.0
+                    : nil,
+                flags: flags)
+
+        case .diameter:
+            return CADDimensionMetadata(
+                styleName: styleName,
+                type: type,
+                measurement: measurement,
+                defPoint: definition,
+                defPoint2: point15,
+                textMidpoint: textMidpoint,
+                textOverride: textOverride,
+                rotationAngle: rotation,
+                textRotationAngle: dimension.hasTextRotation
+                    ? -dimension.rot * .pi / 180.0
+                    : nil,
+                flags: flags)
+
+        case .radius:
+            return CADDimensionMetadata(
+                styleName: styleName,
+                type: type,
+                measurement: measurement,
+                defPoint: point15,
+                defPoint2: definition,
+                textMidpoint: textMidpoint,
+                textOverride: textOverride,
+                rotationAngle: rotation,
+                textRotationAngle: dimension.hasTextRotation
+                    ? -dimension.rot * .pi / 180.0
+                    : nil,
+                flags: flags)
+
+        case .ordinate:
+            return CADDimensionMetadata(
+                styleName: styleName,
+                type: type,
+                measurement: measurement,
+                defPoint: definition,
+                defPoint2: point13,
+                defPoint3: point14,
+                textMidpoint: textMidpoint,
+                textOverride: textOverride,
+                rotationAngle: rotation,
+                textRotationAngle: dimension.hasTextRotation
+                    ? -dimension.rot * .pi / 180.0
+                    : nil,
+                flags: flags)
+
+        case .arcLength:
+            return CADDimensionMetadata(
+                styleName: styleName,
+                type: type,
+                measurement: measurement,
+                defPoint: definition,
+                defPoint2: point13,
+                defPoint3: point14,
+                defPoint4: point15,
+                defPoint5: point16,
+                textMidpoint: textMidpoint,
+                textOverride: textOverride,
+                rotationAngle: rotation,
+                textRotationAngle: dimension.hasTextRotation
+                    ? -dimension.rot * .pi / 180.0
+                    : nil,
+                flags: flags)
+
+        case .jogged:
+            return nil
+        }
+    }
+
+    private static func preservingCachedDimensionText(
+        _ metadata: CADDimensionMetadata?,
+        block: CADBlock,
+        dimensionStyles: [String: CADDimensionStyle]
+    ) -> CADDimensionMetadata? {
+        guard var metadata else { return nil }
+
+        for primitive in block.geometry {
+            guard case .text(
+                let position, _, let height, let rotation, let textStyle,
+                _, _, _, _
+            ) = primitive else { continue }
+
+            metadata.textMidpoint = position
+            metadata.textRotationAngle = rotation
+
+            var style = metadata.styleOverrides
+                ?? dimensionStyles[metadata.styleName]
+                ?? CADDimensionStyle.default
+            style.textHeight = height
+            style.textStyle = textStyle
+            metadata.styleOverrides = style
+            break
+        }
+
+        return metadata
+    }
+
+    private static func fallbackDimensionMeasurement(
+        type: CADDimensionType,
+        definition: Vector3,
+        point13: Vector3,
+        point14: Vector3,
+        point15: Vector3,
+        rotation: Double
+    ) -> Double {
+        switch type {
+        case .linearOrRotated:
+            let dir = Vector3(x: cos(rotation), y: sin(rotation), z: 0)
+            return abs((point14.x - point13.x) * dir.x + (point14.y - point13.y) * dir.y)
+        case .aligned:
+            return hypot(point14.x - point13.x, point14.y - point13.y)
+        case .diameter:
+            return hypot(point15.x - definition.x, point15.y - definition.y)
+        case .radius:
+            return hypot(point15.x - definition.x, point15.y - definition.y)
+        case .angular, .angular3Point:
+            let a1 = atan2(point13.y - point15.y, point13.x - point15.x)
+            let a2 = atan2(point14.y - point15.y, point14.x - point15.x)
+            return abs(a2 - a1)
+        default:
+            return 0
+        }
+    }
+
+    private static func lineIntersection(
+        _ a1: Vector3,
+        _ a2: Vector3,
+        _ b1: Vector3,
+        _ b2: Vector3
+    ) -> Vector3? {
+        let dax = a2.x - a1.x
+        let day = a2.y - a1.y
+        let dbx = b2.x - b1.x
+        let dby = b2.y - b1.y
+        let denominator = dax * dby - day * dbx
+        guard abs(denominator) > 1e-12 else { return nil }
+        let t = ((b1.x - a1.x) * dby - (b1.y - a1.y) * dbx) / denominator
+        return Vector3(x: a1.x + dax * t, y: a1.y + day * t, z: a1.z)
     }
 
     private static func cadPoint(_ point: Vector3) -> Vector3 {

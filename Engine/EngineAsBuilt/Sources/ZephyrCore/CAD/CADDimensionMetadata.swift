@@ -31,7 +31,8 @@ public struct CADDimensionMetadata: Sendable, Hashable, Codable {
     public var textMidpoint: Vector3
     
     public var textOverride: String?
-    public let rotationAngle: Double   // radians
+    public let rotationAngle: Double   // dimension-line rotation, radians
+    public var textRotationAngle: Double? // explicit/readable text rotation, radians
     
     // Group 70 flags (bit 6 = ordinate X-type, bit 7 = text is user-positioned, etc.)
     public let flags: Int
@@ -50,6 +51,7 @@ public struct CADDimensionMetadata: Sendable, Hashable, Codable {
         textMidpoint: Vector3,
         textOverride: String? = nil,
         rotationAngle: Double = 0,
+        textRotationAngle: Double? = nil,
         flags: Int = 0,
         styleOverrides: CADDimensionStyle? = nil
     ) {
@@ -64,6 +66,7 @@ public struct CADDimensionMetadata: Sendable, Hashable, Codable {
         self.textMidpoint = textMidpoint
         self.textOverride = textOverride
         self.rotationAngle = rotationAngle
+        self.textRotationAngle = textRotationAngle
         self.flags = flags
         self.styleOverrides = styleOverrides
     }

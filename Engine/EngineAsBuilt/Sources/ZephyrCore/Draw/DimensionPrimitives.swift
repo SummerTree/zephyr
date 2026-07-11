@@ -4,54 +4,155 @@ import Foundation
 @MainActor
 public enum DimensionPrimitives {
     
-    /// Generates arrowhead primitives.
-    public static func arrowhead(tip: Vector3, direction: Vector3, size: Double, color: ColorRGBA) -> [CADPrimitive] {
+    /// Generates AutoCAD-compatible dimension arrowhead primitives.
+    public static func arrowhead(
+        tip: Vector3,
+        direction: Vector3,
+        size: Double,
+        color: ColorRGBA,
+        type: CADDimensionArrowhead = .closedFilled
+    ) -> [CADPrimitive] {
+        guard size > 0 else { return [] }
         let dir = direction.normalized
-        // The back of the arrow is 'size' units away from the tip in the negative direction
-        let backCenter = Vector3(x: tip.x - dir.x * size,
-                                 y: tip.y - dir.y * size,
-                                 z: tip.z - dir.z * size)
-        
-        // The half-width is size * 0.25 (typical 1:4 ratio)
-        let halfWidth = size * 0.25
-        let perp = Vector3(x: -dir.y, y: dir.x, z: 0) // perpendicular in 2D
-        
-        let p1 = Vector3(x: backCenter.x + perp.x * halfWidth,
-                         y: backCenter.y + perp.y * halfWidth,
-                         z: backCenter.z)
-        let p2 = Vector3(x: backCenter.x - perp.x * halfWidth,
-                         y: backCenter.y - perp.y * halfWidth,
-                         z: backCenter.z)
-        
-        let poly = CADPrimitive.fillPolygon(points: [tip, p1, p2], color: color)
-        let line = CADPrimitive.line(start: backCenter, end: tip, color: color)
-        return [poly, line]
+        let perp = Vector3(x: -dir.y, y: dir.x, z: 0)
+
+        func point(_ back: Double, _ side: Double = 0) -> Vector3 {
+            Vector3(
+                x: tip.x - dir.x * back + perp.x * side,
+                y: tip.y - dir.y * back + perp.y * side,
+                z: tip.z - dir.z * back
+            )
+        }
+
+        func triangle(width: Double, filled: Bool, includeBase: Bool) -> [CADPrimitive] {
+            let p1 = point(size, width * 0.5)
+            let p2 = point(size, -width * 0.5)
+            if filled {
+                return [.fillPolygon(points: [tip, p1, p2], color: color)]
+            }
+            if includeBase {
+                return [.polygon(points: [tip, p1, p2], color: color)]
+            }
+            return [
+                .line(start: tip, end: p1, color: color),
+                .line(start: tip, end: p2, color: color)
+            ]
+        }
+
+        func circle(radius: Double, filled: Bool, centerBack: Double) -> [CADPrimitive] {
+            let center = point(centerBack)
+            if !filled { return [.circle(center: center, radius: radius, color: color)] }
+            let segments = 20
+            let points = (0..<segments).map { index -> Vector3 in
+                let angle = Double(index) * 2.0 * .pi / Double(segments)
+                return Vector3(
+                    x: center.x + cos(angle) * radius,
+                    y: center.y + sin(angle) * radius,
+                    z: center.z
+                )
+            }
+            return [.fillPolygon(points: points, color: color)]
+        }
+
+        func box(filled: Bool) -> [CADPrimitive] {
+            let half = size * 0.22
+            let center = point(size * 0.25)
+            let p1 = Vector3(x: center.x + dir.x * half + perp.x * half, y: center.y + dir.y * half + perp.y * half, z: center.z)
+            let p2 = Vector3(x: center.x + dir.x * half - perp.x * half, y: center.y + dir.y * half - perp.y * half, z: center.z)
+            let p3 = Vector3(x: center.x - dir.x * half - perp.x * half, y: center.y - dir.y * half - perp.y * half, z: center.z)
+            let p4 = Vector3(x: center.x - dir.x * half + perp.x * half, y: center.y - dir.y * half + perp.y * half, z: center.z)
+            return filled
+                ? [.fillPolygon(points: [p1, p2, p3, p4], color: color)]
+                : [.polygon(points: [p1, p2, p3, p4], color: color)]
+        }
+
+        switch type {
+        case .closedFilled:
+            return triangle(width: size * 0.5, filled: true, includeBase: true)
+        case .closedBlank:
+            return triangle(width: size * 0.5, filled: false, includeBase: true)
+        case .closed:
+            return triangle(width: size * 0.5, filled: false, includeBase: true)
+        case .open:
+            return triangle(width: size * 0.5, filled: false, includeBase: false)
+        case .open30:
+            return triangle(width: size * 0.28, filled: false, includeBase: false)
+        case .architecturalTick:
+            return [tickMark(at: tip, direction: dir, size: size * sqrt(2.0), color: color, angle: -.pi / 4.0)]
+        case .oblique:
+            return [tickMark(at: tip, direction: dir, size: size, color: color, angle: .pi / 3.0)]
+        case .dot:
+            return circle(radius: size * 0.25, filled: true, centerBack: 0)
+        case .dotSmall:
+            return circle(radius: size * 0.14, filled: true, centerBack: 0)
+        case .dotBlank:
+            return circle(radius: size * 0.25, filled: false, centerBack: 0)
+        case .dotSmallBlank:
+            return circle(radius: size * 0.14, filled: false, centerBack: 0)
+        case .box:
+            return box(filled: false)
+        case .boxFilled:
+            return box(filled: true)
+        case .datumTriangle:
+            return triangle(width: size * 0.85, filled: false, includeBase: true)
+        case .datumTriangleFilled:
+            return triangle(width: size * 0.85, filled: true, includeBase: true)
+        case .originIndicator, .originIndicator2:
+            var result = circle(radius: size * 0.24, filled: false, centerBack: size * 0.24)
+            let center = point(size * 0.24)
+            result.append(.line(start: point(size * 0.52), end: tip, color: color))
+            if type == .originIndicator2 {
+                result.append(.line(
+                    start: Vector3(x: center.x - perp.x * size * 0.24, y: center.y - perp.y * size * 0.24, z: center.z),
+                    end: Vector3(x: center.x + perp.x * size * 0.24, y: center.y + perp.y * size * 0.24, z: center.z),
+                    color: color))
+            }
+            return result
+        case .rightAngle:
+            let corner = point(size * 0.5)
+            return [
+                .line(start: tip, end: corner, color: color),
+                .line(start: corner, end: Vector3(x: corner.x + perp.x * size * 0.5, y: corner.y + perp.y * size * 0.5, z: corner.z), color: color)
+            ]
+        case .integral:
+            let points = [
+                point(size * 0.9, -size * 0.18),
+                point(size * 0.7, size * 0.18),
+                point(size * 0.45, size * 0.18),
+                point(size * 0.2, -size * 0.18),
+                point(0, size * 0.18)
+            ]
+            return [.polyline(points: points, color: color)]
+        case .none:
+            return []
+        case .userArrow:
+            return triangle(width: size * 0.5, filled: true, includeBase: true)
+        }
     }
-    
-    /// Generates an oblique tick mark primitive.
-    public static func tickMark(at: Vector3, direction: Vector3, size: Double, color: ColorRGBA) -> CADPrimitive {
+
+    public static func tickMark(
+        at: Vector3,
+        direction: Vector3,
+        size: Double,
+        color: ColorRGBA,
+        angle: Double = .pi / 4.0
+    ) -> CADPrimitive {
         let dir = direction.normalized
-        // Tick is usually 45 degrees, but specification says perpendicular to direction.
-        // Let's make it a 45 degree line for architectural ticks.
-        // Wait, typical architectural tick is 45 degrees to the dimension line.
-        // Let's rotate 'dir' by 45 degrees (pi/4).
-        let angle = .pi / 4.0
         let cosA = cos(angle)
         let sinA = sin(angle)
-        let dx = dir.x * cosA - dir.y * sinA
-        let dy = dir.x * sinA + dir.y * cosA
-        let tickDir = Vector3(x: dx, y: dy, z: 0)
-        
+        let tickDir = Vector3(
+            x: dir.x * cosA - dir.y * sinA,
+            y: dir.x * sinA + dir.y * cosA,
+            z: 0
+        )
         let halfSize = size * 0.5
-        let start = Vector3(x: at.x - tickDir.x * halfSize,
-                            y: at.y - tickDir.y * halfSize,
-                            z: at.z)
-        let end = Vector3(x: at.x + tickDir.x * halfSize,
-                          y: at.y + tickDir.y * halfSize,
-                          z: at.z)
-        return .line(start: start, end: end, color: color)
+        return .line(
+            start: Vector3(x: at.x - tickDir.x * halfSize, y: at.y - tickDir.y * halfSize, z: at.z),
+            end: Vector3(x: at.x + tickDir.x * halfSize, y: at.y + tickDir.y * halfSize, z: at.z),
+            color: color
+        )
     }
-    
+
     /// Generates two extension lines.
     public static func extensionLines(feature1: Vector3, feature2: Vector3, dimLineStart: Vector3, dimLineEnd: Vector3, style: CADDimensionStyle, color: ColorRGBA) -> [CADPrimitive] {
         var primitives: [CADPrimitive] = []
@@ -95,18 +196,19 @@ public enum DimensionPrimitives {
         let lineEnd = to
         
         if arrowAtStart {
-            if style.tickSize > 0 {
-                primitives.append(tickMark(at: from, direction: dir, size: style.tickSize, color: color))
-            } else {
-                primitives.append(contentsOf: arrowhead(tip: from, direction: dir, size: style.arrowSize, color: color))
-            }
+            let type = style.resolvedFirstArrowhead
+            let size = type == .architecturalTick && style.tickSize > 0 ? style.tickSize : style.arrowSize
+            primitives.append(contentsOf: arrowhead(tip: from, direction: dir, size: size, color: color, type: type))
         }
         if arrowAtEnd {
-            if style.tickSize > 0 {
-                primitives.append(tickMark(at: to, direction: Vector3(x: -dir.x, y: -dir.y, z: -dir.z), size: style.tickSize, color: color))
-            } else {
-                primitives.append(contentsOf: arrowhead(tip: to, direction: Vector3(x: -dir.x, y: -dir.y, z: -dir.z), size: style.arrowSize, color: color))
-            }
+            let type = style.resolvedSecondArrowhead
+            let size = type == .architecturalTick && style.tickSize > 0 ? style.tickSize : style.arrowSize
+            primitives.append(contentsOf: arrowhead(
+                tip: to,
+                direction: Vector3(x: -dir.x, y: -dir.y, z: -dir.z),
+                size: size,
+                color: color,
+                type: type))
         }
         
         if !style.suppressFirstDimLine || !style.suppressSecondDimLine {
@@ -126,7 +228,7 @@ public enum DimensionPrimitives {
             height: style.textHeight,
             rotation: rotation,
             style: style.textStyle,
-            alignH: 4, // Center Middle
+            alignH: 1, // Center
             alignV: 2, // Middle
             mtextWidth: nil,
             color: color
@@ -146,10 +248,38 @@ public enum DimensionPrimitives {
         document.addEntities([entity])
     }
     
+    public static func resolvedColor(for entity: CADEntity, in document: CADDocument) -> ColorRGBA {
+        if case .string(let hex) = entity.xdata["dxf.color"],
+           let color = ColorRGBA(hex: hex) {
+            return color
+        }
+        return document.layer(for: entity.layerID)?.color ?? .white
+    }
+
+    private static func readableTextRotation(_ angle: Double) -> Double {
+        var normalized = angle.truncatingRemainder(dividingBy: 2.0 * .pi)
+        if normalized > .pi { normalized -= 2.0 * .pi }
+        if normalized <= -.pi { normalized += 2.0 * .pi }
+        if normalized > .pi / 2.0 { normalized -= .pi }
+        if normalized < -.pi / 2.0 { normalized += .pi }
+        return normalized
+    }
+
+    private static func textRotation(for metadata: CADDimensionMetadata, fallback: Double) -> Double {
+        metadata.textRotationAngle ?? readableTextRotation(fallback)
+    }
+
     /// Re-generates all primitives for a dimension based on its metadata and style.
     public static func generatePrimitives(for metadata: CADDimensionMetadata, style: CADDimensionStyle, color: ColorRGBA) -> [CADPrimitive] {
         var primitives: [CADPrimitive] = []
-        let valueStr = metadata.textOverride ?? style.formatMeasurement(metadata.measurement)
+        let valueStr: String
+        if let override = metadata.textOverride {
+            valueStr = override
+        } else if metadata.type == .angular || metadata.type == .angular3Point {
+            valueStr = style.formatAngle(metadata.measurement)
+        } else {
+            valueStr = style.formatMeasurement(metadata.measurement)
+        }
         
         switch metadata.type {
         case .linearOrRotated:
@@ -157,29 +287,24 @@ public enum DimensionPrimitives {
             let p1 = metadata.defPoint2
             let dimLinePos = metadata.defPoint
             
-            let midX = (p1.x + p2.x) / 2.0
-            let midY = (p1.y + p2.y) / 2.0
-            let dx = abs(dimLinePos.x - midX)
-            let dy = abs(dimLinePos.y - midY)
-            let isHorizontal = dy > dx
-            
-            let dimStart: Vector3
-            let dimEnd: Vector3
-            let angle: Double
-            
-            if isHorizontal {
-                dimStart = Vector3(x: p1.x, y: dimLinePos.y, z: 0)
-                dimEnd = Vector3(x: p2.x, y: dimLinePos.y, z: 0)
-                angle = 0
-            } else {
-                dimStart = Vector3(x: dimLinePos.x, y: p1.y, z: 0)
-                dimEnd = Vector3(x: dimLinePos.x, y: p2.y, z: 0)
-                angle = .pi / 2
-            }
+            let angle = metadata.rotationAngle
+            let dir = Vector3(x: cos(angle), y: sin(angle), z: 0)
+            let perp = Vector3(x: -dir.y, y: dir.x, z: 0)
+            let p1Along = p1.x * dir.x + p1.y * dir.y
+            let p2Along = p2.x * dir.x + p2.y * dir.y
+            let lineOffset = dimLinePos.x * perp.x + dimLinePos.y * perp.y
+            let dimStart = Vector3(
+                x: dir.x * p1Along + perp.x * lineOffset,
+                y: dir.y * p1Along + perp.y * lineOffset,
+                z: dimLinePos.z)
+            let dimEnd = Vector3(
+                x: dir.x * p2Along + perp.x * lineOffset,
+                y: dir.y * p2Along + perp.y * lineOffset,
+                z: dimLinePos.z)
             
             primitives.append(contentsOf: extensionLines(feature1: p1, feature2: p2, dimLineStart: dimStart, dimLineEnd: dimEnd, style: style, color: color))
             primitives.append(contentsOf: dimensionLine(from: dimStart, to: dimEnd, arrowAtStart: true, arrowAtEnd: true, style: style, color: color))
-            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: angle, style: style, color: color))
+            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: textRotation(for: metadata, fallback: angle), style: style, color: color))
             
         case .aligned:
             guard let p2 = metadata.defPoint3 else { return [] }
@@ -198,7 +323,7 @@ public enum DimensionPrimitives {
             
             primitives.append(contentsOf: extensionLines(feature1: p1, feature2: p2, dimLineStart: dimStart, dimLineEnd: dimEnd, style: style, color: color))
             primitives.append(contentsOf: dimensionLine(from: dimStart, to: dimEnd, arrowAtStart: true, arrowAtEnd: true, style: style, color: color))
-            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: angle, style: style, color: color))
+            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: textRotation(for: metadata, fallback: angle), style: style, color: color))
             
         case .angular:
             guard let p2 = metadata.defPoint3, let center = metadata.defPoint4 else { return [] }
@@ -216,10 +341,10 @@ public enum DimensionPrimitives {
             let ap1 = Vector3(x: center.x + cos(a1)*radius, y: center.y + sin(a1)*radius, z: 0)
             let ap2 = Vector3(x: center.x + cos(a2)*radius, y: center.y + sin(a2)*radius, z: 0)
             
-            primitives.append(contentsOf: arrowhead(tip: ap1, direction: a1Dir, size: style.arrowSize, color: color))
-            primitives.append(contentsOf: arrowhead(tip: ap2, direction: a2Dir, size: style.arrowSize, color: color))
+            primitives.append(contentsOf: arrowhead(tip: ap1, direction: a1Dir, size: style.arrowSize, color: color, type: style.resolvedFirstArrowhead))
+            primitives.append(contentsOf: arrowhead(tip: ap2, direction: a2Dir, size: style.arrowSize, color: color, type: style.resolvedSecondArrowhead))
             
-            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: 0, style: style, color: color))
+            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: textRotation(for: metadata, fallback: 0), style: style, color: color))
             
         case .diameter, .radius:
             // For radius:  defPoint = center,  defPoint2 = arcPoint
@@ -247,7 +372,7 @@ public enum DimensionPrimitives {
                 // Leader line from arc point to text location
                 primitives.append(.line(start: arcPoint, end: textLoc, color: color))
                 // Arrowhead at arc point pointing towards center
-                primitives.append(contentsOf: arrowhead(tip: arcPoint, direction: Vector3(x: -n.x, y: -n.y, z: 0), size: style.arrowSize, color: color))
+                primitives.append(contentsOf: arrowhead(tip: arcPoint, direction: Vector3(x: -n.x, y: -n.y, z: 0), size: style.arrowSize, color: color, type: style.resolvedFirstArrowhead))
             } else {
                 // Diameter line across the circle
                 let p1 = metadata.defPoint
@@ -256,8 +381,8 @@ public enum DimensionPrimitives {
                 // Leader line from p2 to text
                 primitives.append(.line(start: p2, end: textLoc, color: color))
                 // Arrowheads at both ends
-                primitives.append(contentsOf: arrowhead(tip: p1, direction: n, size: style.arrowSize, color: color))
-                primitives.append(contentsOf: arrowhead(tip: p2, direction: Vector3(x: -n.x, y: -n.y, z: 0), size: style.arrowSize, color: color))
+                primitives.append(contentsOf: arrowhead(tip: p1, direction: n, size: style.arrowSize, color: color, type: style.resolvedFirstArrowhead))
+                primitives.append(contentsOf: arrowhead(tip: p2, direction: Vector3(x: -n.x, y: -n.y, z: 0), size: style.arrowSize, color: color, type: style.resolvedSecondArrowhead))
             }
             
             // Horizontal text tail
@@ -267,7 +392,7 @@ public enum DimensionPrimitives {
             
             // Text positioned near the tail
             let textPos = Vector3(x: textLoc.x + (n.x >= 0 ? textTailLength / 2 : -textTailLength / 2), y: textLoc.y + style.textOffset, z: 0)
-            primitives.append(dimensionText(position: textPos, value: valueStr, rotation: 0, style: style, color: color))
+            primitives.append(dimensionText(position: textPos, value: valueStr, rotation: textRotation(for: metadata, fallback: 0), style: style, color: color))
             
             return primitives
             
@@ -296,16 +421,16 @@ public enum DimensionPrimitives {
             let a1Dir = Vector3(x: -sin(startAngle), y: cos(startAngle), z: 0)
             let a2Dir = Vector3(x: sin(endAngle), y: -cos(endAngle), z: 0)
             let sweepSign: Double = sweep >= 0 ? 1.0 : -1.0
-            primitives.append(contentsOf: arrowhead(tip: d1, direction: Vector3(x: a1Dir.x * sweepSign, y: a1Dir.y * sweepSign, z: 0), size: style.arrowSize, color: color))
-            primitives.append(contentsOf: arrowhead(tip: d2, direction: Vector3(x: a2Dir.x * (-sweepSign), y: a2Dir.y * (-sweepSign), z: 0), size: style.arrowSize, color: color))
+            primitives.append(contentsOf: arrowhead(tip: d1, direction: Vector3(x: a1Dir.x * sweepSign, y: a1Dir.y * sweepSign, z: 0), size: style.arrowSize, color: color, type: style.resolvedFirstArrowhead))
+            primitives.append(contentsOf: arrowhead(tip: d2, direction: Vector3(x: a2Dir.x * (-sweepSign), y: a2Dir.y * (-sweepSign), z: 0), size: style.arrowSize, color: color, type: style.resolvedSecondArrowhead))
             
-            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: 0, style: style, color: color))
+            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: textRotation(for: metadata, fallback: 0), style: style, color: color))
             
             return primitives
             
         default:
             // Fallback just draws text
-            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: metadata.rotationAngle, style: style, color: color))
+            primitives.append(dimensionText(position: metadata.textMidpoint, value: valueStr, rotation: textRotation(for: metadata, fallback: metadata.rotationAngle), style: style, color: color))
         }
         
         return primitives
@@ -316,14 +441,18 @@ public enum DimensionPrimitives {
         guard let box = entity.dimensionMetadata else { return }
         let metadata = box.value
         let style = metadata.styleOverrides ?? document.dimensionStyles[metadata.styleName] ?? CADDimensionStyle.default
-        let color = ColorRGBA.white // Assuming white for now if color is not explicitly on entity
+        let color = resolvedColor(for: entity, in: document)
         
         let newPrimitives = generatePrimitives(for: metadata, style: style, color: color)
         
         // Overwrite the block
         if let blockID = entity.blockID, var block = document.block(for: blockID) {
             block.geometry = newPrimitives
+            block.primitiveStyles.removeAll(keepingCapacity: false)
+            block.updateBoundingBox()
             document.addBlock(block)
+            entity.localBoundingBox = block.localBoundingBox
+            entity.updateAnchorCache(from: newPrimitives)
         }
     }
 }

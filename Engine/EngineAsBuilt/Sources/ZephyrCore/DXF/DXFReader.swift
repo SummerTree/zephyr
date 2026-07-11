@@ -842,9 +842,12 @@ extension DXFReader {
             case 36:  e.arcPoint.z = d(v)
             case 40:  e.length = d(v)
             case 41:  e.lineFactor = d(v)
+            case 42:  e.measurement = d(v)
             case 50:  e.angle_p = d(v)
             case 52:  e.oblique = d(v)
-            case 53:  e.rot = d(v)
+            case 53:
+                e.rot = d(v)
+                e.hasTextRotation = true
             case 70:  e.type = i(v)
             case 71:  e.align = i(v)
             case 72:  e.lineStyle = i(v)
@@ -1348,8 +1351,11 @@ extension DXFReader {
             case 288: entry.dimupt = i(v)
             case 289: entry.dimatfit = i(v)
             case 290: entry.dimfxlon = i(v)
-            case 340: entry.dimtxsty = v
-            case 341: entry.dimldrblk = v
+            case 340: entry.dimtxstyHandle = parseHandle(v)
+            case 341: entry.dimldrblkHandle = parseHandle(v)
+            case 342: entry.dimblkHandle = parseHandle(v)
+            case 343: entry.dimblk1Handle = parseHandle(v)
+            case 344: entry.dimblk2Handle = parseHandle(v)
             case 371: entry.dimlwd = i(v)
             case 372: entry.dimlwe = i(v)
             default:  break
@@ -1667,7 +1673,7 @@ extension DXFReader {
     func d(_ s: String) -> Double { return Double(s) ?? 0.0 }
     func i(_ s: String) -> Int { return Int(s) ?? 0 }
     func i32(_ s: String) -> Int32 { return Int32(s) ?? 0 }
-    func parseHandle(_ s: String) -> UInt32 { return UInt32(s, radix: 16) ?? 0 }
+    func parseHandle(_ s: String) -> UInt32 { return UInt32(s.trimmingCharacters(in: .whitespacesAndNewlines), radix: 16) ?? 0 }
     func dxfLineWeightVal(_ s: String) -> DXFLineWidth { return DXFLineWidth.fromDXF(Int(s) ?? -3) }
 }
 

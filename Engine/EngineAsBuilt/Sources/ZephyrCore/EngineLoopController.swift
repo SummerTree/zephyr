@@ -481,7 +481,8 @@ public final class EngineLoopController {
                 }
                 // Regenerate dimension primitives
                 let style = metadata.styleOverrides ?? engine.document.dimensionStyles[metadata.styleName] ?? CADDimensionStyle.default
-                let newPrimitives = DimensionPrimitives.generatePrimitives(for: metadata, style: style, color: .white)
+                let color = DimensionPrimitives.resolvedColor(for: entity, in: engine.document)
+                let newPrimitives = DimensionPrimitives.generatePrimitives(for: metadata, style: style, color: color)
                 engine.document.updateBlockGeometryLive(handle: bid, geometry: newPrimitives)
                 // Update entity metadata (live, no undo yet)
                 var updatedEntity = entity
@@ -547,7 +548,8 @@ public final class EngineLoopController {
                 }
                 metadata.textMidpoint = constrainedTextMid
                 let style = metadata.styleOverrides ?? engine.document.dimensionStyles[metadata.styleName] ?? CADDimensionStyle.default
-                let newPrimitives = DimensionPrimitives.generatePrimitives(for: metadata, style: style, color: .white)
+                let color = DimensionPrimitives.resolvedColor(for: entity, in: engine.document)
+                let newPrimitives = DimensionPrimitives.generatePrimitives(for: metadata, style: style, color: color)
                 engine.document.updateBlockGeometryLive(handle: bid, geometry: newPrimitives)
                 var updatedEntity = entity
                 updatedEntity.dimensionMetadata = CADDimensionMetadataBox(metadata)

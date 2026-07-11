@@ -662,7 +662,9 @@ public final class CADDocument {
         pushUndo()
         guard entityRegistry[entity.handle] != nil else { return }
         var updated = entity
-        updated.localBoundingBox = CADEntity.computeLocalBoundingBox(blockID: updated.blockID, localGeometry: updated.localGeometry)
+        updated.localBoundingBox = CADEntity.computeLocalBoundingBox(
+            blockID: updated.blockID,
+            localGeometry: updated.localGeometry) ?? updated.localBoundingBox
         updated.updateAnchorCache()
         entityRegistry[updated.handle] = updated
         markEdited(regenerate: true)
@@ -1102,7 +1104,7 @@ public final class CADDocument {
 
     @MainActor
     public func importDXF(url: URL) throws {
-        let (layers, blocks, entities, textStyleFonts, linetypePatterns) = try DXFImporter.importDXF(filePath: url.path)
+        let (layers, blocks, entities, textStyleFonts, linetypePatterns, dimensionStyles) = try DXFImporter.importDXF(filePath: url.path)
 
         for font in Set(textStyleFonts.values) {
             CADFontManager.debugFontLookup(font)
@@ -1110,6 +1112,7 @@ public final class CADDocument {
 
         self.textStyleFonts = textStyleFonts
         self.linetypePatterns = linetypePatterns
+        self.dimensionStyles = dimensionStyles
         for layer in layers { layerTable[layer.handle] = layer }
         if activeLayerID == nil, let first = layers.first { activeLayerID = first.handle }
         for block in blocks { blockTable[block.handle] = block }

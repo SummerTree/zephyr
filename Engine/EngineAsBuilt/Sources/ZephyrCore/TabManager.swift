@@ -293,6 +293,7 @@ public final class TabManager {
             )
             doc.textStyleFonts = imported.textStyleFonts
             doc.linetypePatterns = imported.linetypePatterns
+            doc.dimensionStyles = imported.dimensionStyles
             doc.savedRevision = doc.editRevision  // freshly imported
             return DrawingView(name: view.name, kind: view.kind, document: doc)
         }

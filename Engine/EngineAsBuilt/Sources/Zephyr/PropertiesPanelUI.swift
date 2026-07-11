@@ -345,6 +345,7 @@ struct PropertiesPanelUI {
                         textMidpoint: metadata.textMidpoint,
                         textOverride: newText.isEmpty ? nil : newText,
                         rotationAngle: metadata.rotationAngle,
+                        textRotationAngle: metadata.textRotationAngle,
                         flags: metadata.flags,
                         styleOverrides: metadata.styleOverrides
                     )
@@ -383,6 +384,52 @@ struct PropertiesPanelUI {
                     style.arrowSize = Double(max(0.1, arrowSize))
                     changed = true
                 }
+
+                let firstArrow = style.resolvedFirstArrowhead
+                let firstArrowLabel = firstArrow == .userArrow
+                    ? (style.firstArrowBlockName ?? firstArrow.displayName)
+                    : firstArrow.displayName
+                ImGuiTextV("Arrow 1:")
+                ImGuiPushItemWidth(-1)
+                if ImGuiBeginCombo("##DimArrow1", firstArrowLabel, 0) {
+                    for arrow in CADDimensionArrowhead.allCases where arrow != .userArrow || firstArrow == .userArrow {
+                        let selected = arrow == firstArrow
+                        let label = arrow == .userArrow
+                            ? (style.firstArrowBlockName ?? arrow.displayName)
+                            : arrow.displayName
+                        if ImGuiSelectable(label, selected, 0, ImVec2(x: 0, y: 0)) {
+                            style.firstArrowhead = arrow
+                            if arrow != .userArrow { style.firstArrowBlockName = nil }
+                            changed = true
+                        }
+                        if selected { ImGuiSetItemDefaultFocus() }
+                    }
+                    ImGuiEndCombo()
+                }
+                ImGuiPopItemWidth()
+
+                let secondArrow = style.resolvedSecondArrowhead
+                let secondArrowLabel = secondArrow == .userArrow
+                    ? (style.secondArrowBlockName ?? secondArrow.displayName)
+                    : secondArrow.displayName
+                ImGuiTextV("Arrow 2:")
+                ImGuiPushItemWidth(-1)
+                if ImGuiBeginCombo("##DimArrow2", secondArrowLabel, 0) {
+                    for arrow in CADDimensionArrowhead.allCases where arrow != .userArrow || secondArrow == .userArrow {
+                        let selected = arrow == secondArrow
+                        let label = arrow == .userArrow
+                            ? (style.secondArrowBlockName ?? arrow.displayName)
+                            : arrow.displayName
+                        if ImGuiSelectable(label, selected, 0, ImVec2(x: 0, y: 0)) {
+                            style.secondArrowhead = arrow
+                            if arrow != .userArrow { style.secondArrowBlockName = nil }
+                            changed = true
+                        }
+                        if selected { ImGuiSetItemDefaultFocus() }
+                    }
+                    ImGuiEndCombo()
+                }
+                ImGuiPopItemWidth()
                 
                 if changed {
                     var newMeta = metadata

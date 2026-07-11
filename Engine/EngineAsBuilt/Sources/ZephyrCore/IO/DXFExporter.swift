@@ -661,6 +661,9 @@ public enum DXFExporter {
         if dim.rotationAngle != 0 {
             output += " 50\r\n\(dxfDouble(-dim.rotationAngle * 180.0 / .pi))\r\n"
         }
+        if let textRotation = dim.textRotationAngle {
+            output += " 53\r\n\(dxfDouble(-textRotation * 180.0 / .pi))\r\n"
+        }
     }
 
     // MARK: - INSERT Entity

@@ -850,6 +850,7 @@ open class DXFDimensionEntity: DXFEntity {
     public var lineStyle: Int          // 72
     public var lineFactor: Double      // 41
     public var rot: Double             // 53
+    public var hasTextRotation: Bool
     public var extPoint: Vector3       // 210,220,230
 
     // dimension subtype specific (DRW_Dimension internals)
@@ -861,6 +862,7 @@ open class DXFDimensionEntity: DXFEntity {
     public var circlePoint: Vector3    // 15,25,35
     public var arcPoint: Vector3       // 16,26,36
     public var length: Double          // 40
+    public var measurement: Double     // 42 actual measurement
 
     public override init(eType: DXFEType = .dIMENSION) {
         self.type = 0
@@ -873,6 +875,7 @@ open class DXFDimensionEntity: DXFEntity {
         self.lineStyle = 1
         self.lineFactor = 1
         self.rot = 0
+        self.hasTextRotation = false
         self.extPoint = Vector3(x: 0, y: 0, z: 1)
         self.clonePoint = .zero
         self.def1 = .zero
@@ -882,6 +885,7 @@ open class DXFDimensionEntity: DXFEntity {
         self.circlePoint = .zero
         self.arcPoint = .zero
         self.length = 0
+        self.measurement = .nan
         super.init(eType: eType)
     }
 }
@@ -1101,8 +1105,13 @@ public class DXFDimstyleEntry: DXFTableEntry {
     public var dimupt: Int        // 288
     public var dimatfit: Int      // 289
     public var dimfxlon: Int      // 290
-    public var dimtxsty: String   // 340
-    public var dimldrblk: String  // 341
+    public var dimtxsty: String   // legacy text style name
+    public var dimldrblk: String  // legacy leader arrow block name
+    public var dimtxstyHandle: UInt32  // 340
+    public var dimldrblkHandle: UInt32 // 341
+    public var dimblkHandle: UInt32    // 342
+    public var dimblk1Handle: UInt32   // 343
+    public var dimblk2Handle: UInt32   // 344
     public var dimlwd: Int        // 371
     public var dimlwe: Int        // 372
 
@@ -1143,6 +1152,11 @@ public class DXFDimstyleEntry: DXFTableEntry {
         self.dimdsep = 46  // '.' ascii
         self.dimlwd = -2; self.dimlwe = -2
         self.dimldrblk = ""
+        self.dimtxstyHandle = 0
+        self.dimldrblkHandle = 0
+        self.dimblkHandle = 0
+        self.dimblk1Handle = 0
+        self.dimblk2Handle = 0
         super.init(tType: .dimstyle)
     }
 }
