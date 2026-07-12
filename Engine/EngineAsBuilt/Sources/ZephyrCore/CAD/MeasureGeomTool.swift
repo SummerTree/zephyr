@@ -9,10 +9,9 @@ import SwiftSDL
 // Multi-mode measurement tool for the CAD application.
 //
 // Modes (cycled via Tab key):
-//   - .quick: Real-time orthogonal raycast (±X, ±Y) from cursor to nearest
-//     geometry PLUS boundary extraction with side-length and interior-angle
-//     overlays. Uses spatial caching (point-in-polygon test) to avoid
-//     recomputing the boundary every frame.
+//   - .quick: Real-time orthogonal raycast (±X, ±Y) that combines opposing
+//     hits into AutoCAD-style width and length dimensions, or shows a local
+//     angular measurement while the cursor touches a corner.
 //   - .distance: Two-click point-to-point distance measurement with snapping.
 //   - .area: Click inside enclosed region to detect boundary and compute area.
 //   - .angle: Stub — reserved for future three-click angle measurement.
@@ -31,16 +30,36 @@ public enum MeasureMode: Sendable {
 @MainActor
 public final class MeasureGeomTool: FeatureCommand {
 
-    // MARK: - Constants
+    private struct QuickLineSegment {
+        let start: Vector3
+        let end: Vector3
+    }
 
-    /// Epsilon for orthogonal angle detection (|dot| < this → 90° corner).
-    private static let orthoEpsilon: Double = 1e-4
+    private struct QuickIncidentRay {
+        let direction: Vector3
+        let length: Double
+    }
 
-    /// Size (in world units) of the orthogonal square icon drawn at right-angle corners.
-    private static let orthoIconSize: Double = 0.15
+    private struct QuickAngleSpan {
+        let vertex: Vector3
+        let startAngle: Double
+        let sweepAngle: Double
+        let angleDegrees: Double
+    }
 
-    /// Number of line segments used to approximate a non-orthogonal angle arc.
-    private static let arcSegments: Int = 12
+    private struct QuickRadiusSpan {
+        let center: Vector3
+        let radius: Double
+        let startAngle: Double
+        let sweepAngle: Double
+        let hitPoint: Vector3
+    }
+
+    private struct QuickLinearHit {
+        let hitPoint: Vector3
+        let start: Vector3
+        let end: Vector3
+    }
 
     // MARK: - State
 
@@ -50,6 +69,11 @@ public final class MeasureGeomTool: FeatureCommand {
     /// Stored as world-space (cursor origin, intersection point) for each direction.
     /// Index 0: +X, 1: -X, 2: +Y, 3: -Y
     private var quickMeasurements: [(origin: Vector3, hit: Vector3)?] = [nil, nil, nil, nil]
+    private var quickWidthSpan: (start: Vector3, end: Vector3, distance: Double)? = nil
+    private var quickLengthSpan: (start: Vector3, end: Vector3, distance: Double)? = nil
+    private var quickAngleSpan: QuickAngleSpan? = nil
+    private var quickHitAngleSpans: [QuickAngleSpan] = []
+    private var quickRadiusSpan: QuickRadiusSpan? = nil
     private var currentMouseWorldX: Double = 0
     private var currentMouseWorldY: Double = 0
 
@@ -65,18 +89,6 @@ public final class MeasureGeomTool: FeatureCommand {
     // Active measurement labels: (text, world position)
     private var activeLabels: [(String, Vector3)] = []
 
-    // --- Boundary cache (Quick Measure spatial caching) ---
-    /// Cached enclosing polygon from the last successful boundary detection.
-    /// When non-nil and the cursor is still inside it, boundary detection is skipped.
-    private var cachedBoundary: [Vector3]? = nil
-
-    /// Boundary edges extracted from the cached polygon (for side-length rendering).
-    private var boundaryEdges: [(a: Vector3, b: Vector3)] = []
-
-    /// Angle markers for each vertex of the boundary.
-    /// isOrthogonal → draw square corner icon; otherwise → draw arc + angle text.
-    private var angleMarkers: [(vertex: Vector3, angleDeg: Double, isOrthogonal: Bool, labelText: String)] = []
-
     // MARK: - Init
 
     public init() {}
@@ -85,7 +97,7 @@ public final class MeasureGeomTool: FeatureCommand {
 
     public func start(engine: PhrostEngine, processor: CADCommandProcessor) {
         resetState()
-        processor.commandPrompt = "Measure [Q]uick | [D]istance | [A]rea — Tab to cycle, Esc to exit"
+        processor.commandPrompt = "MEASUREGEOM [Distance/Area/Quick/eXit] <Quick>:"
     }
 
     public func cancel(engine: PhrostEngine, processor: CADCommandProcessor) {
@@ -148,7 +160,7 @@ public final class MeasureGeomTool: FeatureCommand {
         case SDL_SCANCODE_Q:
             currentMode = .quick
             resetModeState()
-            processor.commandPrompt = "Quick Measure — orthogonal raycast + boundary active"
+            processor.commandPrompt = "Quick Measure — move between geometry, or touch a corner to show its angle"
             return .continue
 
         case SDL_SCANCODE_D:
@@ -199,7 +211,7 @@ public final class MeasureGeomTool: FeatureCommand {
     }
 
     // =====================================================================
-    // MARK: - Quick Measure (upgraded with boundary overlay)
+    // MARK: - Quick Measure
     // =====================================================================
 
     private func updateQuickMeasure(engine: PhrostEngine) {
@@ -213,14 +225,23 @@ public final class MeasureGeomTool: FeatureCommand {
 
         // Clear ephemeral state.
         for i in 0..<4 { quickMeasurements[i] = nil }
+        quickWidthSpan = nil
+        quickLengthSpan = nil
+        quickAngleSpan = nil
+        quickHitAngleSpans.removeAll(keepingCapacity: true)
+        quickRadiusSpan = nil
         activeLabels.removeAll(keepingCapacity: true)
-        boundaryEdges.removeAll(keepingCapacity: true)
-        angleMarkers.removeAll(keepingCapacity: true)
 
         // ----- Orthogonal rays (±X, ±Y) -----
-        let directions: [(dx: Double, dy: Double, label: String)] = [
-            ( 1,  0, "+X"), (-1,  0, "-X"), ( 0,  1, "+Y"), ( 0, -1, "-Y"),
+        let directions: [(dx: Double, dy: Double)] = [
+            ( 1,  0), (-1,  0), ( 0,  1), ( 0, -1),
         ]
+        let worldPerPixel = max(
+            vpW / max(1.0, Double(engine.windowWidth)),
+            vpH / max(1.0, Double(engine.windowHeight)))
+        let sameHitToleranceSq = pow(max(worldPerPixel * 3.0, 1e-8), 2.0)
+        var closestRadiusDistanceSq = Double.infinity
+
         for dirIdx in 0..<4 {
             let dir = directions[dirIdx]
             let rayDir = Vector3(x: dir.dx, y: dir.dy, z: 0)
@@ -230,24 +251,61 @@ public final class MeasureGeomTool: FeatureCommand {
 
             var closestHit: Vector3? = nil
             var closestDistSq = Double.infinity
+            var closestLinearHit: (hit: QuickLinearHit, distanceSq: Double)? = nil
+            var closestRadiusHit: (span: QuickRadiusSpan, distanceSq: Double)? = nil
             var hitCount = 0
 
             for handle in handles {
                 guard hitCount < 500 else { break }
                 guard let entity = engine.document.entity(for: handle) else { continue }
+                guard entity.dimensionMetadata == nil else { continue }
                 guard let layer = engine.document.layer(for: entity.layerID), layer.isVisible else { continue }
                 guard let geometry = engine.document.resolvedGeometry(for: entity) else { continue }
                 hitCount += 1
 
                 let transform = entity.transform
                 for prim in geometry {
+                    if let linearHit = intersectStraightPrimitive(
+                        prim,
+                        transform: transform,
+                        rayOrigin: cursor,
+                        rayDir: rayDir)
+                    {
+                        let dsq = squaredDistance(cursor, linearHit.hitPoint)
+                        if dsq > 1e-12,
+                           dsq < (closestLinearHit?.distanceSq ?? Double.infinity)
+                        {
+                            closestLinearHit = (linearHit, dsq)
+                        }
+                        if dsq > 1e-12, dsq < closestDistSq {
+                            closestDistSq = dsq
+                            closestHit = linearHit.hitPoint
+                        }
+                    }
+
+                    if let radiusHit = intersectRadiusPrimitive(
+                        prim,
+                        transform: transform,
+                        rayOrigin: cursor,
+                        rayDir: rayDir)
+                    {
+                        let hdx = radiusHit.hitPoint.x - cursor.x
+                        let hdy = radiusHit.hitPoint.y - cursor.y
+                        let dsq = (hdx * hdx) + (hdy * hdy)
+                        if dsq > 1e-12,
+                           dsq < (closestRadiusHit?.distanceSq ?? Double.infinity)
+                        {
+                            closestRadiusHit = (radiusHit, dsq)
+                        }
+                    }
+
                     if let hitPoint = intersectPrimitive(prim, transform: transform,
                                                           rayOrigin: cursor, rayDir: rayDir)
                     {
                         let hdx = hitPoint.x - cursor.x
                         let hdy = hitPoint.y - cursor.y
                         let dsq = (hdx * hdx) + (hdy * hdy)
-                        if dsq < closestDistSq {
+                        if dsq > 1e-12, dsq < closestDistSq {
                             closestDistSq = dsq
                             closestHit = hitPoint
                         }
@@ -257,82 +315,603 @@ public final class MeasureGeomTool: FeatureCommand {
 
             if let hit = closestHit {
                 quickMeasurements[dirIdx] = (cursor, hit)
-                let dist = sqrt(closestDistSq)
-                let mid = Vector3(x: (cursor.x + hit.x) / 2, y: (cursor.y + hit.y) / 2, z: 0)
-                activeLabels.append(("\(dir.label): \(formatDistanceShort(dist))", mid))
+            }
+
+            if let linearHit = closestLinearHit,
+               linearHit.distanceSq <= closestDistSq + sameHitToleranceSq,
+               let angleSpan = makeQuickHitAngleSpan(
+                    hit: linearHit.hit,
+                    rayDir: rayDir)
+            {
+                let duplicate = quickHitAngleSpans.contains {
+                    squaredDistance($0.vertex, angleSpan.vertex) <= sameHitToleranceSq
+                        && abs($0.angleDegrees - angleSpan.angleDegrees) <= 0.05
+                }
+                if !duplicate {
+                    quickHitAngleSpans.append(angleSpan)
+                }
+            }
+
+            if let radiusHit = closestRadiusHit,
+               radiusHit.distanceSq <= closestDistSq + sameHitToleranceSq,
+               radiusHit.distanceSq < closestRadiusDistanceSq
+            {
+                closestRadiusDistanceSq = radiusHit.distanceSq
+                quickRadiusSpan = radiusHit.span
             }
         }
 
-        // ----- Boundary detection (with spatial caching) -----
-        updateBoundaryOverlay(engine: engine, cursor: cursor)
-    }
-
-    /// Attempt boundary detection at the cursor, caching the result so subsequent
-    /// frames skip the expensive wall-following when the cursor hasn't left the room.
-    private func updateBoundaryOverlay(engine: PhrostEngine, cursor: Vector3) {
-        // 1. Point-in-polygon cache check.
-        if let cached = cachedBoundary, cached.count >= 3 {
-            if Self.pointInPolygon(point: cursor, polygon: cached) {
-                // Cursor is still inside the same room — reuse cached boundary.
-                buildBoundaryEdgesAndAngles(from: cached)
-                return
+        if let right = quickMeasurements[0], let left = quickMeasurements[1] {
+            let distance = abs(right.hit.x - left.hit.x)
+            if distance > 1e-9 {
+                quickWidthSpan = (start: left.hit, end: right.hit, distance: distance)
             }
-            // Cursor left the room — fall through to re-detect.
         }
 
-        // 2. Run boundary detector.
-        cachedBoundary = nil
-        if let polygon = CADBoundaryDetector.findEnclosingPolygon(
-            seedX: cursor.x, seedY: cursor.y, document: engine.document)
-        {
-            cachedBoundary = polygon
-            buildBoundaryEdgesAndAngles(from: polygon)
+        if let up = quickMeasurements[2], let down = quickMeasurements[3] {
+            let distance = abs(up.hit.y - down.hit.y)
+            if distance > 1e-9 {
+                quickLengthSpan = (start: down.hit, end: up.hit, distance: distance)
+            }
+        }
+
+        quickAngleSpan = findQuickAngle(engine: engine, cursor: cursor, viewport: vp)
+        if quickRadiusSpan != nil {
+            quickAngleSpan = nil
+        } else if quickAngleSpan != nil {
+            quickWidthSpan = nil
+            quickLengthSpan = nil
+            quickHitAngleSpans.removeAll(keepingCapacity: true)
         }
     }
 
-    /// Populate `boundaryEdges` and `angleMarkers` from a polygon, also pushing
-    /// side-length labels into `activeLabels`.
-    private func buildBoundaryEdgesAndAngles(from polygon: [Vector3]) {
-        let n = polygon.count
-        guard n >= 3 else { return }
+    private func findQuickAngle(
+        engine: PhrostEngine,
+        cursor: Vector3,
+        viewport: (minX: Double, minY: Double, maxX: Double, maxY: Double)
+    ) -> QuickAngleSpan? {
+        let viewWidth = max(1.0, Double(engine.windowWidth))
+        let viewHeight = max(1.0, Double(engine.windowHeight))
+        let worldPerPixel = max(
+            (viewport.maxX - viewport.minX) / viewWidth,
+            (viewport.maxY - viewport.minY) / viewHeight)
+        let hoverTolerance = max(worldPerPixel * 14.0, 1e-8)
+        let joinTolerance = max(worldPerPixel * 3.0, hoverTolerance * 0.18)
+        let searchTolerance = hoverTolerance * 1.5
 
-        // Side-length labels.
-        boundaryEdges.reserveCapacity(n)
-        for i in 0..<n {
-            let j = (i + 1) % n
-            let a = polygon[i]
-            let b = polygon[j]
-            boundaryEdges.append((a, b))
-            let mid = Vector3(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: 0)
-            let dist = a.distance(to: b)
-            activeLabels.append((formatDistanceShort(dist), mid))
+        let handles = engine.document.entityHandlesInWorldRect(
+            minX: cursor.x - searchTolerance,
+            minY: cursor.y - searchTolerance,
+            maxX: cursor.x + searchTolerance,
+            maxY: cursor.y + searchTolerance)
+            ?? engine.document.allEntities.map(\.handle)
+
+        var segments: [QuickLineSegment] = []
+        segments.reserveCapacity(64)
+
+        for handle in handles {
+            guard segments.count < 256 else { break }
+            guard let entity = engine.document.entity(for: handle) else { continue }
+            guard entity.dimensionMetadata == nil else { continue }
+            guard let layer = engine.document.layer(for: entity.layerID), layer.isVisible else { continue }
+            guard let geometry = engine.document.resolvedGeometry(for: entity) else { continue }
+
+            for primitive in geometry {
+                appendQuickAngleSegments(
+                    from: primitive,
+                    transform: entity.transform,
+                    cursor: cursor,
+                    tolerance: searchTolerance,
+                    to: &segments)
+                if segments.count >= 256 { break }
+            }
         }
 
-        // Interior angles.
-        angleMarkers.reserveCapacity(n)
-        for i in 0..<n {
-            let prev = polygon[(i - 1 + n) % n]
-            let curr = polygon[i]
-            let next = polygon[(i + 1) % n]
+        guard segments.count >= 2 else { return nil }
 
-            let u = Vector3(x: prev.x - curr.x, y: prev.y - curr.y, z: 0)
-            let v = Vector3(x: next.x - curr.x, y: next.y - curr.y, z: 0)
+        var candidateVertices: [Vector3] = []
+        candidateVertices.reserveCapacity(segments.count * 2)
+        let hoverSq = hoverTolerance * hoverTolerance
 
-            let uLen = u.magnitude
-            let vLen = v.magnitude
-            guard uLen > 1e-12, vLen > 1e-12 else { continue }
+        for segment in segments {
+            if squaredDistance(cursor, segment.start) <= hoverSq {
+                candidateVertices.append(segment.start)
+            }
+            if squaredDistance(cursor, segment.end) <= hoverSq {
+                candidateVertices.append(segment.end)
+            }
+        }
 
-            let uNorm = u / uLen
-            let vNorm = v / vLen
-            let dot = uNorm.x * vNorm.x + uNorm.y * vNorm.y
-            let clampedDot = max(-1.0, min(1.0, dot))
-            let angleRad = acos(clampedDot)
-            let angleDeg = angleRad * 180.0 / .pi
+        if segments.count <= 96 {
+            for firstIndex in 0..<(segments.count - 1) {
+                for secondIndex in (firstIndex + 1)..<segments.count {
+                    if let intersection = segmentIntersection(
+                        segments[firstIndex], segments[secondIndex]),
+                       squaredDistance(cursor, intersection) <= hoverSq
+                    {
+                        candidateVertices.append(intersection)
+                    }
+                }
+            }
+        }
 
-            let isOrtho = abs(dot) < Self.orthoEpsilon
-            let labelText = "\(String(format: "%.0f", angleDeg))°"
-            angleMarkers.append((vertex: curr, angleDeg: angleDeg,
-                                 isOrthogonal: isOrtho, labelText: labelText))
+        guard let vertex = candidateVertices.min(by: {
+            squaredDistance(cursor, $0) < squaredDistance(cursor, $1)
+        }) else { return nil }
+
+        var rays: [QuickIncidentRay] = []
+        let joinSq = joinTolerance * joinTolerance
+
+        for segment in segments {
+            let startDistanceSq = squaredDistance(vertex, segment.start)
+            let endDistanceSq = squaredDistance(vertex, segment.end)
+
+            if startDistanceSq <= joinSq {
+                appendIncidentRay(from: vertex, toward: segment.end, to: &rays)
+            } else if endDistanceSq <= joinSq {
+                appendIncidentRay(from: vertex, toward: segment.start, to: &rays)
+            } else if CADGeometryMath.pointToSegmentDistSq(
+                vertex, segment.start, segment.end) <= joinSq
+            {
+                appendIncidentRay(from: vertex, toward: segment.start, to: &rays)
+                appendIncidentRay(from: vertex, toward: segment.end, to: &rays)
+            }
+        }
+
+        guard rays.count >= 2 else { return nil }
+
+        let cursorVector = Vector3(
+            x: cursor.x - vertex.x,
+            y: cursor.y - vertex.y,
+            z: 0)
+        let cursorDistance = cursorVector.magnitude
+        let cursorAngle = atan2(cursorVector.y, cursorVector.x)
+        let minAngle = 1.0 * Double.pi / 180.0
+        let maxAngle = 179.0 * Double.pi / 180.0
+
+        var bestSpan: QuickAngleSpan? = nil
+        var bestScore = Double.infinity
+
+        for firstIndex in 0..<(rays.count - 1) {
+            for secondIndex in (firstIndex + 1)..<rays.count {
+                let first = rays[firstIndex]
+                let second = rays[secondIndex]
+                let dot = max(-1.0, min(1.0,
+                    first.direction.x * second.direction.x
+                    + first.direction.y * second.direction.y))
+                let angle = acos(dot)
+                guard angle >= minAngle, angle <= maxAngle else { continue }
+
+                let firstAngle = atan2(first.direction.y, first.direction.x)
+                let secondAngle = atan2(second.direction.y, second.direction.x)
+                let ccwSweep = normalizedPositiveAngle(secondAngle - firstAngle)
+                let startAngle: Double
+                let sweepAngle: Double
+
+                if ccwSweep <= Double.pi {
+                    startAngle = firstAngle
+                    sweepAngle = ccwSweep
+                } else {
+                    startAngle = secondAngle
+                    sweepAngle = (2.0 * Double.pi) - ccwSweep
+                }
+
+                let bisector = startAngle + sweepAngle * 0.5
+                let minRayLength = min(first.length, second.length)
+                let score: Double
+                if cursorDistance > joinTolerance * 0.25 {
+                    let angularOffset = abs(normalizedSignedAngle(cursorAngle - bisector))
+                    let insideWedge = angularOffset <= sweepAngle * 0.5 + 0.12
+                    score = (insideWedge ? 0.0 : 10.0)
+                        + angularOffset
+                        + 0.05 / max(minRayLength / hoverTolerance, 0.1)
+                } else {
+                    score = abs(sweepAngle - Double.pi * 0.5)
+                        + 0.05 / max(minRayLength / hoverTolerance, 0.1)
+                }
+
+                if score < bestScore {
+                    bestScore = score
+                    bestSpan = QuickAngleSpan(
+                        vertex: vertex,
+                        startAngle: startAngle,
+                        sweepAngle: sweepAngle,
+                        angleDegrees: sweepAngle * 180.0 / Double.pi)
+                }
+            }
+        }
+
+        return bestSpan
+    }
+
+    private func appendQuickAngleSegments(
+        from primitive: CADPrimitive,
+        transform: Transform3D,
+        cursor: Vector3,
+        tolerance: Double,
+        to segments: inout [QuickLineSegment]
+    ) {
+        func append(_ start: Vector3, _ end: Vector3) {
+            guard segments.count < 256 else { return }
+            let worldStart = transform.transformPoint(start)
+            let worldEnd = transform.transformPoint(end)
+            guard worldStart.distance(to: worldEnd) > 1e-9 else { return }
+            let toleranceSq = tolerance * tolerance
+            guard CADGeometryMath.pointToSegmentDistSq(
+                cursor, worldStart, worldEnd) <= toleranceSq
+            else { return }
+            segments.append(QuickLineSegment(start: worldStart, end: worldEnd))
+        }
+
+        switch primitive {
+        case .line(let start, let end, _):
+            append(start, end)
+
+        case .rect(let origin, let size, _), .fillRect(let origin, let size, _):
+            let corners = [
+                origin,
+                Vector3(x: origin.x + size.x, y: origin.y, z: origin.z),
+                Vector3(x: origin.x + size.x, y: origin.y + size.y, z: origin.z),
+                Vector3(x: origin.x, y: origin.y + size.y, z: origin.z),
+            ]
+            for index in 0..<4 {
+                append(corners[index], corners[(index + 1) % 4])
+            }
+
+        case .polygon(let points, _), .fillPolygon(let points, _):
+            guard points.count >= 2 else { return }
+            for index in 0..<points.count {
+                append(points[index], points[(index + 1) % points.count])
+            }
+
+        case .polyline(let path, _):
+            guard path.segmentCount > 0 else { return }
+            for index in 0..<path.segmentCount where abs(path.vertices[index].bulge) <= 1e-12 {
+                append(
+                    path.vertices[index].position,
+                    path.vertices[path.endVertexIndex(forSegment: index)].position)
+            }
+
+        case .fillComplexPolygon(let outer, _, _), .gradient(let outer, _, _, _, _, _):
+            guard outer.count >= 2 else { return }
+            for index in 0..<outer.count {
+                append(outer[index], outer[(index + 1) % outer.count])
+            }
+
+        default:
+            break
+        }
+    }
+
+    private func appendIncidentRay(
+        from vertex: Vector3,
+        toward point: Vector3,
+        to rays: inout [QuickIncidentRay]
+    ) {
+        let vector = Vector3(x: point.x - vertex.x, y: point.y - vertex.y, z: 0)
+        let length = vector.magnitude
+        guard length > 1e-9 else { return }
+        let direction = vector / length
+        let duplicateThreshold = cos(0.5 * Double.pi / 180.0)
+        if rays.contains(where: {
+            $0.direction.x * direction.x + $0.direction.y * direction.y > duplicateThreshold
+        }) {
+            return
+        }
+        rays.append(QuickIncidentRay(direction: direction, length: length))
+    }
+
+    private func segmentIntersection(
+        _ first: QuickLineSegment,
+        _ second: QuickLineSegment
+    ) -> Vector3? {
+        let rx = first.end.x - first.start.x
+        let ry = first.end.y - first.start.y
+        let sx = second.end.x - second.start.x
+        let sy = second.end.y - second.start.y
+        let denominator = rx * sy - ry * sx
+        guard abs(denominator) > 1e-12 else { return nil }
+
+        let qpx = second.start.x - first.start.x
+        let qpy = second.start.y - first.start.y
+        let t = (qpx * sy - qpy * sx) / denominator
+        let u = (qpx * ry - qpy * rx) / denominator
+        let epsilon = 1e-8
+        guard t >= -epsilon, t <= 1.0 + epsilon,
+              u >= -epsilon, u <= 1.0 + epsilon
+        else { return nil }
+
+        return Vector3(
+            x: first.start.x + t * rx,
+            y: first.start.y + t * ry,
+            z: 0)
+    }
+
+    private func squaredDistance(_ first: Vector3, _ second: Vector3) -> Double {
+        let dx = first.x - second.x
+        let dy = first.y - second.y
+        return dx * dx + dy * dy
+    }
+
+    private func normalizedPositiveAngle(_ angle: Double) -> Double {
+        let fullTurn = 2.0 * Double.pi
+        var result = angle.truncatingRemainder(dividingBy: fullTurn)
+        if result < 0 { result += fullTurn }
+        return result
+    }
+
+    private func normalizedSignedAngle(_ angle: Double) -> Double {
+        var result = normalizedPositiveAngle(angle)
+        if result > Double.pi { result -= 2.0 * Double.pi }
+        return result
+    }
+
+
+    private func intersectStraightPrimitive(
+        _ primitive: CADPrimitive,
+        transform: Transform3D,
+        rayOrigin: Vector3,
+        rayDir: Vector3
+    ) -> QuickLinearHit? {
+        var best: QuickLinearHit? = nil
+        var bestDistanceSq = Double.infinity
+
+        func considerWorld(_ start: Vector3, _ end: Vector3) {
+            guard start.distance(to: end) > 1e-9,
+                  let hitPoint = CADGeometryMath.intersectRayLine(
+                    rayOrigin: rayOrigin,
+                    rayDir: rayDir,
+                    lineP1: start,
+                    lineP2: end)
+            else { return }
+
+            let distanceSq = squaredDistance(rayOrigin, hitPoint)
+            guard distanceSq > 1e-12, distanceSq < bestDistanceSq else { return }
+            bestDistanceSq = distanceSq
+            best = QuickLinearHit(hitPoint: hitPoint, start: start, end: end)
+        }
+
+        func considerLocal(_ start: Vector3, _ end: Vector3) {
+            considerWorld(
+                transform.transformPoint(start),
+                transform.transformPoint(end))
+        }
+
+        switch primitive {
+        case .line(let start, let end, _):
+            considerLocal(start, end)
+
+        case .rect(let origin, let size, _), .fillRect(let origin, let size, _):
+            let corners = [
+                origin,
+                Vector3(x: origin.x + size.x, y: origin.y, z: origin.z),
+                Vector3(x: origin.x + size.x, y: origin.y + size.y, z: origin.z),
+                Vector3(x: origin.x, y: origin.y + size.y, z: origin.z),
+            ]
+            for index in 0..<4 {
+                considerLocal(corners[index], corners[(index + 1) % 4])
+            }
+
+        case .polygon(let points, _), .fillPolygon(let points, _):
+            guard points.count >= 2 else { return nil }
+            for index in 0..<points.count {
+                considerLocal(points[index], points[(index + 1) % points.count])
+            }
+
+        case .polyline(let path, _):
+            guard path.segmentCount > 0 else { return nil }
+            for index in 0..<path.segmentCount where abs(path.vertices[index].bulge) <= 1e-12 {
+                considerLocal(
+                    path.vertices[index].position,
+                    path.vertices[path.endVertexIndex(forSegment: index)].position)
+            }
+
+        case .fillComplexPolygon(let outer, _, _), .gradient(let outer, _, _, _, _, _):
+            guard outer.count >= 2 else { return nil }
+            for index in 0..<outer.count {
+                considerLocal(outer[index], outer[(index + 1) % outer.count])
+            }
+
+        default:
+            break
+        }
+
+        return best
+    }
+
+    private func makeQuickHitAngleSpan(
+        hit: QuickLinearHit,
+        rayDir: Vector3
+    ) -> QuickAngleSpan? {
+        let segmentVector = Vector3(
+            x: hit.end.x - hit.start.x,
+            y: hit.end.y - hit.start.y,
+            z: 0)
+        guard segmentVector.magnitude > 1e-9 else { return nil }
+
+        var wallAngle = normalizedPositiveAngle(
+            atan2(segmentVector.y, segmentVector.x))
+        if wallAngle >= Double.pi {
+            wallAngle -= Double.pi
+        }
+
+        let towardCursorAngle = atan2(-rayDir.y, -rayDir.x)
+        let ccwSweep = normalizedPositiveAngle(towardCursorAngle - wallAngle)
+        let startAngle: Double
+        let sweepAngle: Double
+
+        if ccwSweep <= Double.pi {
+            startAngle = wallAngle
+            sweepAngle = ccwSweep
+        } else {
+            startAngle = towardCursorAngle
+            sweepAngle = (2.0 * Double.pi) - ccwSweep
+        }
+
+        let angleDegrees = sweepAngle * 180.0 / Double.pi
+        let orthogonalTolerance = 0.75
+        guard angleDegrees > orthogonalTolerance,
+              angleDegrees < 180.0 - orthogonalTolerance,
+              abs(angleDegrees - 90.0) > orthogonalTolerance
+        else { return nil }
+
+        return QuickAngleSpan(
+            vertex: hit.hitPoint,
+            startAngle: startAngle,
+            sweepAngle: sweepAngle,
+            angleDegrees: angleDegrees)
+    }
+
+    private func intersectRadiusPrimitive(
+        _ primitive: CADPrimitive,
+        transform: Transform3D,
+        rayOrigin: Vector3,
+        rayDir: Vector3
+    ) -> QuickRadiusSpan? {
+        func worldArc(
+            center: Vector3,
+            radius: Double,
+            startAngle: Double,
+            sweep: Double
+        ) -> (center: Vector3, radius: Double, startAngle: Double, sweepAngle: Double)? {
+            let sx = abs(transform.scale.x)
+            let sy = abs(transform.scale.y)
+            let scale = max(sx, sy)
+            guard radius > 1e-9,
+                  scale > 1e-12,
+                  abs(sx - sy) <= scale * 1e-6
+            else { return nil }
+
+            let worldCenter = transform.transformPoint(center)
+            let localStart = Vector3(
+                x: center.x + cos(startAngle) * radius,
+                y: center.y + sin(startAngle) * radius,
+                z: center.z)
+            let localEnd = Vector3(
+                x: center.x + cos(startAngle + sweep) * radius,
+                y: center.y + sin(startAngle + sweep) * radius,
+                z: center.z)
+            let worldStart = transform.transformPoint(localStart)
+            let worldEnd = transform.transformPoint(localEnd)
+            let startWorldAngle = atan2(
+                worldStart.y - worldCenter.y,
+                worldStart.x - worldCenter.x)
+            let endWorldAngle = atan2(
+                worldEnd.y - worldCenter.y,
+                worldEnd.x - worldCenter.x)
+            let worldRadius = worldCenter.distance(to: worldStart)
+            let reversesOrientation = transform.scale.x * transform.scale.y < 0
+            let isPositive = (sweep >= 0) != reversesOrientation
+
+            if abs(abs(sweep) - 2.0 * Double.pi) <= 1e-7 {
+                return (worldCenter, worldRadius, startWorldAngle, 2.0 * Double.pi)
+            }
+
+            if isPositive {
+                return (
+                    worldCenter,
+                    worldRadius,
+                    startWorldAngle,
+                    normalizedPositiveAngle(endWorldAngle - startWorldAngle))
+            }
+
+            return (
+                worldCenter,
+                worldRadius,
+                endWorldAngle,
+                normalizedPositiveAngle(startWorldAngle - endWorldAngle))
+        }
+
+        func hit(
+            center: Vector3,
+            radius: Double,
+            startAngle: Double,
+            sweepAngle: Double
+        ) -> QuickRadiusSpan? {
+            let hitPoint: Vector3?
+            if sweepAngle >= 2.0 * Double.pi - 1e-7 {
+                hitPoint = CADGeometryMath.intersectRayCircle(
+                    rayOrigin: rayOrigin,
+                    rayDir: rayDir,
+                    circleCenter: center,
+                    radius: radius).first
+            } else {
+                hitPoint = CADGeometryMath.intersectRayArc(
+                    rayOrigin: rayOrigin,
+                    rayDir: rayDir,
+                    arcCenter: center,
+                    radius: radius,
+                    startAngle: startAngle,
+                    endAngle: startAngle + sweepAngle).first
+            }
+
+            guard let hitPoint else { return nil }
+            return QuickRadiusSpan(
+                center: center,
+                radius: radius,
+                startAngle: startAngle,
+                sweepAngle: sweepAngle,
+                hitPoint: hitPoint)
+        }
+
+        switch primitive {
+        case .arc(let center, let radius, let startAngle, let endAngle, _):
+            var sweep = normalizedPositiveAngle(endAngle - startAngle)
+            if sweep <= 1e-12 && abs(endAngle - startAngle) > 1e-12 {
+                sweep = 2.0 * Double.pi
+            }
+            guard let arc = worldArc(
+                center: center,
+                radius: radius,
+                startAngle: startAngle,
+                sweep: sweep)
+            else { return nil }
+            return hit(
+                center: arc.center,
+                radius: arc.radius,
+                startAngle: arc.startAngle,
+                sweepAngle: arc.sweepAngle)
+
+        case .circle(let center, let radius, _):
+            guard let arc = worldArc(
+                center: center,
+                radius: radius,
+                startAngle: 0,
+                sweep: 2.0 * Double.pi)
+            else { return nil }
+            return hit(
+                center: arc.center,
+                radius: arc.radius,
+                startAngle: arc.startAngle,
+                sweepAngle: arc.sweepAngle)
+
+        case .polyline(let path, _):
+            var best: QuickRadiusSpan? = nil
+            var bestDistanceSq = Double.infinity
+            for segmentIndex in 0..<path.segmentCount {
+                guard let localArc = path.arcParameters(forSegment: segmentIndex),
+                      let arc = worldArc(
+                        center: localArc.center,
+                        radius: localArc.radius,
+                        startAngle: localArc.startAngle,
+                        sweep: localArc.sweep),
+                      let candidate = hit(
+                        center: arc.center,
+                        radius: arc.radius,
+                        startAngle: arc.startAngle,
+                        sweepAngle: arc.sweepAngle)
+                else { continue }
+
+                let distanceSq = squaredDistance(rayOrigin, candidate.hitPoint)
+                if distanceSq < bestDistanceSq {
+                    bestDistanceSq = distanceSq
+                    best = candidate
+                }
+            }
+            return best
+
+        default:
+            return nil
         }
     }
 
@@ -549,114 +1128,249 @@ public final class MeasureGeomTool: FeatureCommand {
     // =====================================================================
 
     private func renderQuickOverlay(drawList: UnsafeMutablePointer<ImDrawList>?, cam: CameraTransform) {
-        let rayColor = ImGui_Color(0, 255, 200, 160)
-        let dimLineColor = ImGui_Color(255, 200, 100, 100)
-
-        // Crosshair.
-        let cs = EngineCameraManager.worldToScreen(
-            worldX: currentMouseWorldX, worldY: currentMouseWorldY, cam: cam)
-        let sz: Float = 8
-        ImDrawListAddLine(drawList, ImVec2(x: cs.x - sz, y: cs.y), ImVec2(x: cs.x + sz, y: cs.y), rayColor, 1.0)
-        ImDrawListAddLine(drawList, ImVec2(x: cs.x, y: cs.y - sz), ImVec2(x: cs.x, y: cs.y + sz), rayColor, 1.0)
-
-        // Orthogonal rays.
-        for i in 0..<4 {
-            guard let m = quickMeasurements[i] else { continue }
-            let so = EngineCameraManager.worldToScreen(worldX: m.origin.x, worldY: m.origin.y, cam: cam)
-            let sh = EngineCameraManager.worldToScreen(worldX: m.hit.x, worldY: m.hit.y, cam: cam)
-            ImDrawListAddLine(drawList, ImVec2(x: so.x, y: so.y), ImVec2(x: sh.x, y: sh.y), dimLineColor, 1.5)
+        if let span = quickRadiusSpan {
+            drawQuickRadius(drawList: drawList, span: span, cam: cam)
         }
 
-        // Boundary overlay (edges + angle markers).
-        renderBoundaryOverlay(drawList: drawList, cam: cam)
-    }
-
-    /// Render the cached/closest boundary: solid edges, orthogonal square icons,
-    /// and non-orthogonal angle arcs.
-    private func renderBoundaryOverlay(drawList: UnsafeMutablePointer<ImDrawList>?, cam: CameraTransform) {
-        let edgeColor = ImGui_Color(0, 180, 255, 220)
-        let orthoColor = ImGui_Color(100, 255, 150, 220)
-        let arcColor = ImGui_Color(255, 180, 60, 200)
-
-        // Solid boundary edges.
-        for edge in boundaryEdges {
-            let s1 = EngineCameraManager.worldToScreen(worldX: edge.a.x, worldY: edge.a.y, cam: cam)
-            let s2 = EngineCameraManager.worldToScreen(worldX: edge.b.x, worldY: edge.b.y, cam: cam)
-            ImDrawListAddLine(drawList, ImVec2(x: s1.x, y: s1.y), ImVec2(x: s2.x, y: s2.y), edgeColor, 2.0)
+        if let span = quickAngleSpan {
+            drawQuickAngle(drawList: drawList, span: span, cam: cam)
+            return
         }
 
-        // Angle markers.
-        for marker in angleMarkers {
-            if marker.isOrthogonal {
-                drawOrthoIcon(drawList: drawList, vertex: marker.vertex, cam: cam, color: orthoColor)
-            } else {
-                drawAngleArc(drawList: drawList, vertex: marker.vertex,
-                             angleDeg: marker.angleDeg, cam: cam, color: arcColor)
-            }
+        if let span = quickWidthSpan {
+            drawQuickDimension(
+                drawList: drawList,
+                start: span.start,
+                end: span.end,
+                distance: span.distance,
+                horizontal: true,
+                cam: cam)
+        }
+
+        if let span = quickLengthSpan {
+            drawQuickDimension(
+                drawList: drawList,
+                start: span.start,
+                end: span.end,
+                distance: span.distance,
+                horizontal: false,
+                cam: cam)
+        }
+
+        for span in quickHitAngleSpans {
+            drawQuickAngle(drawList: drawList, span: span, cam: cam)
         }
     }
 
-    /// Draw a 3-segment square icon at a right-angle corner.
-    /// The icon is sized by `orthoIconSize` in world units (converted to screen pixels).
-    private func drawOrthoIcon(
-        drawList: UnsafeMutablePointer<ImDrawList>?, vertex: Vector3,
-        cam: CameraTransform, color: UInt32
+    private func drawQuickRadius(
+        drawList: UnsafeMutablePointer<ImDrawList>?,
+        span: QuickRadiusSpan,
+        cam: CameraTransform
     ) {
-        let sv = EngineCameraManager.worldToScreen(worldX: vertex.x, worldY: vertex.y, cam: cam)
-        let sw = EngineCameraManager.worldToScreen(
-            worldX: vertex.x + Self.orthoIconSize, worldY: vertex.y, cam: cam)
-        let screenSize = sw.x - sv.x
-        let s = screenSize > 0 ? screenSize : Float(Self.orthoIconSize * cam.camZoom)
+        let lineColor = ImGui_Color(255, 190, 60, 235)
+        let textColor = ImGui_Color(255, 255, 255, 245)
+        let bgColor = ImGui_Color(0, 0, 0, 210)
+        let safeZoom = max(cam.camZoom, 1e-9)
+        let segmentCount = min(
+            256,
+            max(16, Int(ceil(span.sweepAngle * span.radius * safeZoom / 8.0))))
 
-        // The square icon traces: right → up → left (3 segments forming └ shape).
-        let x = sv.x; let y = sv.y
-        let p0 = ImVec2(x: x + s, y: y)
-        let p1 = ImVec2(x: x + s, y: y - s)
-        let p2 = ImVec2(x: x, y: y - s)
+        func screenPoint(angle: Double, radius: Double) -> ImVec2 {
+            let worldX = span.center.x + cos(angle) * radius
+            let worldY = span.center.y + sin(angle) * radius
+            let screen = EngineCameraManager.worldToScreen(
+                worldX: worldX,
+                worldY: worldY,
+                cam: cam)
+            return ImVec2(x: screen.x, y: screen.y)
+        }
 
-        ImDrawListAddLine(drawList, ImVec2(x: x, y: y), p0, color, 1.5)
-        ImDrawListAddLine(drawList, p0, p1, color, 1.5)
-        ImDrawListAddLine(drawList, p1, p2, color, 1.5)
+        var previous = screenPoint(angle: span.startAngle, radius: span.radius)
+        for index in 1...segmentCount {
+            let fraction = Double(index) / Double(segmentCount)
+            let current = screenPoint(
+                angle: span.startAngle + span.sweepAngle * fraction,
+                radius: span.radius)
+            ImDrawListAddLine(drawList, previous, current, lineColor, 2.0)
+            previous = current
+        }
+
+        let hitAngle = atan2(
+            span.hitPoint.y - span.center.y,
+            span.hitPoint.x - span.center.x)
+        let leaderStart = screenPoint(angle: hitAngle, radius: span.radius * 0.98)
+        let leaderEnd = screenPoint(angle: hitAngle, radius: span.radius * 0.56)
+        let dx = leaderEnd.x - leaderStart.x
+        let dy = leaderEnd.y - leaderStart.y
+        let leaderLength = max(1.0, hypot(dx, dy))
+        let dash: Float = 4.0
+        let gap: Float = 4.0
+        var distance: Float = 0
+        while distance < leaderLength {
+            let endDistance = min(distance + dash, leaderLength)
+            let startFraction = distance / leaderLength
+            let endFraction = endDistance / leaderLength
+            ImDrawListAddLine(
+                drawList,
+                ImVec2(
+                    x: leaderStart.x + dx * startFraction,
+                    y: leaderStart.y + dy * startFraction),
+                ImVec2(
+                    x: leaderStart.x + dx * endFraction,
+                    y: leaderStart.y + dy * endFraction),
+                lineColor,
+                1.5)
+            distance += dash + gap
+        }
+
+        let text = formatDistanceShort(span.radius)
+        let textSize = ImGuiCalcTextSize(text, nil, false, -1)
+        let labelPoint = screenPoint(angle: hitAngle, radius: span.radius * 0.42)
+        let textPos = ImVec2(
+            x: labelPoint.x - textSize.x * 0.5,
+            y: labelPoint.y - textSize.y * 0.5)
+        let padX: Float = 4.0
+        let padY: Float = 3.0
+        ImDrawListAddRectFilled(
+            drawList,
+            ImVec2(x: textPos.x - padX, y: textPos.y - padY),
+            ImVec2(x: textPos.x + textSize.x + padX, y: textPos.y + textSize.y + padY),
+            bgColor,
+            3.0,
+            0)
+        ImDrawListAddText(drawList, textPos, textColor, text, nil)
     }
 
-    /// Draw a small arc representing a non-orthogonal interior angle, approximated
-    /// with `arcSegments` line segments, plus the angle text label.
-    private func drawAngleArc(
-        drawList: UnsafeMutablePointer<ImDrawList>?, vertex: Vector3,
-        angleDeg: Double, cam: CameraTransform, color: UInt32
+    private func drawQuickAngle(
+        drawList: UnsafeMutablePointer<ImDrawList>?,
+        span: QuickAngleSpan,
+        cam: CameraTransform
     ) {
-        let arcRadius: Double = Self.orthoIconSize * 1.2
-        let segs = Self.arcSegments
+        let lineColor = ImGui_Color(255, 190, 60, 235)
+        let textColor = ImGui_Color(255, 255, 255, 245)
+        let bgColor = ImGui_Color(0, 0, 0, 210)
+        let safeZoom = max(cam.camZoom, 1e-9)
+        let radius = 34.0 / safeZoom
+        let rayLength = 48.0 / safeZoom
+        let segmentCount = max(12, Int(ceil(span.sweepAngle * 18.0 / Double.pi)))
 
-        // Draw a symmetric arc centered on the angle bisector: from -halfAngle to +halfAngle.
-        let halfAngle = angleDeg / 2.0 * .pi / 180.0
+        let vertexScreen = EngineCameraManager.worldToScreen(
+            worldX: span.vertex.x, worldY: span.vertex.y, cam: cam)
 
-        // Build world-space arc points relative to the vertex.
-        var worldPts: [ImVec2] = []
-        worldPts.reserveCapacity(segs + 2)
-        for i in 0...segs {
-            let t = -halfAngle + 2.0 * halfAngle * Double(i) / Double(segs)
-            let wx = vertex.x + arcRadius * cos(t)
-            let wy = vertex.y + arcRadius * sin(t)
-            let sp = EngineCameraManager.worldToScreen(worldX: wx, worldY: wy, cam: cam)
-            worldPts.append(ImVec2(x: sp.x, y: sp.y))
+        func point(angle: Double, distance: Double) -> ImVec2 {
+            let worldX = span.vertex.x + cos(angle) * distance
+            let worldY = span.vertex.y + sin(angle) * distance
+            let screen = EngineCameraManager.worldToScreen(
+                worldX: worldX, worldY: worldY, cam: cam)
+            return ImVec2(x: screen.x, y: screen.y)
         }
 
-        // Draw arc as a polyline.
-        for i in 0..<(worldPts.count - 1) {
-            ImDrawListAddLine(drawList, worldPts[i], worldPts[i + 1], color, 1.5)
+        let startRay = point(angle: span.startAngle, distance: rayLength)
+        let endRay = point(angle: span.startAngle + span.sweepAngle, distance: rayLength)
+        let vertex = ImVec2(x: vertexScreen.x, y: vertexScreen.y)
+        ImDrawListAddLine(drawList, vertex, startRay, lineColor, 1.5)
+        ImDrawListAddLine(drawList, vertex, endRay, lineColor, 1.5)
+
+        var previous = point(angle: span.startAngle, distance: radius)
+        for index in 1...segmentCount {
+            let fraction = Double(index) / Double(segmentCount)
+            let current = point(
+                angle: span.startAngle + span.sweepAngle * fraction,
+                distance: radius)
+            ImDrawListAddLine(drawList, previous, current, lineColor, 1.5)
+            previous = current
         }
 
-        // Place angle text near the arc midpoint (along the bisector).
-        let labelRadius = arcRadius * 1.6
-        let lx = vertex.x + labelRadius
-        let ly = vertex.y
-        let lsp = EngineCameraManager.worldToScreen(worldX: lx, worldY: ly, cam: cam)
-        let angleText = "\(Int(round(angleDeg)))°"
-        let textSize = ImGuiCalcTextSize(angleText, nil, false, -1)
-        ImDrawListAddText(drawList,
-            ImVec2(x: lsp.x - textSize.x / 2, y: lsp.y - textSize.y / 2),
-            color, angleText, nil)
+        let tickPixels = 5.0
+        for angle in [span.startAngle, span.startAngle + span.sweepAngle] {
+            let arcPoint = point(angle: angle, distance: radius)
+            let tangentAngle = angle + Double.pi * 0.5
+            let tangentX = Float(cos(tangentAngle) * tickPixels)
+            let tangentY = Float(sin(tangentAngle) * tickPixels)
+            ImDrawListAddLine(
+                drawList,
+                ImVec2(x: arcPoint.x - tangentX, y: arcPoint.y - tangentY),
+                ImVec2(x: arcPoint.x + tangentX, y: arcPoint.y + tangentY),
+                lineColor, 1.5)
+        }
+
+        let text = formatAngle(span.angleDegrees)
+        let textSize = ImGuiCalcTextSize(text, nil, false, -1)
+        let labelPoint = point(
+            angle: span.startAngle + span.sweepAngle * 0.5,
+            distance: radius + 17.0 / safeZoom)
+        let textPos = ImVec2(
+            x: labelPoint.x - textSize.x * 0.5,
+            y: labelPoint.y - textSize.y * 0.5)
+        let padX: Float = 4.0
+        let padY: Float = 3.0
+        ImDrawListAddRectFilled(
+            drawList,
+            ImVec2(x: textPos.x - padX, y: textPos.y - padY),
+            ImVec2(x: textPos.x + textSize.x + padX, y: textPos.y + textSize.y + padY),
+            bgColor, 3.0, 0)
+        ImDrawListAddText(drawList, textPos, textColor, text, nil)
+    }
+
+    private func drawQuickDimension(
+        drawList: UnsafeMutablePointer<ImDrawList>?,
+        start: Vector3,
+        end: Vector3,
+        distance: Double,
+        horizontal: Bool,
+        cam: CameraTransform
+    ) {
+        let lineColor = ImGui_Color(255, 190, 60, 235)
+        let textColor = ImGui_Color(255, 255, 255, 245)
+        let bgColor = ImGui_Color(0, 0, 0, 210)
+        let s1 = EngineCameraManager.worldToScreen(worldX: start.x, worldY: start.y, cam: cam)
+        let s2 = EngineCameraManager.worldToScreen(worldX: end.x, worldY: end.y, cam: cam)
+        let p1 = ImVec2(x: s1.x, y: s1.y)
+        let p2 = ImVec2(x: s2.x, y: s2.y)
+        let tick: Float = 6.0
+
+        ImDrawListAddLine(drawList, p1, p2, lineColor, 1.5)
+        if horizontal {
+            ImDrawListAddLine(
+                drawList,
+                ImVec2(x: p1.x, y: p1.y - tick),
+                ImVec2(x: p1.x, y: p1.y + tick),
+                lineColor, 1.5)
+            ImDrawListAddLine(
+                drawList,
+                ImVec2(x: p2.x, y: p2.y - tick),
+                ImVec2(x: p2.x, y: p2.y + tick),
+                lineColor, 1.5)
+        } else {
+            ImDrawListAddLine(
+                drawList,
+                ImVec2(x: p1.x - tick, y: p1.y),
+                ImVec2(x: p1.x + tick, y: p1.y),
+                lineColor, 1.5)
+            ImDrawListAddLine(
+                drawList,
+                ImVec2(x: p2.x - tick, y: p2.y),
+                ImVec2(x: p2.x + tick, y: p2.y),
+                lineColor, 1.5)
+        }
+
+        let text = formatDistanceShort(distance)
+        let textSize = ImGuiCalcTextSize(text, nil, false, -1)
+        let center = ImVec2(x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5)
+        let textPos: ImVec2
+        if horizontal {
+            textPos = ImVec2(x: center.x - textSize.x * 0.5, y: center.y - textSize.y - 7.0)
+        } else {
+            textPos = ImVec2(x: center.x + 8.0, y: center.y - textSize.y * 0.5)
+        }
+        let padX: Float = 4.0
+        let padY: Float = 3.0
+        ImDrawListAddRectFilled(
+            drawList,
+            ImVec2(x: textPos.x - padX, y: textPos.y - padY),
+            ImVec2(x: textPos.x + textSize.x + padX, y: textPos.y + textSize.y + padY),
+            bgColor, 3.0, 0)
+        ImDrawListAddText(drawList, textPos, textColor, text, nil)
     }
 
     private func renderDistanceOverlay(drawList: UnsafeMutablePointer<ImDrawList>?, cam: CameraTransform) {
@@ -722,32 +1436,6 @@ public final class MeasureGeomTool: FeatureCommand {
     }
 
     // =====================================================================
-    // MARK: - Geometry Helpers
-    // =====================================================================
-
-    /// Point-in-polygon test using the ray-casting (even-odd rule) algorithm.
-    /// Casts a ray to the right (+X) and counts polygon edge crossings.
-    private static func pointInPolygon(point: Vector3, polygon: [Vector3]) -> Bool {
-        let n = polygon.count
-        guard n >= 3 else { return false }
-        var inside = false
-        var j = n - 1
-        let px = point.x, py = point.y
-        for i in 0..<n {
-            let yi = polygon[i].y, yj = polygon[j].y
-            let xi = polygon[i].x, xj = polygon[j].x
-            if (yi > py) != (yj > py) {
-                let xIntersect = xj + (py - yj) / (yi - yj) * (xi - xj)
-                if px < xIntersect {
-                    inside.toggle()
-                }
-            }
-            j = i
-        }
-        return inside
-    }
-
-    // =====================================================================
     // MARK: - Helpers
     // =====================================================================
 
@@ -756,7 +1444,7 @@ public final class MeasureGeomTool: FeatureCommand {
         case .quick:  currentMode = .distance; processor.commandPrompt = "Distance — click first point"
         case .distance: currentMode = .area; processor.commandPrompt = "Area — click inside enclosed region"
         case .area:   currentMode = .angle;   processor.commandPrompt = "Angle — not yet implemented"
-        case .angle:  currentMode = .quick;   processor.commandPrompt = "Quick Measure — orthogonal raycast + boundary active"
+        case .angle:  currentMode = .quick;   processor.commandPrompt = "Quick Measure — move between geometry, or touch a corner to show its angle"
         }
         resetModeState()
     }
@@ -768,20 +1456,30 @@ public final class MeasureGeomTool: FeatureCommand {
 
     private func resetModeState() {
         for i in 0..<4 { quickMeasurements[i] = nil }
+        quickWidthSpan = nil
+        quickLengthSpan = nil
+        quickAngleSpan = nil
+        quickHitAngleSpans.removeAll(keepingCapacity: true)
+        quickRadiusSpan = nil
         distancePointA = nil
         distancePointB = nil
         areaBoundary = nil
         areaLabel = nil
         areaLabelPosition = nil
         activeLabels.removeAll()
-        cachedBoundary = nil
-        boundaryEdges.removeAll()
-        angleMarkers.removeAll()
     }
 
     private func formatDistance(_ distSq: Double) -> (String, Double) {
         let dist = sqrt(distSq)
         return (formatDistanceShort(dist), dist)
+    }
+
+    private func formatAngle(_ angle: Double) -> String {
+        let rounded = angle.rounded()
+        if abs(angle - rounded) < 0.01 {
+            return String(format: "%.0f°", rounded)
+        }
+        return String(format: "%.2f°", angle)
     }
 
     private func formatDistanceShort(_ dist: Double) -> String {
