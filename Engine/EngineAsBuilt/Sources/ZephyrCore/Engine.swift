@@ -16,6 +16,175 @@ import SwiftSDL_ttf
     import Darwin
 #endif
 
+// --- UI Font Language Profiles ---
+public enum UIFontLanguageProfile: String, CaseIterable, Sendable {
+    case standard = "STANDARD"
+    case japanese = "JAPANESE"
+    case korean = "KOREAN"
+    case chinese = "CHINESE"
+    case arabic = "ARABIC"
+    case hebrew = "HEBREW"
+    case thai = "THAI"
+    case devanagari = "DEVANAGARI"
+
+    public static func parse(_ raw: String) -> UIFontLanguageProfile? {
+        let normalized = raw
+            .uppercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+
+        switch normalized {
+        case "STANDARD", "DEFAULT", "LATIN", "ENGLISH", "WESTERN", "EN":
+            return .standard
+        case "JAPANESE", "JAPAN", "JA", "JP":
+            return .japanese
+        case "KOREAN", "KOREA", "KO", "KR":
+            return .korean
+        case "CHINESE", "CHINESE_SIMPLIFIED", "SIMPLIFIED_CHINESE", "ZH", "ZH_CN", "CN":
+            return .chinese
+        case "ARABIC", "AR":
+            return .arabic
+        case "HEBREW", "HE", "IW":
+            return .hebrew
+        case "THAI", "TH":
+            return .thai
+        case "DEVANAGARI", "HINDI", "HI":
+            return .devanagari
+        default:
+            return nil
+        }
+    }
+
+    internal var additionalGlyphRanges: [ImWchar] {
+        switch self {
+        case .standard:
+            return []
+        case .japanese:
+            return [
+                0x3000, 0x303F,
+                0x3040, 0x309F,
+                0x30A0, 0x30FF,
+                0x31F0, 0x31FF,
+                0x4E00, 0x9FFF,
+            ]
+        case .korean:
+            return [
+                0x1100, 0x11FF,
+                0x3130, 0x318F,
+                0xA960, 0xA97F,
+                0xAC00, 0xD7AF,
+                0xD7B0, 0xD7FF,
+            ]
+        case .chinese:
+            return [
+                0x2E80, 0x2FFF,
+                0x3000, 0x303F,
+                0x3400, 0x4DBF,
+                0x4E00, 0x9FFF,
+                0xF900, 0xFAFF,
+            ]
+        case .arabic:
+            return [
+                0x0600, 0x06FF,
+                0x0750, 0x077F,
+                0x08A0, 0x08FF,
+                0xFB50, 0xFDFF,
+                0xFE70, 0xFEFF,
+            ]
+        case .hebrew:
+            return [
+                0x0590, 0x05FF,
+                0xFB1D, 0xFB4F,
+            ]
+        case .thai:
+            return [
+                0x0E00, 0x0E7F,
+            ]
+        case .devanagari:
+            return [
+                0x0900, 0x097F,
+                0xA8E0, 0xA8FF,
+            ]
+        }
+    }
+
+    internal var fallbackFontPaths: [String] {
+        let general = [
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "C:\\Windows\\Fonts\\ARIALUNI.TTF",
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        ]
+
+        switch self {
+        case .standard:
+            return general
+        case .japanese:
+            return [
+                "C:\\Windows\\Fonts\\YuGothR.ttc",
+                "C:\\Windows\\Fonts\\meiryo.ttc",
+                "C:\\Windows\\Fonts\\msgothic.ttc",
+                "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+                "/System/Library/Fonts/ヒラギノ丸ゴ ProN W4.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            ] + general
+        case .korean:
+            return [
+                "C:\\Windows\\Fonts\\malgun.ttf",
+                "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
+            ] + general
+        case .chinese:
+            return [
+                "C:\\Windows\\Fonts\\msyh.ttc",
+                "C:\\Windows\\Fonts\\simsun.ttc",
+                "/System/Library/Fonts/PingFang.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            ] + general
+        case .arabic:
+            return [
+                "C:\\Windows\\Fonts\\segoeui.ttf",
+                "C:\\Windows\\Fonts\\arial.ttf",
+                "C:\\Windows\\Fonts\\Nirmala.ttf",
+                "/System/Library/Fonts/GeezaPro.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ] + general
+        case .hebrew:
+            return [
+                "C:\\Windows\\Fonts\\arial.ttf",
+                "C:\\Windows\\Fonts\\segoeui.ttf",
+                "/System/Library/Fonts/ArialHB.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ] + general
+        case .thai:
+            return [
+                "C:\\Windows\\Fonts\\leelawui.ttf",
+                "C:\\Windows\\Fonts\\tahoma.ttf",
+                "/System/Library/Fonts/Thonburi.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+            ] + general
+        case .devanagari:
+            return [
+                "C:\\Windows\\Fonts\\Nirmala.ttf",
+                "/System/Library/Fonts/Kohinoor.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+            ] + general
+        }
+    }
+}
+
 // --- Core Engine ---
 @MainActor
 public final class PhrostEngine {
@@ -54,6 +223,8 @@ public final class PhrostEngine {
     internal var height: Int32 = 0
     internal var bytesPerPixel: Int32 = 0
     internal var fontTexture: OpaquePointer?
+    internal var uiGlyphRangesStorage: UnsafeMutablePointer<ImWchar>?
+    internal var uiGlyphRangesStorageCount: Int = 0
 
     // MARK: State
     internal var running = true
@@ -72,6 +243,13 @@ public final class PhrostEngine {
     /// Set via SETUISCALE command. 1.0 = 100%, 1.5 = 150%, etc.
     /// Setting to 0 or "auto" reverts to system-derived scale.
     public var uiScaleOverride: Float? = nil
+    public private(set) var uiFontLanguageProfile: UIFontLanguageProfile = {
+        guard let saved = UserDefaults.standard.string(forKey: "Zephyr.UIFontLanguageProfile"),
+              let profile = UIFontLanguageProfile(rawValue: saved) else {
+            return .standard
+        }
+        return profile
+    }()
     /// Deferred rebuild flag — set by applyUiScaleOverride when called during a frame.
     /// The render loop checks this before ImGuiNewFrame() and performs the rebuild
     /// while the font atlas is unlocked.
@@ -497,6 +675,10 @@ public final class PhrostEngine {
     deinit {
         MainActor.assumeIsolated {
             renderer.performCleanup()
+            uiGlyphRangesStorage?.deinitialize(count: uiGlyphRangesStorageCount)
+            uiGlyphRangesStorage?.deallocate()
+            uiGlyphRangesStorage = nil
+            uiGlyphRangesStorageCount = 0
         }
     }
 
@@ -596,46 +778,61 @@ public final class PhrostEngine {
             self.fontTexture = nil
         }
         
-        // Clear existing fonts in atlas
         ImFontAtlas_Clear(atlas)
-        
-        // imgui 1.92.x: Build font atlas with CJK support.
+
+        ui.boldFont = nil
+        ui.smallFont = nil
+        ui.monoFont = nil
+        ui.largeFont = nil
+        ui.titleFont = nil
+        ui.commandTitleFont = nil
+        ui.commandPillFont = nil
+        ui.commandDescriptionFont = nil
+
+        uiGlyphRangesStorage?.deinitialize(count: uiGlyphRangesStorageCount)
+        uiGlyphRangesStorage?.deallocate()
+        uiGlyphRangesStorage = nil
+        uiGlyphRangesStorageCount = 0
+
         igImFontAtlasBuildInit(atlas)
 
-        // Build glyph ranges: Basic Latin + Latin-1 Supplement + common
-        // symbols needed for a CAD UI (arrows, math, box drawing, shapes).
-        // Full CJK ranges (thousands of glyphs × 9 font sizes) overflow
-        // the font atlas, so we omit Hiragana/Katakana/Hangul/CJK.
-        // Qt/ICU-based text shaping for CAD entities is handled separately
-        // by CADFormattedText; this atlas only serves the ImGui UI.
         let rangesBuilder = ImFontGlyphRangesBuilder_ImFontGlyphRangesBuilder()!
         defer { ImFontGlyphRangesBuilder_destroy(rangesBuilder) }
 
-        // Pairs of (start, end) ImWchar codepoints, 0-terminated.
-        // ~1000 glyphs total — fits comfortably at 8192² even with 9 sizes.
-        let glyphRanges: [ImWchar] = [
-            0x0020, 0x00FF,   // Basic Latin + Latin-1 Supplement
-            0x0370, 0x03FF,   // Greek and Coptic
-            0x0400, 0x04FF,   // Cyrillic
-            0x2000, 0x206F,   // General Punctuation
-            0x2100, 0x214F,   // Letterlike Symbols
-            0x2190, 0x21FF,   // Arrows
-            0x2200, 0x22FF,   // Mathematical Operators
-            0x2500, 0x257F,   // Box Drawing
-            0x2580, 0x259F,   // Block Elements
-            0x25A0, 0x25FF,   // Geometric Shapes
-            0x2600, 0x26FF,   // Misc Symbols
-            0xFF00, 0xFFEF,   // Halfwidth and Fullwidth Forms
-            0,                // Terminator
+        var glyphRanges: [ImWchar] = [
+            0x0020, 0x00FF,
+            0x0370, 0x03FF,
+            0x0400, 0x04FF,
+            0x2000, 0x206F,
+            0x2100, 0x214F,
+            0x2190, 0x21FF,
+            0x2200, 0x22FF,
+            0x2500, 0x257F,
+            0x2580, 0x259F,
+            0x25A0, 0x25FF,
+            0x2600, 0x26FF,
+            0xFF00, 0xFFEF,
         ]
+        glyphRanges.append(contentsOf: uiFontLanguageProfile.additionalGlyphRanges)
+        glyphRanges.append(0)
+
         glyphRanges.withUnsafeBufferPointer { ptr in
             ImFontGlyphRangesBuilder_AddRanges(rangesBuilder, ptr.baseAddress!)
         }
 
-        // Build the ranges vector
         var outRanges = ImVector_ImWchar()
         ImFontGlyphRangesBuilder_BuildRanges(rangesBuilder, &outRanges)
-        let glyphRangesPtr = outRanges.Data  // ImWchar* to use with AddFontFromFileTTF
+        guard outRanges.Size > 0, let builtRanges = outRanges.Data else {
+            print("Warning: Failed to build UI glyph ranges for \(uiFontLanguageProfile.rawValue).")
+            return
+        }
+
+        let rangeCount = Int(outRanges.Size)
+        let persistentRanges = UnsafeMutablePointer<ImWchar>.allocate(capacity: rangeCount)
+        persistentRanges.initialize(from: builtRanges, count: rangeCount)
+        uiGlyphRangesStorage = persistentRanges
+        uiGlyphRangesStorageCount = rangeCount
+        let glyphRangesPtr = UnsafePointer(persistentRanges)
 
         let exePath = Bundle.main.executableURL?.deletingLastPathComponent().path ?? FileManager.default.currentDirectoryPath
         let fontsDir = exePath + "/Fonts"
@@ -648,121 +845,67 @@ public final class PhrostEngine {
         let geistMedium = fontsDir + "/Geist-Medium.ttf"
         let geistLarge = fontsDir + "/Geist-Medium.ttf"
 
-        let dpi = dpiScale   // physical display pixel density; fonts rasterized at this resolution
+        let dpi = dpiScale
+        let fallbackFontPath = uiFontLanguageProfile.fallbackFontPaths.first {
+            FileManager.default.fileExists(atPath: $0)
+        }
         var loadedFont = false
+        var mergedFallback = false
 
-        if FileManager.default.fileExists(atPath: geistReg) {
-            let fontConfigPtr = ImFontConfig_ImFontConfig()!
-            fontConfigPtr.pointee.RasterizerDensity = dpi
-            _ = ImFontAtlas_AddFontFromFileTTF(atlas, geistReg, 16.0 * uiScale, fontConfigPtr, glyphRangesPtr)
-            ImFontConfig_destroy(fontConfigPtr)
+        func addUIFont(primaryPath: String, size: Float) -> UnsafeMutablePointer<ImFont>? {
+            let primaryExists = FileManager.default.fileExists(atPath: primaryPath)
+            guard primaryExists || fallbackFontPath != nil else { return nil }
+
+            let resolvedPrimary = primaryExists ? primaryPath : fallbackFontPath!
+            let primaryConfig = ImFontConfig_ImFontConfig()!
+            primaryConfig.pointee.RasterizerDensity = dpi
+            let font = ImFontAtlas_AddFontFromFileTTF(
+                atlas, resolvedPrimary, size * uiScale, primaryConfig, glyphRangesPtr)
+            ImFontConfig_destroy(primaryConfig)
+            guard font != nil else { return nil }
+
+            if let fallbackFontPath,
+               fallbackFontPath.caseInsensitiveCompare(resolvedPrimary) != .orderedSame {
+                let fallbackConfig = ImFontConfig_ImFontConfig()!
+                fallbackConfig.pointee.RasterizerDensity = dpi
+                fallbackConfig.pointee.MergeMode = true
+                let merged = ImFontAtlas_AddFontFromFileTTF(
+                    atlas, fallbackFontPath, size * uiScale, fallbackConfig, glyphRangesPtr)
+                ImFontConfig_destroy(fallbackConfig)
+                if merged != nil {
+                    mergedFallback = true
+                }
+            } else if fallbackFontPath != nil {
+                mergedFallback = true
+            }
+
             loadedFont = true
-            
-            if FileManager.default.fileExists(atPath: geistBold) {
-                let boldConfig = ImFontConfig_ImFontConfig()!
-                boldConfig.pointee.RasterizerDensity = dpi
-                self.ui.boldFont = ImFontAtlas_AddFontFromFileTTF(atlas, geistBold, 16.0 * uiScale, boldConfig, glyphRangesPtr)
-                ImFontConfig_destroy(boldConfig)
-            }
-            
-            let smallConfig = ImFontConfig_ImFontConfig()!
-            smallConfig.pointee.RasterizerDensity = dpi
-            self.ui.smallFont = ImFontAtlas_AddFontFromFileTTF(atlas, geistSmall, 13.0 * uiScale, smallConfig, glyphRangesPtr)
-            ImFontConfig_destroy(smallConfig)
-
-            if FileManager.default.fileExists(atPath: geistMono) {
-                let monoConfig = ImFontConfig_ImFontConfig()!
-                monoConfig.pointee.RasterizerDensity = dpi
-                self.ui.monoFont = ImFontAtlas_AddFontFromFileTTF(atlas, geistMono, 14.0 * uiScale, monoConfig, glyphRangesPtr)
-                ImFontConfig_destroy(monoConfig)
-
-                let commandTitleConfig = ImFontConfig_ImFontConfig()!
-                commandTitleConfig.pointee.RasterizerDensity = dpi
-                self.ui.commandTitleFont = ImFontAtlas_AddFontFromFileTTF(
-                    atlas, geistMono, 16.0 * uiScale, commandTitleConfig, glyphRangesPtr)
-                ImFontConfig_destroy(commandTitleConfig)
-            }
-
-            if FileManager.default.fileExists(atPath: geistMonoRegular) {
-                let commandPillConfig = ImFontConfig_ImFontConfig()!
-                commandPillConfig.pointee.RasterizerDensity = dpi
-                self.ui.commandPillFont = ImFontAtlas_AddFontFromFileTTF(
-                    atlas, geistMonoRegular, 14.0 * uiScale, commandPillConfig, glyphRangesPtr)
-                ImFontConfig_destroy(commandPillConfig)
-            }
-
-            if FileManager.default.fileExists(atPath: geistMedium) {
-                let commandDescriptionConfig = ImFontConfig_ImFontConfig()!
-                commandDescriptionConfig.pointee.RasterizerDensity = dpi
-                self.ui.commandDescriptionFont = ImFontAtlas_AddFontFromFileTTF(
-                    atlas, geistMedium, 13.0 * uiScale, commandDescriptionConfig, glyphRangesPtr)
-                ImFontConfig_destroy(commandDescriptionConfig)
-            }
-
-            if FileManager.default.fileExists(atPath: geistLarge) {
-                let largeConfig = ImFontConfig_ImFontConfig()!
-                largeConfig.pointee.RasterizerDensity = dpi
-                self.ui.largeFont = ImFontAtlas_AddFontFromFileTTF(atlas, geistLarge, 20.0 * uiScale, largeConfig, glyphRangesPtr)
-                
-                let titleConfig = ImFontConfig_ImFontConfig()!
-                titleConfig.pointee.RasterizerDensity = dpi
-                self.ui.titleFont = ImFontAtlas_AddFontFromFileTTF(atlas, geistLarge, 34.0 * uiScale, titleConfig, glyphRangesPtr)
-                
-                ImFontConfig_destroy(largeConfig)
-                ImFontConfig_destroy(titleConfig)
-            }
-            print("Loaded Geist fonts.")
+            return font
         }
 
-        // Try Arial Unicode MS first (best coverage), then Malgun Gothic, then Arial.
-        let fontPaths = [
-            "C:\\Windows\\Fonts\\segoeui.ttf",
-            "C:\\Windows\\Fonts\\ARIALUNI.ttf",
-            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-            "/Library/Fonts/Arial Unicode.ttf",
-            "C:\\Windows\\Fonts\\malgun.ttf",
-            "C:\\Windows\\Fonts\\arial.ttf",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/Library/Fonts/Arial.ttf",
-        ]
-        
-        for fontPath in fontPaths {
-            if FileManager.default.fileExists(atPath: fontPath) {
-                let fontConfigPtr = ImFontConfig_ImFontConfig()!
-                fontConfigPtr.pointee.RasterizerDensity = dpi
-                if loadedFont {
-                    fontConfigPtr.pointee.MergeMode = true
-                }
-                _ = ImFontAtlas_AddFontFromFileTTF(atlas, fontPath, 16.0 * uiScale, fontConfigPtr, glyphRangesPtr)
-                ImFontConfig_destroy(fontConfigPtr)
-                loadedFont = true
-                print("Loaded fallback font for CJK support: \(fontPath)")
-                
-                // If we didn't load Geist bold, load system bold
-                if self.ui.boldFont == nil {
-                    var boldFontPath = fontPath.replacingOccurrences(of: "segoeui.ttf", with: "segoeuib.ttf")
-                    if boldFontPath == fontPath {
-                        boldFontPath = fontPath.replacingOccurrences(of: "arial.ttf", with: "arialbd.ttf")
-                    }
-                    if FileManager.default.fileExists(atPath: boldFontPath) {
-                        let boldFontConfigPtr = ImFontConfig_ImFontConfig()!
-                        boldFontConfigPtr.pointee.RasterizerDensity = dpi
-                        self.ui.boldFont = ImFontAtlas_AddFontFromFileTTF(atlas, boldFontPath, 16.0 * uiScale, boldFontConfigPtr, glyphRangesPtr)
-                        ImFontConfig_destroy(boldFontConfigPtr)
-                        print("Loaded bold font at: \(boldFontPath)")
-                    }
-                }
-                break
-            }
+        _ = addUIFont(primaryPath: geistReg, size: 16.0)
+        self.ui.boldFont = addUIFont(primaryPath: geistBold, size: 16.0)
+        self.ui.smallFont = addUIFont(primaryPath: geistSmall, size: 13.0)
+        self.ui.monoFont = addUIFont(primaryPath: geistMono, size: 14.0)
+        self.ui.commandTitleFont = addUIFont(primaryPath: geistMono, size: 16.0)
+        self.ui.commandPillFont = addUIFont(primaryPath: geistMonoRegular, size: 14.0)
+        self.ui.commandDescriptionFont = addUIFont(primaryPath: geistMedium, size: 13.0)
+        self.ui.largeFont = addUIFont(primaryPath: geistLarge, size: 20.0)
+        self.ui.titleFont = addUIFont(primaryPath: geistLarge, size: 34.0)
+
+        if let fallbackFontPath {
+            print("Loaded \(uiFontLanguageProfile.rawValue) UI fallback source: \(fallbackFontPath)")
+        } else if uiFontLanguageProfile != .standard {
+            print("Warning: No fallback font was found for UI language profile \(uiFontLanguageProfile.rawValue).")
         }
 
-        if loadedFont {
-            igImFontAtlasBuildMain(atlas)
-        } else {
-            // Fallback: build with default font only (ASCII-only)
-            print("Warning: No CJK-capable font found. Using default font (ASCII only).")
-            igImFontAtlasBuildMain(atlas)
+        if fallbackFontPath != nil && !mergedFallback {
+            print("Warning: UI fallback font could not be merged into the active font set.")
         }
+        if !loadedFont {
+            print("Warning: No UI font found. Using the ImGui default font.")
+        }
+        igImFontAtlasBuildMain(atlas)
 
         // Extract font texture pixel data.
         if let texData = atlas.pointee.TexData {
@@ -770,7 +913,7 @@ public final class PhrostEngine {
             let h = texData.pointee.Height
             let bpp = texData.pointee.BytesPerPixel
             let useColors = texData.pointee.UseColors
-            print("Font atlas: \(w)x\(h), \(bpp) bpp, useColors=\(useColors)")
+            print("Font atlas [\(uiFontLanguageProfile.rawValue)]: \(w)x\(h), \(bpp) bpp, useColors=\(useColors)")
 
             var tex: OpaquePointer? = nil
             if let src = texData.pointee.Pixels {
@@ -862,4 +1005,17 @@ public final class PhrostEngine {
         let fbScale = (windowWidth > 0) ? Float(pixelWidth) / Float(windowWidth) : 1.0
         updateScale(dpiScale: currentDpiScale, fbScale: fbScale, force: true)
     }
+    @discardableResult
+    public func applyUIFontLanguageProfile(_ profile: UIFontLanguageProfile) -> Bool {
+        guard profile != uiFontLanguageProfile else { return false }
+        uiFontLanguageProfile = profile
+        UserDefaults.standard.set(profile.rawValue, forKey: "Zephyr.UIFontLanguageProfile")
+
+        let fbScale = (windowWidth > 0 && pixelWidth > 0)
+            ? Float(pixelWidth) / Float(windowWidth)
+            : max(scaleX, 1.0)
+        updateScale(dpiScale: currentDpiScale, fbScale: fbScale, force: true)
+        return true
+    }
+
 }

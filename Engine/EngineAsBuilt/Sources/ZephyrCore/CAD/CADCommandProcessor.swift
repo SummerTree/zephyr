@@ -238,6 +238,7 @@ public struct CommandDescriptor: Sendable {
         CommandDescriptor(canonicalName: "ORTHO",          aliases: [],                category: .settings, syntax: "", description: "Toggle ortho mode (F8) — constrain cursor to cardinal axes"),
         CommandDescriptor(canonicalName: "UNITS",          aliases: ["UNIT", "DDUNITS"], category: .settings, syntax: "[mm|cm|m|in|ft|yd]", description: "Set or display the drawing base unit"),
         CommandDescriptor(canonicalName: "SETUISCALE",     aliases: ["ZOOMUI", "UISCALE"], category: .settings, syntax: "[scale|AUTO]", description: "Override UI zoom (1.0=100%, 1.5=150%, AUTO=system DPI)"),
+        CommandDescriptor(canonicalName: "LANGUAGE",       aliases: ["LANG", "UILANGUAGE", "FONTLANG"], category: .settings, syntax: "<profile>", description: "Set the UI font glyph profile without translating UI text"),
     ]
 }
 
@@ -740,6 +741,32 @@ public final class CADCommandProcessor {
                 if let eng = engine, eng.ui.isDarkTheme { eng.ui.toggleTheme() }
             default:
                 print("[CAD] Usage: THEME DARK|LIGHT  or  DARKMODE / LIGHTMODE")
+            }
+            clearCommand()
+        case "LANGUAGE", "LANG", "UILANGUAGE", "FONTLANG":
+            if let engine = engine {
+                let profiles = UIFontLanguageProfile.allCases.map(\.rawValue).joined(separator: ", ")
+                print("[CAD] UI font language profile: \(engine.uiFontLanguageProfile.rawValue)")
+                print("[CAD] Available profiles: \(profiles)")
+            }
+            clearCommand()
+        case _ where upper.hasPrefix("LANGUAGE ")
+            || upper.hasPrefix("LANG ")
+            || upper.hasPrefix("UILANGUAGE ")
+            || upper.hasPrefix("FONTLANG "):
+            guard let engine = engine else { clearCommand(); return }
+            let argument = upper.split(separator: " ", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
+            guard let profile = UIFontLanguageProfile.parse(argument) else {
+                let profiles = UIFontLanguageProfile.allCases.map(\.rawValue).joined(separator: "|")
+                print("[CAD] Usage: LANGUAGE <\(profiles)>")
+                clearCommand()
+                return
+            }
+
+            if engine.applyUIFontLanguageProfile(profile) {
+                print("[CAD] UI font language profile changed to \(profile.rawValue).")
+            } else {
+                print("[CAD] UI font language profile is already \(profile.rawValue).")
             }
             clearCommand()
         case "LA", "LAYER":
