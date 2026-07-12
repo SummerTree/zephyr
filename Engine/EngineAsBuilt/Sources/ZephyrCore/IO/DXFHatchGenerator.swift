@@ -445,20 +445,24 @@ public enum DXFHatchGenerator {
         while cursor < endX - 1e-9 {
             var segmentStart = cycleStart
             for dash in dashes {
-                let length = max(abs(dash), 1e-9)
+                if abs(dash) <= 1e-9 {
+                    if segmentStart >= cursor - 1e-9 && segmentStart <= endX + 1e-9 {
+                        let x = min(max(segmentStart, startX), endX)
+                        let p = rotateBack(Vector3(x: x, y: y, z: 0))
+                        prims.append(.point(position: p))
+                    }
+                    continue
+                }
+
+                let length = abs(dash)
                 let segmentEnd = segmentStart + length
-                if dash >= 0.0 {
+                if dash > 0.0 {
                     let a = max(cursor, segmentStart)
                     let b = min(endX, segmentEnd)
                     if b > a + 1e-9 {
-                        if abs(dash) <= 1e-9 {
-                            let p = rotateBack(Vector3(x: (a + b) * 0.5, y: y, z: 0))
-                            prims.append(.point(position: p))
-                        } else {
-                            let p1 = rotateBack(Vector3(x: a, y: y, z: 0))
-                            let p2 = rotateBack(Vector3(x: b, y: y, z: 0))
-                            prims.append(.line(start: p1, end: p2))
-                        }
+                        let p1 = rotateBack(Vector3(x: a, y: y, z: 0))
+                        let p2 = rotateBack(Vector3(x: b, y: y, z: 0))
+                        prims.append(.line(start: p1, end: p2))
                     }
                 }
                 segmentStart = segmentEnd

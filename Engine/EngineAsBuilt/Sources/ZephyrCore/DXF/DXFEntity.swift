@@ -175,11 +175,21 @@ public struct DXFLayoutEntry: Sendable {
     public var name: String
     public var tabOrder: Int
     public var blockRecordHandle: UInt32
+    public var minimumLimits: Vector3
+    public var maximumLimits: Vector3
 
-    public init(name: String = "", tabOrder: Int = Int.max, blockRecordHandle: UInt32 = 0) {
+    public init(
+        name: String = "",
+        tabOrder: Int = Int.max,
+        blockRecordHandle: UInt32 = 0,
+        minimumLimits: Vector3 = .zero,
+        maximumLimits: Vector3 = Vector3(x: 12, y: 9, z: 0)
+    ) {
         self.name = name
         self.tabOrder = tabOrder
         self.blockRecordHandle = blockRecordHandle
+        self.minimumLimits = minimumLimits
+        self.maximumLimits = maximumLimits
     }
 }
 

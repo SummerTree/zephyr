@@ -445,6 +445,15 @@ public final class PhrostEngine {
         }
         tabManager.onActiveTabChanged = { [weak self] in
             guard let self else { return }
+            if let color = self.tabManager.activeViewBackgroundColor {
+                self.ui.viewBackgroundOverride = SDL_FColor(
+                    r: Float(color.r) / 255.0,
+                    g: Float(color.g) / 255.0,
+                    b: Float(color.b) / 255.0,
+                    a: Float(color.a) / 255.0)
+            } else {
+                self.ui.viewBackgroundOverride = nil
+            }
             self._regenerationTask?.cancel()
             self._regenerationTask = nil
             self._regenerationInFlight = nil

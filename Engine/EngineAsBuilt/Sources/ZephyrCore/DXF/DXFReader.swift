@@ -1587,10 +1587,24 @@ extension DXFReader {
         let blockRecordHandle = layoutProperties.last(where: { $0.0 == 330 })
             .map { parseHandle($0.1) } ?? 0
 
+        var minimumLimits = Vector3.zero
+        var maximumLimits = Vector3(x: 12, y: 9, z: 0)
+        for (code, value) in layoutProperties {
+            switch code {
+            case 10: minimumLimits.x = d(value)
+            case 20: minimumLimits.y = d(value)
+            case 11: maximumLimits.x = d(value)
+            case 21: maximumLimits.y = d(value)
+            default: break
+            }
+        }
+
         layouts.append(DXFLayoutEntry(
             name: name,
             tabOrder: tabOrder,
-            blockRecordHandle: blockRecordHandle))
+            blockRecordHandle: blockRecordHandle,
+            minimumLimits: minimumLimits,
+            maximumLimits: maximumLimits))
     }
 
     private func resolveImageReferences() {

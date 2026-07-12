@@ -32,17 +32,20 @@ public struct DrawingView {
     public var kind: DXFDrawingViewKind
     public var document: CADDocument
     public var cameraState: CameraState
+    public var backgroundColor: ColorRGBA?
 
     public init(
         name: String,
         kind: DXFDrawingViewKind,
         document: CADDocument,
-        cameraState: CameraState = .default
+        cameraState: CameraState = .default,
+        backgroundColor: ColorRGBA? = nil
     ) {
         self.name = name
         self.kind = kind
         self.document = document
         self.cameraState = cameraState
+        self.backgroundColor = backgroundColor
     }
 }
 
@@ -213,6 +216,11 @@ public final class TabManager {
         return tab.drawingViews[tab.activeViewIndex].name
     }
 
+    public var activeViewBackgroundColor: ColorRGBA? {
+        guard let tab = activeTab else { return nil }
+        return tab.drawingViews[tab.activeViewIndex].backgroundColor
+    }
+
     public var availableViews: [(name: String, kind: DXFDrawingViewKind)] {
         guard let tab = activeTab else { return [] }
         return tab.drawingViews.map { ($0.name, $0.kind) }
@@ -298,7 +306,12 @@ public final class TabManager {
             doc.linetypePatterns = imported.linetypePatterns
             doc.dimensionStyles = imported.dimensionStyles
             doc.savedRevision = doc.editRevision  // freshly imported
-            return DrawingView(name: view.name, kind: view.kind, document: doc)
+            return DrawingView(
+                name: view.name,
+                kind: view.kind,
+                document: doc,
+                backgroundColor: view.backgroundColor
+            )
         }
         let doc = drawingViews[0].document
         let displayName = url.lastPathComponent

@@ -303,8 +303,12 @@ public enum CADPrimitiveGenerator {
         }
         let finalColor = primColor.map(applyingOpacity) ?? color
 
+        let planarScale = (abs(transform.scale.x) + abs(transform.scale.y)) * 0.5
+        let geometryScale = planarScale.isFinite && planarScale > 1e-12 ? planarScale : 1.0
+        let transformedGeomWidth = geomWidth > 0.0 ? geomWidth * geometryScale : 0.0
+
         func makeLineSpec(p1: SDL_FPoint, p2: SDL_FPoint, weight: Double, z: Double, color: (UInt8, UInt8, UInt8, UInt8)) -> PrimitiveSpec {
-            return PrimitiveSpec(type: .line, points: [p1, p2], rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: geomWidth)
+            return PrimitiveSpec(type: .line, points: [p1, p2], rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth)
         }
 
         func makePathSpecs(points: [SDL_FPoint], dashPattern: [Double]?, scale: Double, weight: Double, z: Double, color: (UInt8, UInt8, UInt8, UInt8)) -> [PrimitiveSpec] {
@@ -319,7 +323,7 @@ public enum CADPrimitiveGenerator {
                 }
 
                 let isSigned = pattern.contains { $0 <= 0 }
-                let effectiveScale = scale > 0 ? scale : 1.0
+                let effectiveScale = (scale > 0 ? scale : 1.0) * geometryScale
                 let cycleLength: Double = isSigned
                     ? pattern.reduce(0.0) { $0 + abs($1) } * effectiveScale
                     : pattern.reduce(0.0, +) * effectiveScale
@@ -343,14 +347,14 @@ public enum CADPrimitiveGenerator {
                 // If the dash cycle is extremely small relative to the path length,
                 // or if we would generate more than 10000 dash cycles, treat it as solid (continuous).
                 if cycleLength > 1e-6 && (pathLength / cycleLength) > 10000.0 {
-                    if weight > 0.25 || geomWidth > 0.0 {
+                    if weight > 0.25 || transformedGeomWidth > 0.0 {
                         var specs: [PrimitiveSpec] = []
                         for i in 0..<(points.count - 1) {
                             specs.append(makeLineSpec(p1: points[i], p2: points[i+1], weight: weight, z: z, color: color))
                         }
                         return specs
                     } else {
-                        return [PrimitiveSpec(type: .lines, points: points, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: geomWidth)]
+                        return [PrimitiveSpec(type: .lines, points: points, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth)]
                     }
                 }
                 
@@ -486,7 +490,7 @@ public enum CADPrimitiveGenerator {
                 endDash()
                 
                 var specs: [PrimitiveSpec] = []
-                if weight > 0.25 || geomWidth > 0.0 {
+                if weight > 0.25 || transformedGeomWidth > 0.0 {
                     for dash in dashedPolylines {
                         for i in 0..<(dash.count - 1) {
                             specs.append(makeLineSpec(p1: dash[i], p2: dash[i+1], weight: weight, z: z, color: color))
@@ -494,20 +498,20 @@ public enum CADPrimitiveGenerator {
                     }
                 } else {
                     for dash in dashedPolylines {
-                        specs.append(PrimitiveSpec(type: .lines, points: dash, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: geomWidth))
+                        specs.append(PrimitiveSpec(type: .lines, points: dash, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth))
                     }
                 }
                 return specs
             }
             
-            if weight > 0.25 || geomWidth > 0.0 {
+            if weight > 0.25 || transformedGeomWidth > 0.0 {
                 var specs: [PrimitiveSpec] = []
                 for i in 0..<(points.count - 1) {
                     specs.append(makeLineSpec(p1: points[i], p2: points[i+1], weight: weight, z: z, color: color))
                 }
                 return specs
             } else {
-                return [PrimitiveSpec(type: .lines, points: points, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: geomWidth)]
+                return [PrimitiveSpec(type: .lines, points: points, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth)]
             }
         }
 
@@ -742,6 +746,7 @@ public enum CADPrimitiveGenerator {
 
         case .hatch(let boundary, let pattern, let hatchScale, let hatchAngle, _, let backgroundColor):
             guard boundary.count >= 3 else { break }
+            let transformedHatchScale = hatchScale * geometryScale
             let hatchLoops = splitConnectedHatchBoundary(boundary)
             let backgroundZ = z - 0.001
             let foregroundZ = z
@@ -773,13 +778,13 @@ public enum CADPrimitiveGenerator {
                 let polyPoints = boundary.map { transform.transformPoint($0) }
 
                 let adaptiveMinimumSpacing = DXFHatchGenerator.adaptiveMinimumSpacing(for: polyPoints)
-                let nominalSpacing = DXFHatchGenerator.effectiveSpacing(patternName: pattern, scale: hatchScale)
+                let nominalSpacing = DXFHatchGenerator.effectiveSpacing(patternName: pattern, scale: transformedHatchScale)
                 let spacing = max(nominalSpacing, adaptiveMinimumSpacing)
 
                 let hatchLines = DXFHatchGenerator.generatePatternHatch(
                     polygon: polyPoints,
                     patternName: pattern,
-                    scale: hatchScale,
+                    scale: transformedHatchScale,
                     angleDegrees: hatchAngle * 180.0 / .pi,
                     minimumSpacing: adaptiveMinimumSpacing
                 )
@@ -812,6 +817,7 @@ public enum CADPrimitiveGenerator {
             }
 
         case .hatchPath(let boundaryPath, let holePaths, let pattern, let hatchScale, let hatchAngle, _, let backgroundColor):
+            let transformedHatchScale = hatchScale * geometryScale
             let outer = cleanLoop(boundaryPath.tessellatedPoints())
             let holes = holePaths.map { cleanLoop($0.tessellatedPoints()) }.filter { $0.count >= 3 }
             guard outer.count >= 3 else { break }
@@ -841,13 +847,13 @@ public enum CADPrimitiveGenerator {
                     ? transformedOuter
                     : DXFHatchGenerator.connectHoles(outer: transformedOuter, holes: transformedHoles)
                 let adaptiveMinimumSpacing = DXFHatchGenerator.adaptiveMinimumSpacing(for: patternPolygon)
-                let nominalSpacing = DXFHatchGenerator.effectiveSpacing(patternName: pattern, scale: hatchScale)
+                let nominalSpacing = DXFHatchGenerator.effectiveSpacing(patternName: pattern, scale: transformedHatchScale)
                 let spacing = max(nominalSpacing, adaptiveMinimumSpacing)
 
                 let hatchLines = DXFHatchGenerator.generatePatternHatch(
                     polygon: patternPolygon,
                     patternName: pattern,
-                    scale: hatchScale,
+                    scale: transformedHatchScale,
                     angleDegrees: hatchAngle * 180.0 / .pi,
                     minimumSpacing: adaptiveMinimumSpacing
                 )

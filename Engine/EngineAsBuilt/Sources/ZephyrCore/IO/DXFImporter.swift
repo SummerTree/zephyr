@@ -8,9 +8,21 @@ import Foundation
 public enum DXFDrawingViewKind: Sendable, Equatable { case model, sheet }
 
 public struct DXFDrawingView: Sendable {
-    public let name: String; public let kind: DXFDrawingViewKind; public let entities: [CADEntity]
-    public init(name: String, kind: DXFDrawingViewKind, entities: [CADEntity]) {
-        self.name = name; self.kind = kind; self.entities = entities
+    public let name: String
+    public let kind: DXFDrawingViewKind
+    public let entities: [CADEntity]
+    public let backgroundColor: ColorRGBA?
+
+    public init(
+        name: String,
+        kind: DXFDrawingViewKind,
+        entities: [CADEntity],
+        backgroundColor: ColorRGBA? = nil
+    ) {
+        self.name = name
+        self.kind = kind
+        self.entities = entities
+        self.backgroundColor = backgroundColor
     }
 }
 
@@ -65,10 +77,15 @@ public enum DXFImporter {
             twistAngle = source.twistAngle * .pi / 180.0
         }
 
-        var isModelViewport: Bool {
-            let isLayoutViewport = id > 0 ? id == 1 : status == 1
-            return status > 0 && !isLayoutViewport
-                && paperWidth > 1e-9 && paperHeight > 1e-9 && viewHeight > 1e-9
+        var isUsable: Bool {
+            status != 0
+                && paperWidth > 1e-9
+                && paperHeight > 1e-9
+                && viewHeight > 1e-9
+        }
+
+        var isSystemViewport: Bool {
+            id > 0 ? id == 1 : status == 1
         }
 
         var modelToPaperTransform: Transform3D {
@@ -95,6 +112,83 @@ public enum DXFImporter {
             return box.max.x >= minX && box.min.x <= maxX
                 && box.max.y >= minY && box.min.y <= maxY
         }
+    }
+
+    private static func defaultLayoutProjection(
+        layout: DXFLayoutEntry,
+        modelEntities: [CADEntity],
+        header: DXFHeaderData
+    ) -> Transform3D? {
+        let epsilon = 1e-9
+        let coordinateLimit = 1e18
+
+        func validRange(_ minimum: Double, _ maximum: Double) -> Bool {
+            minimum.isFinite && maximum.isFinite
+                && abs(minimum) < coordinateLimit
+                && abs(maximum) < coordinateLimit
+                && maximum - minimum > epsilon
+        }
+
+        var modelBounds: BoundingBox3D?
+        if validRange(header.extMin.x, header.extMax.x),
+           validRange(header.extMin.y, header.extMax.y) {
+            let first = Self.cadPoint(header.extMin)
+            let second = Self.cadPoint(header.extMax)
+            modelBounds = BoundingBox3D(
+                min: Vector3(
+                    x: min(first.x, second.x),
+                    y: min(first.y, second.y),
+                    z: min(first.z, second.z)),
+                max: Vector3(
+                    x: max(first.x, second.x),
+                    y: max(first.y, second.y),
+                    z: max(first.z, second.z)))
+        }
+
+        if modelBounds == nil {
+            for entity in modelEntities {
+                guard let bounds = entity.worldBoundingBox else { continue }
+                modelBounds = modelBounds.map { $0.union(with: bounds) } ?? bounds
+            }
+        }
+
+        guard let modelBounds,
+              validRange(modelBounds.min.x, modelBounds.max.x),
+              validRange(modelBounds.min.y, modelBounds.max.y) else {
+            return nil
+        }
+
+        var paperMinX = layout.minimumLimits.x
+        var paperMinY = layout.minimumLimits.y
+        var paperMaxX = layout.maximumLimits.x
+        var paperMaxY = layout.maximumLimits.y
+        if !validRange(paperMinX, paperMaxX) || !validRange(paperMinY, paperMaxY) {
+            paperMinX = 0
+            paperMinY = 0
+            paperMaxX = 12
+            paperMaxY = 9
+        }
+
+        let paperWidth = paperMaxX - paperMinX
+        let paperHeight = paperMaxY - paperMinY
+        let modelWidth = modelBounds.max.x - modelBounds.min.x
+        let modelHeight = modelBounds.max.y - modelBounds.min.y
+        let scale = min(paperWidth / modelWidth, paperHeight / modelHeight) * 0.9
+        guard scale.isFinite, scale > epsilon else { return nil }
+
+        let paperCenter = Vector3(
+            x: (paperMinX + paperMaxX) * 0.5,
+            y: -(paperMinY + paperMaxY) * 0.5,
+            z: 0)
+        let modelCenter = modelBounds.center
+
+        return Transform3D
+            .translated(by: paperCenter)
+            .multiplying(by: .scaled(by: Vector3(x: scale, y: scale, z: 1)))
+            .multiplying(by: .translated(by: Vector3(
+                x: -modelCenter.x,
+                y: -modelCenter.y,
+                z: -modelCenter.z)))
     }
 
     public static func importDXF(filePath: String) throws -> (layers: [Layer], blocks: [CADBlock], entities: [CADEntity], textStyleFonts: [String: String], linetypePatterns: [String: [Double]], dimensionStyles: [String: CADDimensionStyle]) {
@@ -425,11 +519,34 @@ public enum DXFImporter {
         }
 
         func sourceEntities(for layout: DXFLayoutEntry) -> [DXFEntity] {
-            let owned = entitiesOwned(by: layout.blockRecordHandle)
-            if !owned.isEmpty { return owned }
-            guard let blockName = blockNameByHandle[layout.blockRecordHandle],
-                  let block = blockByName[blockName] else { return [] }
-            return block.entities
+            var result: [DXFEntity] = []
+            var seenHandles: Set<UInt32> = []
+            var seenObjects: Set<ObjectIdentifier> = []
+
+            func appendUnique(_ entities: [DXFEntity]) {
+                for entity in entities {
+                    if entity.handle != 0 {
+                        guard seenHandles.insert(entity.handle).inserted else { continue }
+                    } else {
+                        guard seenObjects.insert(ObjectIdentifier(entity)).inserted else { continue }
+                    }
+                    result.append(entity)
+                }
+            }
+
+            appendUnique(entitiesOwned(by: layout.blockRecordHandle))
+
+            let blockName = blockNameByHandle[layout.blockRecordHandle]
+            if let blockName, let block = blockByName[blockName] {
+                appendUnique(block.entities)
+            }
+
+            if layout.name.caseInsensitiveCompare("Model") != .orderedSame,
+               blockName?.caseInsensitiveCompare("*Paper_Space") == .orderedSame {
+                appendUnique(reader.entities.filter { $0.space == 1 })
+            }
+
+            return result
         }
 
         var textStyleFonts: [String: String] = [:]
@@ -491,9 +608,13 @@ public enum DXFImporter {
                 }
 
                 var projectedEntities: [CADEntity] = []
-                let viewports = paperSource.compactMap { $0 as? DXFViewportEntity }
+                let usableViewports = paperSource.compactMap { $0 as? DXFViewportEntity }
                     .map(SheetViewport.init)
-                    .filter(\.isModelViewport)
+                    .filter(\.isUsable)
+                let hasUserViewport = usableViewports.contains { !$0.isSystemViewport }
+                let viewports = hasUserViewport
+                    ? usableViewports.filter { !$0.isSystemViewport }
+                    : usableViewports
 
                 for viewport in viewports {
                     let projection = viewport.modelToPaperTransform
@@ -514,10 +635,33 @@ public enum DXFImporter {
                     }
                 }
 
+                if viewports.isEmpty,
+                   let projection = Self.defaultLayoutProjection(
+                    layout: layout,
+                    modelEntities: modelEntities,
+                    header: reader.header) {
+                    for modelEntity in modelEntities {
+                        let projectedDrawOrder = modelEntity.drawOrder == Int.max
+                            ? Int.max
+                            : modelEntity.drawOrder + 1
+                        projectedEntities.append(CADEntity(
+                            layerID: modelEntity.layerID,
+                            blockID: modelEntity.blockID,
+                            localGeometry: modelEntity.localGeometry,
+                            dimensionMetadata: modelEntity.dimensionMetadata,
+                            transform: projection.multiplying(by: modelEntity.transform),
+                            xdata: modelEntity.xdata,
+                            drawOrder: projectedDrawOrder,
+                            localBoundingBox: modelEntity.localBoundingBox,
+                            anchorPoints: modelEntity.anchorPoints))
+                    }
+                }
+
                 importedViews.append(DXFDrawingView(
                     name: layout.name,
                     kind: .sheet,
-                    entities: projectedEntities + paperEntities))
+                    entities: projectedEntities + paperEntities,
+                    backgroundColor: .white))
             }
             views = importedViews
         }

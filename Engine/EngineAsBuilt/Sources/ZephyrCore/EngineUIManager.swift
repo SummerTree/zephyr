@@ -74,10 +74,22 @@ public final class EngineUIManager {
         return isDarkTheme ? AppTheme.dark : AppTheme.light
     }
     
-    /// Viewport background color (normalized 0-1). Changed via SET-BACKGROUND command.
-    /// Default is navy #102b41 to match dark theme.
-    public var backgroundColor = SDL_FColor(r: 0.06, g: 0.17, b: 0.25, a: 1.0) {
+    /// User/theme viewport background color (normalized 0-1).
+    private var baseBackgroundColor = SDL_FColor(r: 0.06, g: 0.17, b: 0.25, a: 1.0)
+
+    /// Temporary background supplied by the active drawing view, such as paper space.
+    public var viewBackgroundOverride: SDL_FColor? {
         didSet { displayPaletteGeneration &+= 1 }
+    }
+
+    /// Effective viewport background. SET-BACKGROUND updates the model-space value
+    /// without replacing a temporary paper-space override.
+    public var backgroundColor: SDL_FColor {
+        get { viewBackgroundOverride ?? baseBackgroundColor }
+        set {
+            baseBackgroundColor = newValue
+            displayPaletteGeneration &+= 1
+        }
     }
 
     /// Monotonic counter bumped on any change that affects display-adaptive colors
