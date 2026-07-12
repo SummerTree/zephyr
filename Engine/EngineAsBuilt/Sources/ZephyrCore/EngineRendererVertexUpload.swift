@@ -26,7 +26,27 @@ extension EngineRenderer {
         region: (minX: Double, minY: Double, maxX: Double, maxY: Double)
     ) -> [TessInput] {
         var inputs: [TessInput] = []
-        let useLightDisplayPalette = !engine.ui.isDarkTheme
+        let useLightDisplayPalette = engine.ui.isViewportBackgroundLight
+
+        func adjustedGradient(_ gradient: RenderPrimitive.GradientData?) -> RenderPrimitive.GradientData? {
+            guard let gradient else { return nil }
+            let color1 = ColorRGBA(
+                r: gradient.color1.0, g: gradient.color1.1,
+                b: gradient.color1.2, a: gradient.color1.3
+            ).displayAdjusted(forLightBackground: useLightDisplayPalette)
+            let color2 = ColorRGBA(
+                r: gradient.color2.0, g: gradient.color2.1,
+                b: gradient.color2.2, a: gradient.color2.3
+            ).displayAdjusted(forLightBackground: useLightDisplayPalette)
+            return RenderPrimitive.GradientData(
+                color1: (color1.r, color1.g, color1.b, color1.a),
+                color2: (color2.r, color2.g, color2.b, color2.a),
+                angleCos: gradient.angleCos,
+                angleSin: gradient.angleSin,
+                minX: gradient.minX,
+                minY: gradient.minY,
+                diag: gradient.diag)
+        }
 
         if let indices = engine.geometryManager.visiblePrimitiveIndices(
             inWorldRect: region.minX, minY: region.minY,
@@ -49,7 +69,7 @@ extension EngineRenderer {
                     isHatchLine: p.isHatchLine,
                     hatchSpacing: p.hatchSpacing,
                     isPanProxy: p.isPanProxy,
-                    gradientData: p.gradientData
+                    gradientData: adjustedGradient(p.gradientData)
                 ))
             }
         } else {
@@ -70,7 +90,7 @@ extension EngineRenderer {
                     isHatchLine: p.isHatchLine,
                     hatchSpacing: p.hatchSpacing,
                     isPanProxy: p.isPanProxy,
-                    gradientData: p.gradientData
+                    gradientData: adjustedGradient(p.gradientData)
                 ))
             }
         }

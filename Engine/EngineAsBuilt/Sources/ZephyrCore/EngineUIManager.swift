@@ -92,6 +92,16 @@ public final class EngineUIManager {
         }
     }
 
+    /// Whether the effective drawing background needs the light-background CAD palette.
+    /// This intentionally follows the viewport override rather than the surrounding UI theme.
+    public var isViewportBackgroundLight: Bool {
+        let color = backgroundColor
+        let luminance = 0.2126 * Double(color.r)
+            + 0.7152 * Double(color.g)
+            + 0.0722 * Double(color.b)
+        return luminance >= 0.5
+    }
+
     /// Monotonic counter bumped on any change that affects display-adaptive colors
     /// (background color, dark/light theme). The render cache compares this against
     /// its cached value to detect when the vertex buffer must be rebuilt.

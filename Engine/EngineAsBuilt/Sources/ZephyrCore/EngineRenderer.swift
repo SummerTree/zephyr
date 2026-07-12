@@ -1135,7 +1135,7 @@ public final class EngineRenderer {
         // the user needs to see the cursor to pick points.
 
         let drawList = igGetForegroundDrawList_ViewportPtr(nil)
-        let crosshair = engine.ui.isDarkTheme ? (255, 255, 255, 120) : (20, 38, 52, 120)
+        let crosshair = engine.ui.isViewportBackgroundLight ? (20, 38, 52, 120) : (255, 255, 255, 120)
         let col = makeImCol32(
             r: UInt8(crosshair.0),
             g: UInt8(crosshair.1),
@@ -1200,10 +1200,10 @@ public final class EngineRenderer {
         let vpMaxY = vp.maxY + margin
 
         let drawList = igGetBackgroundDrawList(nil)
-        // Subtle gray, semi-transparent. Slightly brighter on dark theme for contrast.
-        let gridCol = engine.ui.isDarkTheme
-            ? makeImCol32(r: 80, g: 80, b: 80, a: 50)
-            : makeImCol32(r: 180, g: 180, b: 180, a: 60)
+        // Subtle gray, semi-transparent, selected from the effective viewport background.
+        let gridCol = engine.ui.isViewportBackgroundLight
+            ? makeImCol32(r: 180, g: 180, b: 180, a: 60)
+            : makeImCol32(r: 80, g: 80, b: 80, a: 50)
         let lineThickness: Float = 1.0
 
         // Helper: world coordinate to screen point
@@ -1758,7 +1758,7 @@ public final class EngineRenderer {
         let dragOrGrip = engine.interaction.dragActive || engine.interaction.gripActive
         guard dragOrGrip || !engine.interaction.pendingPreviewHandles.isEmpty else { return }
 
-        let isLight = !engine.ui.isDarkTheme
+        let isLight = engine.ui.isViewportBackgroundLight
         let drawList = igGetBackgroundDrawList(nil)
         let lw: Float = 1.5
         
@@ -1837,7 +1837,7 @@ public final class EngineRenderer {
             return
         }
 
-        let isLight = !engine.ui.isDarkTheme
+        let isLight = engine.ui.isViewportBackgroundLight
         let drawList = igGetBackgroundDrawList(nil)
         let spriteColor = isLight ? sprite.adjustedColorLight : sprite.adjustedColorDark
         let col = makeImCol32(r: spriteColor.0, g: spriteColor.1, b: spriteColor.2, a: spriteColor.3)
