@@ -46,6 +46,8 @@ public class DXFWriter {
     private var hasTransparency: Bool { return version.rawValue >= "AC1018" }
     /// version >= R2000
     private var hasLineWeight: Bool { return version.rawValue >= "AC1015" }
+    /// version >= R2007 (AC1021)
+    private var hasMaterials: Bool { return version.rawValue >= "AC1021" }
     /// version >= R14 (AC1014)
     private var hasExtendedData: Bool { return version.rawValue >= "AC1014" }
     /// version > R12 (AC1009)
@@ -76,6 +78,12 @@ public class DXFWriter {
     private var rootDictionaryHandle: String = ""
     private var groupDictionaryHandle: String = ""
     private var layoutDictionaryHandle: String = ""
+    private var plotStyleDictionaryHandle: String = ""
+    private var plotStyleNormalHandle: String = ""
+    private var materialDictionaryHandle: String = ""
+    private var materialByBlockHandle: String = ""
+    private var materialByLayerHandle: String = ""
+    private var materialGlobalHandle: String = ""
     private var imageDefinitionHandleByEntity: [ObjectIdentifier: String] = [:]
     private var activeViewportHandleByBlockName: [String: String] = [:]
     private var outputLayouts: [DXFLayoutDefinition] = []
@@ -159,6 +167,12 @@ public class DXFWriter {
         rootDictionaryHandle = ""
         groupDictionaryHandle = ""
         layoutDictionaryHandle = ""
+        plotStyleDictionaryHandle = ""
+        plotStyleNormalHandle = ""
+        materialDictionaryHandle = ""
+        materialByBlockHandle = ""
+        materialByLayerHandle = ""
+        materialGlobalHandle = ""
         imageDefinitionHandleByEntity.removeAll(keepingCapacity: true)
         activeViewportHandleByBlockName.removeAll(keepingCapacity: true)
         outputLayouts = resolvedLayouts()
@@ -240,6 +254,14 @@ public class DXFWriter {
         guard isModern else { return }
         rootDictionaryHandle = allocHandle()
         groupDictionaryHandle = allocHandle()
+        plotStyleDictionaryHandle = allocHandle()
+        plotStyleNormalHandle = allocHandle()
+        if hasMaterials {
+            materialDictionaryHandle = allocHandle()
+            materialByBlockHandle = allocHandle()
+            materialByLayerHandle = allocHandle()
+            materialGlobalHandle = allocHandle()
+        }
         if !outputLayouts.isEmpty {
             layoutDictionaryHandle = allocHandle()
             for layout in outputLayouts {
@@ -256,6 +278,15 @@ public class DXFWriter {
 
     private func blockRecordHandle(for name: String) -> String? {
         blockRecordHandleByName[normalizedName(name)]
+    }
+
+    private func entityOwnerBlockName(at index: Int, entity: DXFEntity) -> String {
+        if index < entityOwnerBlockNames.count,
+           let explicitOwner = entityOwnerBlockNames[index],
+           !explicitOwner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return explicitOwner
+        }
+        return entity.space == 0 ? "*Model_Space" : "*Paper_Space"
     }
 
     // MARK: - HEADER
@@ -466,6 +497,17 @@ public class DXFWriter {
     private func writeClasses(_ out: inout String) {
         if !isModern { return }
         out += "  0\r\nSECTION\r\n  2\r\nCLASSES\r\n"
+        if !outputLayouts.isEmpty {
+            writeClass(
+                dxfName: "LAYOUT",
+                cppName: "AcDbLayout",
+                appName: "ObjectDBX Classes",
+                proxyFlags: 0,
+                instanceCount: outputLayouts.count,
+                wasProxy: 0,
+                isEntity: 0,
+                &out)
+        }
         if entities.contains(where: { $0.eType == .iMAGE }) {
             writeClass(
                 dxfName: "IMAGEDEF",
@@ -484,6 +526,17 @@ public class DXFWriter {
                 instanceCount: entities.filter { $0.eType == .iMAGE }.count,
                 wasProxy: 0,
                 isEntity: 1,
+                &out)
+        }
+        if hasMaterials {
+            writeClass(
+                dxfName: "MATERIAL",
+                cppName: "AcDbMaterial",
+                appName: "ObjectDBX Classes",
+                proxyFlags: 1153,
+                instanceCount: 3,
+                wasProxy: 0,
+                isEntity: 0,
                 &out)
         }
         if entities.contains(where: { $0.eType == .tABLE }) {
@@ -698,8 +751,14 @@ public class DXFWriter {
             writeInt(62, Int(layer.color), &out)
             if layer.color24 >= 0 { writeInt(420, Int(layer.color24), &out) }
             writeStr(6, layer.lineType, &out)
-            writeInt(370, layer.lWeight.dxfInt, &out)
-            writeBool(290, layer.plotFlag, &out)
+            if isModern {
+                writeBool(290, layer.plotFlag, &out)
+                writeInt(370, layer.lWeight.dxfInt, &out)
+                writeStr(390, plotStyleNormalHandle, &out)
+                if hasMaterials {
+                    writeStr(347, materialGlobalHandle, &out)
+                }
+            }
             if layer.transparency >= 0 { writeInt(440, Int(layer.transparency), &out) }
         }
 
@@ -1006,6 +1065,17 @@ public class DXFWriter {
         }
         for name in spaceNames {
             openBlock(name, .zero)
+            let spaceKey = normalizedName(name)
+            if spaceKey != "*MODEL_SPACE" && spaceKey != "*PAPER_SPACE" {
+                for (index, entity) in entities.enumerated() where
+                    normalizedName(entityOwnerBlockName(at: index, entity: entity)) == spaceKey {
+                    writeEntity(
+                        entity,
+                        &out,
+                        ownerHandle: currentBlockHandle,
+                        ownerBlockName: name)
+                }
+            }
             closeBlock()
         }
 
@@ -1027,8 +1097,9 @@ public class DXFWriter {
         out += "  0\r\nSECTION\r\n  2\r\nENTITIES\r\n"
 
         for (index, entity) in entities.enumerated() {
-            let explicitOwner = index < entityOwnerBlockNames.count ? entityOwnerBlockNames[index] : nil
-            let blockName = explicitOwner ?? (entity.space == 0 ? "*Model_Space" : "*Paper_Space")
+            let blockName = entityOwnerBlockName(at: index, entity: entity)
+            let blockKey = normalizedName(blockName)
+            guard blockKey == "*MODEL_SPACE" || blockKey == "*PAPER_SPACE" else { continue }
             writeEntity(
                 entity,
                 &out,
@@ -1543,12 +1614,21 @@ public class DXFWriter {
         if !layoutDictionaryHandle.isEmpty {
             out += "  3\r\nACAD_LAYOUT\r\n350\r\n\(layoutDictionaryHandle)\r\n"
         }
+        if hasMaterials {
+            out += "  3\r\nACAD_MATERIAL\r\n350\r\n\(materialDictionaryHandle)\r\n"
+        }
+        out += "  3\r\nACAD_PLOTSTYLENAME\r\n350\r\n\(plotStyleDictionaryHandle)\r\n"
         if let imageDictionaryHandle {
             out += "  3\r\nACAD_IMAGE_DICT\r\n350\r\n\(imageDictionaryHandle)\r\n"
         }
 
         out += "  0\r\nDICTIONARY\r\n  5\r\n\(groupDictionaryHandle)\r\n"
         out += "330\r\n\(rootDictionaryHandle)\r\n100\r\nAcDbDictionary\r\n281\r\n1\r\n"
+
+        writePlotStyleObjects(&out)
+        if hasMaterials {
+            writeMaterialObjects(&out)
+        }
 
         if !layoutDictionaryHandle.isEmpty {
             out += "  0\r\nDICTIONARY\r\n  5\r\n\(layoutDictionaryHandle)\r\n"
@@ -1601,6 +1681,96 @@ public class DXFWriter {
         }
 
         out += "  0\r\nENDSEC\r\n"
+    }
+
+
+    private func writePlotStyleObjects(_ out: inout String) {
+        out += "  0\r\nACDBDICTIONARYWDFLT\r\n  5\r\n\(plotStyleDictionaryHandle)\r\n"
+        out += "330\r\n\(rootDictionaryHandle)\r\n100\r\nAcDbDictionary\r\n281\r\n1\r\n"
+        writeStr(3, "Normal", &out)
+        writeStr(350, plotStyleNormalHandle, &out)
+        out += "100\r\nAcDbDictionaryWithDefault\r\n"
+        writeStr(340, plotStyleNormalHandle, &out)
+
+        out += "  0\r\nACDBPLACEHOLDER\r\n  5\r\n\(plotStyleNormalHandle)\r\n"
+        out += "102\r\n{ACAD_REACTORS\r\n330\r\n\(plotStyleDictionaryHandle)\r\n102\r\n}\r\n"
+        out += "330\r\n\(plotStyleDictionaryHandle)\r\n"
+    }
+
+    private func writeMaterialObjects(_ out: inout String) {
+        out += "  0\r\nDICTIONARY\r\n  5\r\n\(materialDictionaryHandle)\r\n"
+        out += "330\r\n\(rootDictionaryHandle)\r\n100\r\nAcDbDictionary\r\n281\r\n1\r\n"
+        writeStr(3, "ByBlock", &out)
+        writeStr(350, materialByBlockHandle, &out)
+        writeStr(3, "ByLayer", &out)
+        writeStr(350, materialByLayerHandle, &out)
+        writeStr(3, "Global", &out)
+        writeStr(350, materialGlobalHandle, &out)
+
+        writeDefaultMaterial(name: "ByBlock", handle: materialByBlockHandle, &out)
+        writeDefaultMaterial(name: "ByLayer", handle: materialByLayerHandle, &out)
+        writeDefaultMaterial(name: "Global", handle: materialGlobalHandle, &out)
+    }
+
+    private func writeDefaultMaterial(name: String, handle: String, _ out: inout String) {
+        out += "  0\r\nMATERIAL\r\n  5\r\n\(handle)\r\n"
+        out += "102\r\n{ACAD_REACTORS\r\n330\r\n\(materialDictionaryHandle)\r\n102\r\n}\r\n"
+        out += "330\r\n\(materialDictionaryHandle)\r\n100\r\nAcDbMaterial\r\n"
+        writeStr(1, name, &out)
+        writeStrAllowEmpty(2, "", &out)
+        writeInt(70, 0, &out)
+        writeDbl(40, 1, &out)
+        writeInt(71, 1, &out)
+        writeDbl(41, 1, &out)
+        writeInt(91, -1023410177, &out)
+        writeDbl(42, 1, &out)
+        writeInt(72, 1, &out)
+        writeStrAllowEmpty(3, "", &out)
+        writeInt(73, 1, &out)
+        writeInt(74, 1, &out)
+        writeInt(75, 1, &out)
+        writeDbl(44, 0.5, &out)
+        writeInt(73, 0, &out)
+        writeDbl(45, 1, &out)
+        writeDbl(46, 1, &out)
+        writeInt(77, 1, &out)
+        writeStrAllowEmpty(4, "", &out)
+        writeInt(78, 1, &out)
+        writeInt(79, 1, &out)
+        writeInt(170, 1, &out)
+        writeDbl(48, 1, &out)
+        writeInt(171, 1, &out)
+        writeStrAllowEmpty(6, "", &out)
+        writeInt(172, 1, &out)
+        writeInt(173, 1, &out)
+        writeInt(174, 1, &out)
+        writeDbl(140, 1, &out)
+        writeDbl(141, 1, &out)
+        writeInt(175, 1, &out)
+        writeStrAllowEmpty(7, "", &out)
+        writeInt(176, 1, &out)
+        writeInt(177, 1, &out)
+        writeInt(178, 1, &out)
+        writeDbl(143, 1, &out)
+        writeInt(179, 1, &out)
+        writeStrAllowEmpty(8, "", &out)
+        writeInt(270, 1, &out)
+        writeInt(271, 1, &out)
+        writeInt(272, 1, &out)
+        writeDbl(145, 1, &out)
+        writeDbl(146, 1, &out)
+        writeInt(273, 1, &out)
+        writeStrAllowEmpty(9, "", &out)
+        writeInt(274, 1, &out)
+        writeInt(275, 1, &out)
+        writeInt(276, 1, &out)
+        writeDbl(42, 1, &out)
+        writeInt(72, 1, &out)
+        writeStrAllowEmpty(3, "", &out)
+        writeInt(73, 1, &out)
+        writeInt(74, 1, &out)
+        writeInt(75, 1, &out)
+        writeInt(94, 63, &out)
     }
 
     private func writeLayoutObject(
