@@ -220,6 +220,41 @@ import SwiftSDL
 
 public enum CADPrimitiveGenerator {
 
+    private struct PolylinePointKey: Hashable, Comparable {
+        let x: UInt64
+        let y: UInt64
+        let z: UInt64
+
+        init(_ point: Vector3) {
+            x = point.x == 0 ? 0 : point.x.bitPattern
+            y = point.y == 0 ? 0 : point.y.bitPattern
+            z = point.z == 0 ? 0 : point.z.bitPattern
+        }
+
+        static func < (lhs: PolylinePointKey, rhs: PolylinePointKey) -> Bool {
+            if lhs.x != rhs.x { return lhs.x < rhs.x }
+            if lhs.y != rhs.y { return lhs.y < rhs.y }
+            return lhs.z < rhs.z
+        }
+    }
+
+    private struct PolylineSegmentKey: Hashable {
+        let first: PolylinePointKey
+        let second: PolylinePointKey
+
+        init(_ start: Vector3, _ end: Vector3) {
+            let a = PolylinePointKey(start)
+            let b = PolylinePointKey(end)
+            if b < a {
+                first = b
+                second = a
+            } else {
+                first = a
+                second = b
+            }
+        }
+    }
+
     /// Maps a DXF linetype name to a dash pattern in drawing units
     /// (alternating draw/gap lengths, starting with a draw).
     /// Returns nil for continuous/inherited linetypes (no dashing).
@@ -347,15 +382,7 @@ public enum CADPrimitiveGenerator {
                 // If the dash cycle is extremely small relative to the path length,
                 // or if we would generate more than 10000 dash cycles, treat it as solid (continuous).
                 if cycleLength > 1e-6 && (pathLength / cycleLength) > 10000.0 {
-                    if weight > 0.25 || transformedGeomWidth > 0.0 {
-                        var specs: [PrimitiveSpec] = []
-                        for i in 0..<(points.count - 1) {
-                            specs.append(makeLineSpec(p1: points[i], p2: points[i+1], weight: weight, z: z, color: color))
-                        }
-                        return specs
-                    } else {
-                        return [PrimitiveSpec(type: .lines, points: points, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth)]
-                    }
+                    return [PrimitiveSpec(type: .lines, points: points, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth)]
                 }
                 
                 if steps.isEmpty { return [] }
@@ -489,30 +516,12 @@ public enum CADPrimitiveGenerator {
                 }
                 endDash()
                 
-                var specs: [PrimitiveSpec] = []
-                if weight > 0.25 || transformedGeomWidth > 0.0 {
-                    for dash in dashedPolylines {
-                        for i in 0..<(dash.count - 1) {
-                            specs.append(makeLineSpec(p1: dash[i], p2: dash[i+1], weight: weight, z: z, color: color))
-                        }
-                    }
-                } else {
-                    for dash in dashedPolylines {
-                        specs.append(PrimitiveSpec(type: .lines, points: dash, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth))
-                    }
+                return dashedPolylines.map {
+                    PrimitiveSpec(type: .lines, points: $0, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth)
                 }
-                return specs
             }
             
-            if weight > 0.25 || transformedGeomWidth > 0.0 {
-                var specs: [PrimitiveSpec] = []
-                for i in 0..<(points.count - 1) {
-                    specs.append(makeLineSpec(p1: points[i], p2: points[i+1], weight: weight, z: z, color: color))
-                }
-                return specs
-            } else {
-                return [PrimitiveSpec(type: .lines, points: points, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth)]
-            }
+            return [PrimitiveSpec(type: .lines, points: points, rects: [], corners: [], z: z, color: color, lineWeight: weight, geomWidth: transformedGeomWidth)]
         }
 
         var specs: [PrimitiveSpec] = []
@@ -582,11 +591,42 @@ public enum CADPrimitiveGenerator {
 
         case .polyline(let path, _):
             if path.isHatchBoundaryCarrier { break }
-            let wp = path.tessellatedPoints().map { p -> SDL_FPoint in
-                let t = transform.transformPoint(p)
-                return SDL_FPoint(x: Float(t.x), y: Float(t.y))
+
+            if dashPattern != nil && !path.lineTypeGenerationEnabled {
+                var renderedStraightSegments = Set<PolylineSegmentKey>()
+
+                for segment in 0..<path.segmentCount {
+                    let startVertex = path.vertices[segment]
+                    let endVertex = path.vertices[path.endVertexIndex(forSegment: segment)]
+
+                    if abs(startVertex.bulge) <= 1e-12 {
+                        let key = PolylineSegmentKey(startVertex.position, endVertex.position)
+                        if !renderedStraightSegments.insert(key).inserted { continue }
+                    }
+
+                    let localPoints: [Vector3]
+                    if let arc = path.arcParameters(forSegment: segment) {
+                        let divisions = Swift.max(4, Int(ceil(abs(arc.sweep) * 12.0)))
+                        localPoints = (0...divisions).map { step in
+                            path.point(onSegment: segment, t: Double(step) / Double(divisions))
+                        }
+                    } else {
+                        localPoints = [startVertex.position, endVertex.position]
+                    }
+
+                    let worldPoints = localPoints.map { point -> SDL_FPoint in
+                        let transformed = transform.transformPoint(point)
+                        return SDL_FPoint(x: Float(transformed.x), y: Float(transformed.y))
+                    }
+                    specs.append(contentsOf: makePathSpecs(points: worldPoints, dashPattern: dashPattern, scale: lineTypeScale, weight: lineWeight, z: z, color: finalColor))
+                }
+            } else {
+                let wp = path.tessellatedPoints().map { p -> SDL_FPoint in
+                    let t = transform.transformPoint(p)
+                    return SDL_FPoint(x: Float(t.x), y: Float(t.y))
+                }
+                specs.append(contentsOf: makePathSpecs(points: wp, dashPattern: dashPattern, scale: lineTypeScale, weight: lineWeight, z: z, color: finalColor))
             }
-            specs.append(contentsOf: makePathSpecs(points: wp, dashPattern: dashPattern, scale: lineTypeScale, weight: lineWeight, z: z, color: finalColor))
 
         case .fillPolygon(let points, _):
             let wp = points.map { p -> SDL_FPoint in

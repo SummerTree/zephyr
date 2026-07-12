@@ -215,6 +215,122 @@ public final class CADVertexBufferBuilder {
             }
         }
 
+        func appendJoinedQuadPath(_ sourcePoints: [SDL_FPoint], _ width: Float, _ r: Float, _ g: Float, _ b: Float, _ a: Float) {
+            guard sourcePoints.count >= 2 else { return }
+
+            var points: [SDL_FPoint] = []
+            points.reserveCapacity(sourcePoints.count)
+            for point in sourcePoints {
+                if let last = points.last {
+                    let dx = point.x - last.x
+                    let dy = point.y - last.y
+                    if dx * dx + dy * dy <= 1e-10 { continue }
+                }
+                points.append(point)
+            }
+            guard points.count >= 2 else { return }
+            if points.count == 2 {
+                appendQuadSegment(points[0], points[1], width, r, g, b, a)
+                return
+            }
+
+            let closeDX = points[points.count - 1].x - points[0].x
+            let closeDY = points[points.count - 1].y - points[0].y
+            let isClosed = points.count >= 3 && closeDX * closeDX + closeDY * closeDY <= 1e-10
+            if isClosed {
+                points.removeLast()
+            }
+            guard points.count >= 2 else { return }
+
+            let halfW = width * 0.5
+            let count = points.count
+            let segmentCount = isClosed ? count : count - 1
+            var normals = [SDL_FPoint](repeating: SDL_FPoint(x: 0, y: 0), count: segmentCount)
+
+            for i in 0..<segmentCount {
+                let next = (i + 1) % count
+                let dx = points[next].x - points[i].x
+                let dy = points[next].y - points[i].y
+                let len = sqrt(dx * dx + dy * dy)
+                guard len > 1e-5 else { continue }
+                let ux = dx / len
+                let uy = dy / len
+                normals[i] = SDL_FPoint(x: -uy, y: ux)
+            }
+
+            var left = [SDL_FPoint](repeating: SDL_FPoint(x: 0, y: 0), count: count)
+            var right = [SDL_FPoint](repeating: SDL_FPoint(x: 0, y: 0), count: count)
+            let miterLimit: Float = 10.0
+
+            for i in 0..<count {
+                let offsetX: Float
+                let offsetY: Float
+
+                if !isClosed && i == 0 {
+                    offsetX = normals[0].x * halfW
+                    offsetY = normals[0].y * halfW
+                } else if !isClosed && i == count - 1 {
+                    offsetX = normals[segmentCount - 1].x * halfW
+                    offsetY = normals[segmentCount - 1].y * halfW
+                } else {
+                    let previousSegment = (i - 1 + segmentCount) % segmentCount
+                    let nextSegment = i % segmentCount
+                    let previousNormal = normals[previousSegment]
+                    let nextNormal = normals[nextSegment]
+                    let sumX = previousNormal.x + nextNormal.x
+                    let sumY = previousNormal.y + nextNormal.y
+                    let sumLength = sqrt(sumX * sumX + sumY * sumY)
+
+                    if sumLength <= 1e-5 {
+                        offsetX = nextNormal.x * halfW
+                        offsetY = nextNormal.y * halfW
+                    } else {
+                        let miterX = sumX / sumLength
+                        let miterY = sumY / sumLength
+                        let denominator = miterX * nextNormal.x + miterY * nextNormal.y
+                        if abs(denominator) <= 1e-4 {
+                            offsetX = nextNormal.x * halfW
+                            offsetY = nextNormal.y * halfW
+                        } else {
+                            let unclampedLength = halfW / denominator
+                            let limitedLength = max(-halfW * miterLimit, min(halfW * miterLimit, unclampedLength))
+                            offsetX = miterX * limitedLength
+                            offsetY = miterY * limitedLength
+                        }
+                    }
+                }
+
+                left[i] = SDL_FPoint(x: points[i].x + offsetX, y: points[i].y + offsetY)
+                right[i] = SDL_FPoint(x: points[i].x - offsetX, y: points[i].y - offsetY)
+            }
+
+            for i in 0..<segmentCount {
+                let next = (i + 1) % count
+                let l1 = left[i]
+                let r1 = right[i]
+                let l2 = left[next]
+                let r2 = right[next]
+
+                vertices.append(CADVertex(x: l1.x, y: l1.y, r: r, g: g, b: b, a: a, u: 0.0, v: 1.0))
+                vertices.append(CADVertex(x: r1.x, y: r1.y, r: r, g: g, b: b, a: a, u: 0.0, v: -1.0))
+                vertices.append(CADVertex(x: r2.x, y: r2.y, r: r, g: g, b: b, a: a, u: 1.0, v: -1.0))
+
+                vertices.append(CADVertex(x: l1.x, y: l1.y, r: r, g: g, b: b, a: a, u: 0.0, v: 1.0))
+                vertices.append(CADVertex(x: r2.x, y: r2.y, r: r, g: g, b: b, a: a, u: 1.0, v: -1.0))
+                vertices.append(CADVertex(x: l2.x, y: l2.y, r: r, g: g, b: b, a: a, u: 1.0, v: 1.0))
+            }
+        }
+
+        func appendRenderablePath(_ points: [SDL_FPoint], _ input: TessInput, _ r: Float, _ g: Float, _ b: Float, _ a: Float) {
+            if input.lineWeight > 0.25 || input.geomWidth > 0.0 || antiAliasLines || hairlineQuads {
+                appendJoinedQuadPath(points, lineWorldWidth(for: input), r, g, b, a)
+            } else {
+                for i in 0..<(points.count - 1) {
+                    appendLineSegment(points[i], points[i + 1], r, g, b, a)
+                }
+            }
+        }
+
         for (i, input) in inputs.enumerated() {
             // Cooperative cancellation: check every 256 primitives.
             if i & 0xFF == 0 && Task.isCancelled {
@@ -262,9 +378,7 @@ public final class CADVertexBufferBuilder {
 
             case .lines:
                 guard input.points.count >= 2 else { break }
-                for j in 0..<(input.points.count - 1) {
-                    appendRenderableSegment(input.points[j], input.points[j + 1], input, r, g, b, a)
-                }
+                appendRenderablePath(input.points, input, r, g, b, a)
 
             case .rect, .rects:
                 if input.corners.count == 4 {
