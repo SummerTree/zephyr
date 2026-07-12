@@ -78,6 +78,7 @@ public class DXFWriter {
     private var layoutDictionaryHandle: String = ""
     private var imageDefinitionHandleByEntity: [ObjectIdentifier: String] = [:]
     private var activeViewportHandleByBlockName: [String: String] = [:]
+    private var outputLayouts: [DXFLayoutDefinition] = []
 
     public init() {}
 
@@ -160,6 +161,7 @@ public class DXFWriter {
         layoutDictionaryHandle = ""
         imageDefinitionHandleByEntity.removeAll(keepingCapacity: true)
         activeViewportHandleByBlockName.removeAll(keepingCapacity: true)
+        outputLayouts = resolvedLayouts()
         prepareObjectHandles()
 
         var out = ""
@@ -195,13 +197,52 @@ public class DXFWriter {
         value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
     }
 
+    private func resolvedLayouts() -> [DXFLayoutDefinition] {
+        var result: [DXFLayoutDefinition] = []
+        var blockNames = Set<String>()
+
+        for layout in layouts {
+            let key = normalizedName(layout.blockName)
+            guard !key.isEmpty, blockNames.insert(key).inserted else { continue }
+            result.append(layout)
+        }
+
+        if !blockNames.contains("*MODEL_SPACE") {
+            result.insert(
+                DXFLayoutDefinition(
+                    name: "Model",
+                    blockName: "*Model_Space",
+                    tabOrder: 0),
+                at: 0)
+            blockNames.insert("*MODEL_SPACE")
+        }
+
+        if !blockNames.contains("*PAPER_SPACE") {
+            let usedNames = Set(result.map { normalizedName($0.name) })
+            var layoutNumber = 1
+            var layoutName = "Layout1"
+            while usedNames.contains(normalizedName(layoutName)) {
+                layoutNumber += 1
+                layoutName = "Layout\(layoutNumber)"
+            }
+            let nextTabOrder = max(1, (result.map(\.tabOrder).max() ?? 0) + 1)
+            result.append(
+                DXFLayoutDefinition(
+                    name: layoutName,
+                    blockName: "*Paper_Space",
+                    tabOrder: nextTabOrder))
+        }
+
+        return result
+    }
+
     private func prepareObjectHandles() {
         guard isModern else { return }
         rootDictionaryHandle = allocHandle()
         groupDictionaryHandle = allocHandle()
-        if !layouts.isEmpty {
+        if !outputLayouts.isEmpty {
             layoutDictionaryHandle = allocHandle()
-            for layout in layouts {
+            for layout in outputLayouts {
                 let key = normalizedName(layout.blockName)
                 guard layoutHandleByBlockName[key] == nil else { continue }
                 layoutHandleByBlockName[key] = allocHandle()
@@ -278,62 +319,62 @@ public class DXFWriter {
         writeHdrDbl("$DIMDLE", 0.0, 40, &out)
         writeHdrDbl("$DIMTP", 0.0, 40, &out)
         writeHdrDbl("$DIMTM", 0.0, 40, &out)
-        writeHdrDbl("$DIMTXT", 2.5, 140, &out)
-        writeHdrDbl("$DIMCEN", 2.5, 141, &out)
-        writeHdrDbl("$DIMTSZ", 0.0, 142, &out)
-        writeHdrDbl("$DIMALTF", 25.4, 143, &out)
-        writeHdrDbl("$DIMLFAC", 1.0, 144, &out)
-        writeHdrDbl("$DIMTVP", 0.0, 145, &out)
-        writeHdrDbl("$DIMTFAC", 1.0, 146, &out)
-        writeHdrDbl("$DIMGAP", 0.625, 147, &out)
-        writeHdrDbl("$DIMALTRND", 0.0, 148, &out)
-        writeHdrInt("$DIMTOL", 0, 71, &out)
-        writeHdrInt("$DIMLIM", 0, 72, &out)
-        writeHdrInt("$DIMTIH", 0, 73, &out)
-        writeHdrInt("$DIMTOH", 0, 74, &out)
-        writeHdrInt("$DIMSE1", 0, 75, &out)
-        writeHdrInt("$DIMSE2", 0, 76, &out)
-        writeHdrInt("$DIMTAD", 1, 77, &out)
-        writeHdrInt("$DIMZIN", 8, 78, &out)
-        writeHdrInt("$DIMAZIN", 0, 79, &out)
-        writeHdrInt("$DIMALT", 0, 170, &out)
-        writeHdrInt("$DIMALTD", 2, 171, &out)
-        writeHdrInt("$DIMTOFL", 1, 172, &out)
-        writeHdrInt("$DIMSAH", 0, 173, &out)
-        writeHdrInt("$DIMTIX", 0, 174, &out)
-        writeHdrInt("$DIMSOXD", 0, 175, &out)
-        writeHdrInt("$DIMCLRD", 0, 176, &out)
-        writeHdrInt("$DIMCLRE", 0, 177, &out)
-        writeHdrInt("$DIMCLRT", 0, 178, &out)
-        writeHdrInt("$DIMADEC", 0, 179, &out)
-        writeHdrInt("$DIMDEC", 4, 271, &out)
-        writeHdrInt("$DIMTDEC", 4, 272, &out)
-        writeHdrInt("$DIMALTU", 2, 273, &out)
-        writeHdrInt("$DIMALTTD", 2, 274, &out)
-        writeHdrInt("$DIMAUNIT", 0, 275, &out)
-        writeHdrInt("$DIMFRAC", 0, 276, &out)
+        writeHdrDbl("$DIMTXT", 2.5, 40, &out)
+        writeHdrDbl("$DIMCEN", 2.5, 40, &out)
+        writeHdrDbl("$DIMTSZ", 0.0, 40, &out)
+        writeHdrDbl("$DIMALTF", 25.4, 40, &out)
+        writeHdrDbl("$DIMLFAC", 1.0, 40, &out)
+        writeHdrDbl("$DIMTVP", 0.0, 40, &out)
+        writeHdrDbl("$DIMTFAC", 1.0, 40, &out)
+        writeHdrDbl("$DIMGAP", 0.625, 40, &out)
+        writeHdrDbl("$DIMALTRND", 0.0, 40, &out)
+        writeHdrInt("$DIMTOL", 0, 70, &out)
+        writeHdrInt("$DIMLIM", 0, 70, &out)
+        writeHdrInt("$DIMTIH", 0, 70, &out)
+        writeHdrInt("$DIMTOH", 0, 70, &out)
+        writeHdrInt("$DIMSE1", 0, 70, &out)
+        writeHdrInt("$DIMSE2", 0, 70, &out)
+        writeHdrInt("$DIMTAD", 1, 70, &out)
+        writeHdrInt("$DIMZIN", 8, 70, &out)
+        writeHdrInt("$DIMAZIN", 0, 70, &out)
+        writeHdrInt("$DIMALT", 0, 70, &out)
+        writeHdrInt("$DIMALTD", 2, 70, &out)
+        writeHdrInt("$DIMTOFL", 1, 70, &out)
+        writeHdrInt("$DIMSAH", 0, 70, &out)
+        writeHdrInt("$DIMTIX", 0, 70, &out)
+        writeHdrInt("$DIMSOXD", 0, 70, &out)
+        writeHdrInt("$DIMCLRD", 0, 70, &out)
+        writeHdrInt("$DIMCLRE", 0, 70, &out)
+        writeHdrInt("$DIMCLRT", 0, 70, &out)
+        writeHdrInt("$DIMADEC", 0, 70, &out)
+        writeHdrInt("$DIMDEC", 4, 70, &out)
+        writeHdrInt("$DIMTDEC", 4, 70, &out)
+        writeHdrInt("$DIMALTU", 2, 70, &out)
+        writeHdrInt("$DIMALTTD", 2, 70, &out)
+        writeHdrInt("$DIMAUNIT", 0, 70, &out)
+        writeHdrInt("$DIMFRAC", 0, 70, &out)
         if isModern {
-            writeHdrInt("$DIMLUNIT", 2, 277, &out)
+            writeHdrInt("$DIMLUNIT", 2, 70, &out)
         } else {
             writeHdrInt("$DIMUNIT", 2, 70, &out) // pre-2000 name
         }
-        writeHdrInt("$DIMDSEP", 46, 278, &out)
-        writeHdrInt("$DIMTMOVE", 0, 279, &out)
-        writeHdrInt("$DIMJUST", 0, 280, &out)
-        writeHdrInt("$DIMSD1", 0, 281, &out)
-        writeHdrInt("$DIMSD2", 0, 282, &out)
-        writeHdrInt("$DIMTOLJ", 1, 283, &out)
-        writeHdrInt("$DIMTZIN", 0, 284, &out)
-        writeHdrInt("$DIMALTZ", 0, 285, &out)
-        writeHdrInt("$DIMALTTZ", 0, 286, &out)
-        writeHdrInt("$DIMFIT", 3, 287, &out)
-        writeHdrInt("$DIMUPT", 0, 288, &out)
-        writeHdrInt("$DIMATFIT", 3, 289, &out)
-        writeHdrInt("$DIMFXLON", 0, 290, &out)
-        writeHdrDbl("$DIMFXL", 1.0, 49, &out)
+        writeHdrInt("$DIMDSEP", 46, 70, &out)
+        writeHdrInt("$DIMTMOVE", 0, 70, &out)
+        writeHdrInt("$DIMJUST", 0, 70, &out)
+        writeHdrInt("$DIMSD1", 0, 70, &out)
+        writeHdrInt("$DIMSD2", 0, 70, &out)
+        writeHdrInt("$DIMTOLJ", 1, 70, &out)
+        writeHdrInt("$DIMTZIN", 0, 70, &out)
+        writeHdrInt("$DIMALTZ", 0, 70, &out)
+        writeHdrInt("$DIMALTTZ", 0, 70, &out)
+        writeHdrInt("$DIMFIT", 3, 70, &out)
+        writeHdrInt("$DIMUPT", 0, 70, &out)
+        writeHdrInt("$DIMATFIT", 3, 70, &out)
+        writeHdrInt("$DIMFXLON", 0, 70, &out)
+        writeHdrDbl("$DIMFXL", 1.0, 40, &out)
         writeHdrStr("$DIMTXSTY", "Standard", 7, &out)
-        writeHdrInt("$DIMLWD", -2, 371, &out)
-        writeHdrInt("$DIMLWE", -2, 372, &out)
+        writeHdrInt("$DIMLWD", -2, 70, &out)
+        writeHdrInt("$DIMLWE", -2, 70, &out)
         writeHdrInt("$LUNITS", 2, 70, &out)
         writeHdrInt("$LUPREC", 4, 70, &out)
         writeHdrInt("$INSUNITS", headerVars["$INSUNITS"] as? Int ?? 4, 70, &out)
@@ -883,10 +924,8 @@ public class DXFWriter {
         }
 
         appendRecord(name: "*Model_Space")
-        if layouts.isEmpty {
-            appendRecord(name: "*Paper_Space")
-        } else {
-            for layout in layouts { appendRecord(name: layout.blockName) }
+        for layout in outputLayouts where normalizedName(layout.blockName) != "*MODEL_SPACE" {
+            appendRecord(name: layout.blockName)
         }
         for record in blockRecords {
             let key = normalizedName(record.name)
@@ -955,17 +994,14 @@ public class DXFWriter {
             writeInt(70, flags, &out)
             writePoint3(10, basePoint, &out)
             writeStr(3, name, &out)
+            writeStrAllowEmpty(1, "", &out)
             writingBlock = true
         }
 
         var spaceNames = ["*Model_Space"]
-        if layouts.isEmpty {
-            spaceNames.append("*Paper_Space")
-        } else {
-            for layout in layouts where normalizedName(layout.blockName) != "*MODEL_SPACE" {
-                if !spaceNames.contains(where: { normalizedName($0) == normalizedName(layout.blockName) }) {
-                    spaceNames.append(layout.blockName)
-                }
+        for layout in outputLayouts where normalizedName(layout.blockName) != "*MODEL_SPACE" {
+            if !spaceNames.contains(where: { normalizedName($0) == normalizedName(layout.blockName) }) {
+                spaceNames.append(layout.blockName)
             }
         }
         for name in spaceNames {
@@ -1517,14 +1553,14 @@ public class DXFWriter {
         if !layoutDictionaryHandle.isEmpty {
             out += "  0\r\nDICTIONARY\r\n  5\r\n\(layoutDictionaryHandle)\r\n"
             out += "330\r\n\(rootDictionaryHandle)\r\n100\r\nAcDbDictionary\r\n281\r\n1\r\n"
-            for layout in layouts {
+            for layout in outputLayouts {
                 guard let layoutHandle = layoutHandleByBlockName[normalizedName(layout.blockName)] else { continue }
                 writeStr(3, layout.name, &out)
                 writeStr(350, layoutHandle, &out)
             }
 
             var writtenLayoutHandles = Set<String>()
-            for layout in layouts {
+            for layout in outputLayouts {
                 let blockKey = normalizedName(layout.blockName)
                 guard let layoutHandle = layoutHandleByBlockName[blockKey],
                       writtenLayoutHandles.insert(layoutHandle).inserted,
@@ -1586,7 +1622,7 @@ public class DXFWriter {
         writeDbl(141, 0, &out)
         writeDbl(142, 1, &out)
         writeDbl(143, 1, &out)
-        writeInt(70, 0, &out)
+        writeInt(70, isModel ? 1024 : 0, &out)
         writeInt(72, 0, &out)
         writeInt(73, 0, &out)
         writeInt(74, 5, &out)
