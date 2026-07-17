@@ -219,7 +219,7 @@ private final class ODADownloadOperation: @unchecked Sendable {
                     lastProgressUpdate = now
                 }
 
-                try await Task.sleep(for: .milliseconds(100))
+                try await Task.sleep(nanoseconds: 100_000_000)
             }
             try Task.checkCancellation()
         } catch {
@@ -1377,7 +1377,7 @@ public final class InstallODACommand: FeatureCommand {
         do {
             while process.isRunning {
                 try Task.checkCancellation()
-                try await Task.sleep(for: .milliseconds(100))
+                try await Task.sleep(nanoseconds: 100_000_000)
             }
             try Task.checkCancellation()
         } catch {
