@@ -15,18 +15,106 @@ private struct ODADownloadUpdate: Sendable {
     let status: String?
 }
 
+private struct ODAInstallCompletion: Sendable {
+    let success: Bool
+    let message: String
+    let installedPath: String?
+}
+
+private struct ODAInstallWorkerSnapshot: Sendable {
+    let downloadUpdate: ODADownloadUpdate?
+    let installStatus: String?
+    let completion: ODAInstallCompletion?
+}
+
+private final class ODAInstallWorkerState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latestDownloadUpdate: ODADownloadUpdate?
+    private var latestInstallStatus: String?
+    private var completion: ODAInstallCompletion?
+    private var activeProcess: Process?
+    private var cancelled = false
+
+    func publishDownload(_ update: ODADownloadUpdate) {
+        lock.withLock {
+            guard !cancelled, completion == nil else { return }
+            latestDownloadUpdate = update
+        }
+    }
+
+    func publishInstallStatus(_ status: String) {
+        lock.withLock {
+            guard !cancelled, completion == nil else { return }
+            latestInstallStatus = status
+        }
+    }
+
+    func setActiveProcess(_ process: Process?) {
+        let shouldTerminate = lock.withLock { () -> Bool in
+            if cancelled {
+                return process != nil
+            }
+            activeProcess = process
+            return false
+        }
+        if shouldTerminate, let process, process.isRunning {
+            process.terminate()
+        }
+    }
+
+    func finish(success: Bool, message: String, installedPath: String? = nil) {
+        lock.withLock {
+            guard !cancelled, completion == nil else { return }
+            activeProcess = nil
+            completion = ODAInstallCompletion(
+                success: success,
+                message: message,
+                installedPath: installedPath
+            )
+        }
+    }
+
+    func cancel() {
+        let process = lock.withLock { () -> Process? in
+            cancelled = true
+            latestDownloadUpdate = nil
+            latestInstallStatus = nil
+            completion = nil
+            let process = activeProcess
+            activeProcess = nil
+            return process
+        }
+        if let process, process.isRunning {
+            process.terminate()
+        }
+    }
+
+    func drain() -> ODAInstallWorkerSnapshot {
+        lock.withLock {
+            let snapshot = ODAInstallWorkerSnapshot(
+                downloadUpdate: latestDownloadUpdate,
+                installStatus: latestInstallStatus,
+                completion: completion
+            )
+            latestDownloadUpdate = nil
+            latestInstallStatus = nil
+            completion = nil
+            return snapshot
+        }
+    }
+}
+
 #if os(Windows)
 private final class ODADownloadOperation: @unchecked Sendable {
     private let destination: URL
-    private let onProgress: @Sendable (ODADownloadUpdate) async -> Void
+    private let onProgress: @Sendable (ODADownloadUpdate) -> Void
     private let lock = NSLock()
 
     private var process: Process?
-    private var cancelFile: URL?
 
     init(
         destination: URL,
-        onProgress: @escaping @Sendable (ODADownloadUpdate) async -> Void
+        onProgress: @escaping @Sendable (ODADownloadUpdate) -> Void
     ) {
         self.destination = destination
         self.onProgress = onProgress
@@ -41,18 +129,9 @@ private final class ODADownloadOperation: @unchecked Sendable {
     }
 
     func cancel() {
-        let (process, cancelFile) = lock.withLock {
-            (self.process, self.cancelFile)
-        }
-
-        if let cancelFile {
-            _ = FileManager.default.createFile(
-                atPath: cancelFile.path,
-                contents: Data()
-            )
-        }
-
+        let process = lock.withLock { self.process }
         guard let process, process.isRunning else { return }
+
         process.terminate()
 
         let windowsDirectory = ProcessInfo.processInfo.environment["WINDIR"] ?? "C:\\Windows"
@@ -71,34 +150,45 @@ private final class ODADownloadOperation: @unchecked Sendable {
     }
 
     private func performDownload(from url: URL) async throws -> URL {
+        let windowsDirectory = ProcessInfo.processInfo.environment["WINDIR"] ?? "C:\\Windows"
+        let curl = windowsDirectory
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\\/"))
+            + "\\System32\\curl.exe"
+
+        guard FileManager.default.fileExists(atPath: curl) else {
+            throw NSError(
+                domain: "InstallODA",
+                code: -10,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Windows curl.exe was not found at \(curl). The ODA installer cannot be downloaded."
+                ]
+            )
+        }
+
+        return try await performCurlDownload(from: url, curl: curl)
+    }
+
+    private func performCurlDownload(from url: URL, curl: String) async throws -> URL {
         let fileManager = FileManager.default
         let token = UUID().uuidString
-        let scriptFile = fileManager.temporaryDirectory
-            .appendingPathComponent("oda-download-\(token).ps1")
-        let progressFile = fileManager.temporaryDirectory
-            .appendingPathComponent("oda-download-\(token).progress")
-        let cancelFile = fileManager.temporaryDirectory
-            .appendingPathComponent("oda-download-\(token).cancel")
+        let headerFile = fileManager.temporaryDirectory
+            .appendingPathComponent("oda-download-\(token).headers")
         let outputFile = fileManager.temporaryDirectory
             .appendingPathComponent("oda-download-\(token).out")
         let errorFile = fileManager.temporaryDirectory
             .appendingPathComponent("oda-download-\(token).err")
 
         try? fileManager.removeItem(at: destination)
-        try? fileManager.removeItem(at: progressFile)
-        try? fileManager.removeItem(at: cancelFile)
+        try? fileManager.removeItem(at: headerFile)
 
-        try Self.powerShellScript.write(
-            to: scriptFile,
-            atomically: true,
-            encoding: .utf8
-        )
-
-        guard fileManager.createFile(atPath: outputFile.path, contents: nil),
+        guard fileManager.createFile(atPath: destination.path, contents: nil),
+              fileManager.createFile(atPath: headerFile.path, contents: nil),
+              fileManager.createFile(atPath: outputFile.path, contents: nil),
               fileManager.createFile(atPath: errorFile.path, contents: nil) else {
             throw NSError(
                 domain: "InstallODA",
-                code: -10,
+                code: -11,
                 userInfo: [
                     NSLocalizedDescriptionKey:
                         "Unable to create temporary downloader files."
@@ -111,111 +201,174 @@ private final class ODADownloadOperation: @unchecked Sendable {
         defer {
             try? outputHandle.close()
             try? errorHandle.close()
-            try? fileManager.removeItem(at: scriptFile)
-            try? fileManager.removeItem(at: progressFile)
-            try? fileManager.removeItem(at: cancelFile)
+            try? fileManager.removeItem(at: headerFile)
             try? fileManager.removeItem(at: outputFile)
             try? fileManager.removeItem(at: errorFile)
         }
 
-        let windowsDirectory = ProcessInfo.processInfo.environment["WINDIR"] ?? "C:\\Windows"
-        let powerShell = windowsDirectory
-            .trimmingCharacters(in: CharacterSet(charactersIn: "\\/"))
-            + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: powerShell)
+        process.executableURL = URL(fileURLWithPath: curl)
         process.arguments = [
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy", "Bypass",
-            "-File", scriptFile.path,
-            "-Url", url.absoluteString,
-            "-Destination", destination.path,
-            "-ProgressFile", progressFile.path,
-            "-CancelFile", cancelFile.path,
+            "--location",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--compressed",
+            "--tlsv1.2",
+            "--connect-timeout", "20",
+            "--max-time", "1800",
+            "--speed-time", "60",
+            "--speed-limit", "1",
+            "--retry", "2",
+            "--retry-delay", "1",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZephyrCAD/1.0",
+            "--header", "Cache-Control: no-cache",
+            "--header", "Pragma: no-cache",
+            "--dump-header", headerFile.path,
+            "--output", destination.path,
+            "--write-out", "HTTP_CODE:%{http_code}\\nEFFECTIVE_URL:%{url_effective}\\nSIZE_DOWNLOAD:%{size_download}\\n",
+            url.absoluteString,
         ]
         process.standardOutput = outputHandle
         process.standardError = errorHandle
 
         lock.withLock {
             self.process = process
-            self.cancelFile = cancelFile
         }
 
         defer {
             lock.withLock {
                 if self.process === process {
                     self.process = nil
-                    self.cancelFile = nil
                 }
             }
         }
 
-        print("[InstallODA] PowerShell downloader: \(powerShell)")
+        print("[InstallODA] Windows downloader: \(curl)")
 
+        onProgress(ODADownloadUpdate(
+            progress: nil,
+            downloadedBytes: 0,
+            expectedBytes: -1,
+            bytesPerSecond: 0,
+            status: "Launching Windows curl downloader..."
+        ))
+
+        print("[InstallODA] Launching curl process...")
         do {
             try process.run()
+            print("[InstallODA] curl started, PID=\(process.processIdentifier)")
         } catch {
             throw NSError(
                 domain: "InstallODA",
-                code: -11,
+                code: -12,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "Unable to launch the Windows downloader: \(error.localizedDescription)"
+                        "Unable to launch Windows curl: \(error.localizedDescription)"
                 ]
             )
         }
 
-        var lastReportedBytes: Int64 = 0
+        let startedAt = Date()
+        var lastReportedBytes: Int64 = -1
         var lastSampleBytes: Int64 = 0
         var lastSampleDate = Date()
-        var calculatedSpeed = 0.0
         var lastProgressUpdate = Date.distantPast
+        var lastActivityDate = Date()
+        var lastHeaderSignature = ""
+        var calculatedSpeed = 0.0
         var expectedBytes: Int64 = -1
+        var statusMessage = "Connecting to Open Design Alliance..."
+        var receivedDownloadHeaders = false
 
         do {
             while process.isRunning {
                 try Task.checkCancellation()
 
-                let parsed = Self.readProgressFile(progressFile)
-                if let total = parsed?.expectedBytes, total > 0 {
-                    expectedBytes = total
+                let now = Date()
+                let fileBytes = Self.fileSize(destination)
+                let header = Self.readCurlHeaderState(headerFile, requestURL: url)
+
+                if let header {
+                    let signature = "\(header.statusCode)|\(header.host)|\(header.contentLength)"
+                    if signature != lastHeaderSignature {
+                        lastHeaderSignature = signature
+                        lastActivityDate = now
+                    }
+
+                    if (200...299).contains(header.statusCode) {
+                        receivedDownloadHeaders = true
+                        if header.contentLength > 0 {
+                            expectedBytes = header.contentLength
+                        }
+                        statusMessage = fileBytes > 0
+                            ? "Downloading from \(header.host)..."
+                            : "Connected to \(header.host). Waiting for download data..."
+                    } else if (300...399).contains(header.statusCode) {
+                        statusMessage = "Redirecting to \(header.host)..."
+                    } else {
+                        statusMessage = "Server returned HTTP \(header.statusCode) from \(header.host)."
+                    }
+                } else {
+                    let elapsed = Int(now.timeIntervalSince(startedAt))
+                    let remaining = max(0, 45 - elapsed)
+                    statusMessage = "Connecting to Open Design Alliance... timeout in \(remaining)s"
                 }
 
-                let fileBytes = Self.fileSize(destination)
-                let downloadedBytes = max(fileBytes, parsed?.downloadedBytes ?? 0)
-                let now = Date()
-                let elapsed = now.timeIntervalSince(lastSampleDate)
+                if fileBytes > max(0, lastReportedBytes) {
+                    lastActivityDate = now
+                }
 
-                if elapsed >= 0.25 {
-                    calculatedSpeed = Double(max(0, downloadedBytes - lastSampleBytes)) / elapsed
-                    lastSampleBytes = downloadedBytes
+                let sampleElapsed = now.timeIntervalSince(lastSampleDate)
+                if sampleElapsed >= 0.25 {
+                    calculatedSpeed = Double(max(0, fileBytes - lastSampleBytes)) / sampleElapsed
+                    lastSampleBytes = fileBytes
                     lastSampleDate = now
                 }
 
-                if now.timeIntervalSince(lastProgressUpdate) >= 0.20
-                    || downloadedBytes != lastReportedBytes {
-                    let progress: Float? = expectedBytes > 0
-                        ? Float(Double(downloadedBytes) / Double(expectedBytes))
-                        : nil
-                    let speed = max(calculatedSpeed, parsed?.bytesPerSecond ?? 0)
+                if !receivedDownloadHeaders,
+                   now.timeIntervalSince(startedAt) >= 45 {
+                    cancel()
+                    try? fileManager.removeItem(at: destination)
+                    throw NSError(
+                        domain: "InstallODA",
+                        code: -13,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "Timed out waiting 45 seconds for Open Design Alliance to return download headers. Windows curl was terminated. Check firewall, proxy, DNS, and TLS inspection settings."
+                        ]
+                    )
+                }
 
-                    await onProgress(ODADownloadUpdate(
+                if receivedDownloadHeaders,
+                   now.timeIntervalSince(lastActivityDate) >= 60 {
+                    cancel()
+                    try? fileManager.removeItem(at: destination)
+                    throw NSError(
+                        domain: "InstallODA",
+                        code: -14,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "The ODA download made no progress for 60 seconds and was stopped. Check firewall, proxy, or antivirus HTTPS inspection settings."
+                        ]
+                    )
+                }
+
+                if now.timeIntervalSince(lastProgressUpdate) >= 0.20
+                    || fileBytes != lastReportedBytes {
+                    let progress: Float? = expectedBytes > 0
+                        ? Float(Double(fileBytes) / Double(expectedBytes))
+                        : nil
+
+                    onProgress(ODADownloadUpdate(
                         progress: progress,
-                        downloadedBytes: downloadedBytes,
+                        downloadedBytes: fileBytes,
                         expectedBytes: expectedBytes,
-                        bytesPerSecond: speed,
-                        status: parsed?.message
+                        bytesPerSecond: calculatedSpeed,
+                        status: statusMessage
                     ))
 
-                    if let message = parsed?.message, !message.isEmpty,
-                       downloadedBytes == 0 {
-                        print("[InstallODA] \(message)")
-                    }
-
-                    lastReportedBytes = downloadedBytes
+                    lastReportedBytes = fileBytes
                     lastProgressUpdate = now
                 }
 
@@ -230,22 +383,26 @@ private final class ODADownloadOperation: @unchecked Sendable {
 
         try? outputHandle.synchronize()
         try? errorHandle.synchronize()
+        try? outputHandle.close()
+        try? errorHandle.close()
 
+        let standardOutput = (try? String(
+            contentsOf: outputFile,
+            encoding: .utf8
+        ))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let errorOutput = (try? String(
             contentsOf: errorFile,
             encoding: .utf8
         ))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-        if process.terminationStatus == 1223 {
-            try? fileManager.removeItem(at: destination)
-            throw CancellationError()
-        }
-
         guard process.terminationStatus == 0 else {
             try? fileManager.removeItem(at: destination)
-            let message = errorOutput.isEmpty
-                ? "Windows downloader exited with code \(process.terminationStatus)."
-                : errorOutput
+            let processOutput = [errorOutput, standardOutput]
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            let message = processOutput.isEmpty
+                ? "curl.exe exited with code \(process.terminationStatus)."
+                : processOutput
             throw NSError(
                 domain: "InstallODA",
                 code: Int(process.terminationStatus),
@@ -257,15 +414,15 @@ private final class ODADownloadOperation: @unchecked Sendable {
         guard finalSize > 0 else {
             throw NSError(
                 domain: "InstallODA",
-                code: -12,
+                code: -15,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "The Windows downloader completed without producing a file."
+                        "Windows curl completed without producing a file.\n\(standardOutput)"
                 ]
             )
         }
 
-        await onProgress(ODADownloadUpdate(
+        onProgress(ODADownloadUpdate(
             progress: 1,
             downloadedBytes: finalSize,
             expectedBytes: finalSize,
@@ -276,31 +433,68 @@ private final class ODADownloadOperation: @unchecked Sendable {
         return destination
     }
 
-    private struct ProgressRecord {
-        let downloadedBytes: Int64
-        let expectedBytes: Int64
-        let bytesPerSecond: Double
-        let message: String
+    private struct CurlHeaderState {
+        let statusCode: Int
+        let contentLength: Int64
+        let host: String
     }
 
-    private static func readProgressFile(_ url: URL) -> ProgressRecord? {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+    private static func readCurlHeaderState(
+        _ url: URL,
+        requestURL: URL
+    ) -> CurlHeaderState? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8),
+              !text.isEmpty else {
             return nil
         }
-        let fields = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(
-                separator: "|",
-                maxSplits: 4,
-                omittingEmptySubsequences: false
-            )
-        guard fields.count >= 5 else { return nil }
 
-        return ProgressRecord(
-            downloadedBytes: Int64(fields[1]) ?? 0,
-            expectedBytes: Int64(fields[2]) ?? -1,
-            bytesPerSecond: Double(fields[3]) ?? 0,
-            message: String(fields[4])
-        )
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
+        let blocks = normalized.components(separatedBy: "\n\n")
+        var currentHost = requestURL.host ?? "Open Design Alliance"
+        var result: CurlHeaderState?
+
+        for block in blocks {
+            let lines = block
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map(String.init)
+            guard let statusLine = lines.first,
+                  statusLine.hasPrefix("HTTP/") else {
+                continue
+            }
+
+            let statusFields = statusLine.split(separator: " ")
+            guard statusFields.count >= 2,
+                  let statusCode = Int(statusFields[1]) else {
+                continue
+            }
+
+            var contentLength: Int64 = -1
+            for line in lines.dropFirst() {
+                guard let colon = line.firstIndex(of: ":") else { continue }
+                let name = String(line[..<colon])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                let value = String(line[line.index(after: colon)...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if name == "content-length" {
+                    contentLength = Int64(value) ?? -1
+                } else if name == "location",
+                          let redirectURL = URL(string: value),
+                          let redirectHost = redirectURL.host,
+                          !redirectHost.isEmpty {
+                    currentHost = redirectHost
+                }
+            }
+
+            result = CurlHeaderState(
+                statusCode: statusCode,
+                contentLength: contentLength,
+                host: currentHost
+            )
+        }
+
+        return result
     }
 
     private static func fileSize(_ url: URL) -> Int64 {
@@ -311,149 +505,11 @@ private final class ODADownloadOperation: @unchecked Sendable {
         }
         return (attributes[.size] as? NSNumber)?.int64Value ?? 0
     }
-
-    private static let powerShellScript = #"""
-param(
-    [Parameter(Mandatory = $true)][string]$Url,
-    [Parameter(Mandatory = $true)][string]$Destination,
-    [Parameter(Mandatory = $true)][string]$ProgressFile,
-    [Parameter(Mandatory = $true)][string]$CancelFile
-)
-
-$ErrorActionPreference = 'Stop'
-$client = $null
-$handler = $null
-$response = $null
-$stream = $null
-$output = $null
-$headerCancellation = $null
-
-function Write-DownloadState {
-    param(
-        [string]$State,
-        [long]$Downloaded,
-        [long]$Total,
-        [double]$Speed,
-        [string]$Message
-    )
-
-    $safeMessage = ($Message -replace '\|', '/') -replace '[\r\n]+', ' '
-    $record = '{0}|{1}|{2}|{3}|{4}' -f $State, $Downloaded, $Total, $Speed, $safeMessage
-    [System.IO.File]::WriteAllText(
-        $ProgressFile,
-        $record,
-        ([System.Text.UTF8Encoding]::new($false))
-    )
-}
-
-try {
-    Add-Type -AssemblyName System.Net.Http
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-
-    Write-DownloadState 'connecting' 0 -1 0 'Connecting to Open Design Alliance...'
-
-    $handler = New-Object System.Net.Http.HttpClientHandler
-    $handler.AllowAutoRedirect = $true
-    $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
-    $handler.UseProxy = $true
-    $handler.Proxy = [System.Net.WebRequest]::DefaultWebProxy
-    if ($null -ne $handler.Proxy) {
-        $handler.Proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials
-    }
-
-    $client = [System.Net.Http.HttpClient]::new($handler)
-    $client.Timeout = [System.Threading.Timeout]::InfiniteTimeSpan
-
-    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $Url)
-    [void]$request.Headers.TryAddWithoutValidation('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ZephyrCAD/1.0')
-    [void]$request.Headers.TryAddWithoutValidation('Cache-Control', 'no-cache')
-    [void]$request.Headers.TryAddWithoutValidation('Pragma', 'no-cache')
-
-    $headerCancellation = New-Object System.Threading.CancellationTokenSource
-    $headerCancellation.CancelAfter([TimeSpan]::FromSeconds(45))
-    $response = $client.SendAsync(
-        $request,
-        [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead,
-        $headerCancellation.Token
-    ).GetAwaiter().GetResult()
-    $response.EnsureSuccessStatusCode()
-
-    $total = -1L
-    if ($response.Content.Headers.ContentLength.HasValue) {
-        $total = [long]$response.Content.Headers.ContentLength.Value
-    }
-
-    $finalHost = $response.RequestMessage.RequestUri.Host
-    Write-DownloadState 'downloading' 0 $total 0 ("Downloading from {0}..." -f $finalHost)
-
-    $destinationDirectory = [System.IO.Path]::GetDirectoryName($Destination)
-    [System.IO.Directory]::CreateDirectory($destinationDirectory) | Out-Null
-
-    $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-    if ($stream.CanTimeout) {
-        $stream.ReadTimeout = 30000
-    }
-
-    $output = [System.IO.FileStream]::new(
-        $Destination,
-        [System.IO.FileMode]::Create,
-        [System.IO.FileAccess]::Write,
-        [System.IO.FileShare]::Read
-    )
-
-    $buffer = [byte[]]::new(1024 * 1024)
-    $downloaded = 0L
-    $lastBytes = 0L
-    $lastReport = [System.Diagnostics.Stopwatch]::StartNew()
-
-    while ($true) {
-        if (Test-Path -LiteralPath $CancelFile) {
-            throw [System.OperationCanceledException]::new('Download cancelled.')
-        }
-
-        $read = $stream.Read($buffer, 0, $buffer.Length)
-        if ($read -le 0) {
-            break
-        }
-
-        $output.Write($buffer, 0, $read)
-        $downloaded += $read
-
-        if ($lastReport.ElapsedMilliseconds -ge 200) {
-            $seconds = [Math]::Max($lastReport.Elapsed.TotalSeconds, 0.001)
-            $speed = ($downloaded - $lastBytes) / $seconds
-            Write-DownloadState 'downloading' $downloaded $total $speed ("Downloading from {0}..." -f $finalHost)
-            $lastBytes = $downloaded
-            $lastReport.Restart()
-        }
-    }
-
-    $output.Flush($true)
-    Write-DownloadState 'complete' $downloaded $downloaded 0 'Download complete.'
-    exit 0
-}
-catch [System.OperationCanceledException] {
-    Write-DownloadState 'cancelled' 0 -1 0 'Download cancelled.'
-    exit 1223
-}
-catch {
-    [Console]::Error.WriteLine($_.Exception.ToString())
-    exit 1
-}
-finally {
-    if ($null -ne $output) { $output.Dispose() }
-    if ($null -ne $stream) { $stream.Dispose() }
-    if ($null -ne $response) { $response.Dispose() }
-    if ($null -ne $client) { $client.Dispose() }
-    if ($null -ne $handler) { $handler.Dispose() }
-    if ($null -ne $headerCancellation) { $headerCancellation.Dispose() }
-}
-"""#
 }
 #else
 private final class ODADownloadOperation: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let destination: URL
-    private let onProgress: @Sendable (ODADownloadUpdate) async -> Void
+    private let onProgress: @Sendable (ODADownloadUpdate) -> Void
     private let lock = NSLock()
 
     private var continuation: CheckedContinuation<URL, Error>?
@@ -467,7 +523,7 @@ private final class ODADownloadOperation: NSObject, URLSessionDownloadDelegate, 
 
     init(
         destination: URL,
-        onProgress: @escaping @Sendable (ODADownloadUpdate) async -> Void
+        onProgress: @escaping @Sendable (ODADownloadUpdate) -> Void
     ) {
         self.destination = destination
         self.onProgress = onProgress
@@ -584,9 +640,7 @@ private final class ODADownloadOperation: NSObject, URLSessionDownloadDelegate, 
             status: nil
         )
 
-        Task {
-            await onProgress(update)
-        }
+        onProgress(update)
     }
 
     func urlSession(
@@ -686,12 +740,12 @@ public final class InstallODACommand: FeatureCommand {
     private var hasDeterminateProgress = false
     private var downloadSpeed = ""
     private var statusText = ""
+    private var sourceURLText = ""
+    private var operationStartedAt: Date?
     private var installTask: Task<Void, Never>?
     private var activeDownload: ODADownloadOperation?
-    private var activeProcess: Process?
-    private var installGeneration = UUID()
+    private var workerState: ODAInstallWorkerState?
     private var modalOpened = false
-    private var okClicked = false
 
     private static let fallbackURLs: [String: String] = [
         "windows": "https://www.opendesign.com/guestfiles/get?filename=ODAFileConverter_QT6_vc16_amd64dll_27.1.msi",
@@ -711,8 +765,9 @@ public final class InstallODACommand: FeatureCommand {
         hasDeterminateProgress = false
         downloadSpeed = ""
         statusText = ""
+        sourceURLText = ""
+        operationStartedAt = nil
         modalOpened = false
-        okClicked = false
         processor.commandPrompt = "ODA FileConverter installation."
     }
 
@@ -728,12 +783,7 @@ public final class InstallODACommand: FeatureCommand {
         engine: PhrostEngine,
         processor: CADCommandProcessor
     ) -> CommandResult {
-        if okClicked {
-            okClicked = false
-            processor.commandPrompt = nil
-            return .finished
-        }
-        return .continue
+        .continue
     }
 
     public func handleMouseMotion(
@@ -748,12 +798,7 @@ public final class InstallODACommand: FeatureCommand {
         engine: PhrostEngine,
         processor: CADCommandProcessor
     ) -> CommandResult {
-        if okClicked {
-            okClicked = false
-            processor.commandPrompt = nil
-            return .finished
-        }
-        return .continue
+        .continue
     }
 
     public func renderOverlay(cam: CameraTransform, engine: PhrostEngine) {}
@@ -769,6 +814,8 @@ public final class InstallODACommand: FeatureCommand {
     }
 
     public func renderImGui(engine: PhrostEngine) {
+        drainWorkerState()
+
         let id = "ODA FileConverter##InstallODA"
         if !modalOpened {
             ImGuiOpenPopup(id, Int32(ImGuiPopupFlags_None.rawValue))
@@ -788,8 +835,8 @@ public final class InstallODACommand: FeatureCommand {
             )
         case .downloading, .installing:
             desiredSize = ImVec2(
-                x: min(ImGuiGetFontSize() * 42, displayWidth * 0.70),
-                y: min(ImGuiGetFontSize() * 13, displayHeight * 0.70)
+                x: min(ImGuiGetFontSize() * 48, displayWidth * 0.78),
+                y: min(ImGuiGetFontSize() * 18, displayHeight * 0.74)
             )
         case .finished:
             desiredSize = ImVec2(
@@ -817,6 +864,12 @@ public final class InstallODACommand: FeatureCommand {
         guard ImGuiBeginPopupModal(id, &open, flags) else { return }
         defer { ImGuiEndPopup() }
 
+        if !open {
+            stopActiveInstall()
+            engine.commandProcessor.finishFeatureCommand(engine: engine)
+            return
+        }
+
         switch state {
         case .showingAgreement:
             renderAgreementContent()
@@ -825,7 +878,7 @@ public final class InstallODACommand: FeatureCommand {
         case .installing:
             renderInstallContent()
         case .finished(let success, let message):
-            renderFinishedContent(success: success, message: message)
+            renderFinishedContent(success: success, message: message, engine: engine)
         }
     }
 
@@ -885,12 +938,22 @@ public final class InstallODACommand: FeatureCommand {
         if hasDeterminateProgress {
             ImGuiProgressBar(downloadProgress, ImVec2(x: 0, y: 0), nil)
         } else {
-            ImGuiProgressBar(-1, ImVec2(x: 0, y: 0), nil)
+            ImGuiProgressBar(0, ImVec2(x: 0, y: 0), "Waiting for server response")
         }
 
         ImGuiSpacing()
-        if !statusText.isEmpty { ImGuiTextV(statusText) }
+        if !statusText.isEmpty { ImGuiTextWrappedV(statusText) }
         if !downloadSpeed.isEmpty { ImGuiTextV(downloadSpeed) }
+        if let operationStartedAt {
+            ImGuiTextDisabledV(
+                "Elapsed: \(Self.formatDuration(Date().timeIntervalSince(operationStartedAt)))"
+            )
+        }
+        if !sourceURLText.isEmpty {
+            ImGuiSpacing()
+            ImGuiTextV("Source URL:")
+            ImGuiTextWrappedV(sourceURLText)
+        }
         ImGuiSpacing()
 
         if ImGuiButton("Cancel", ImVec2(x: 120, y: 0)) {
@@ -901,12 +964,21 @@ public final class InstallODACommand: FeatureCommand {
     private func renderInstallContent() {
         ImGuiTextV("Installing ODA FileConverter...")
         ImGuiSpacing()
-        ImGuiProgressBar(-1, ImVec2(x: 0, y: 0), nil)
+        ImGuiProgressBar(Self.activityProgress(), ImVec2(x: 0, y: 0), "Installing")
         ImGuiSpacing()
-        if !statusText.isEmpty { ImGuiTextV(statusText) }
+        if !statusText.isEmpty { ImGuiTextWrappedV(statusText) }
+        if let operationStartedAt {
+            ImGuiTextDisabledV(
+                "Elapsed: \(Self.formatDuration(Date().timeIntervalSince(operationStartedAt)))"
+            )
+        }
     }
 
-    private func renderFinishedContent(success: Bool, message: String) {
+    private func renderFinishedContent(
+        success: Bool,
+        message: String,
+        engine: PhrostEngine
+    ) {
         if success {
             ImGuiTextColoredV(
                 ImVec4(x: 0.2, y: 0.9, z: 0.3, w: 1),
@@ -931,9 +1003,8 @@ public final class InstallODACommand: FeatureCommand {
 
         if ImGuiButton("OK", ImVec2(x: 120, y: 0)) {
             stopActiveInstall()
-            okClicked = true
-            modalOpened = false
             ImGuiCloseCurrentPopup()
+            engine.commandProcessor.finishFeatureCommand(engine: engine)
         }
     }
 
@@ -950,18 +1021,21 @@ public final class InstallODACommand: FeatureCommand {
 
         let requestURL = Self.cacheBustedURL(baseURL)
         let temporaryFile = Self.temporaryDownloadURL(for: baseURL)
-        let generation = UUID()
-        installGeneration = generation
+        let workerState = ODAInstallWorkerState()
+        self.workerState = workerState
+
         state = .downloading
         statusText = "Connecting to Open Design Alliance..."
+        sourceURLText = requestURL.absoluteString
+        operationStartedAt = Date()
         downloadProgress = 0
         hasDeterminateProgress = false
         downloadSpeed = ""
 
         let download = ODADownloadOperation(
             destination: temporaryFile,
-            onProgress: { [weak self] update in
-                await self?.applyDownloadUpdate(update, generation: generation)
+            onProgress: { update in
+                workerState.publishDownload(update)
             }
         )
         activeDownload = download
@@ -969,9 +1043,7 @@ public final class InstallODACommand: FeatureCommand {
         print("[InstallODA] Downloading \(requestURL.absoluteString)")
         print("[InstallODA] To: \(temporaryFile.path)")
 
-        installTask = Task.detached(priority: .userInitiated) { [weak self, download] in
-            guard let self else { return }
-
+        installTask = Task.detached(priority: .userInitiated) { [download, workerState] in
             do {
                 let file = try await download.download(from: requestURL)
                 defer { try? FileManager.default.removeItem(at: file) }
@@ -981,38 +1053,36 @@ public final class InstallODACommand: FeatureCommand {
                 #endif
 
                 try Task.checkCancellation()
-                guard await self.beginInstalling(generation: generation) else {
-                    throw CancellationError()
-                }
+                workerState.publishInstallStatus("Preparing installer...")
 
                 let installedPath = try await Self.runInstall(
                     file: file,
-                    onProcess: { [weak self] process in
-                        await self?.setActiveProcess(process, generation: generation)
+                    onProcess: { process in
+                        workerState.setActiveProcess(process)
                     },
-                    onStatus: { [weak self] status in
-                        await self?.applyInstallStatus(status, generation: generation)
+                    onStatus: { status in
+                        workerState.publishInstallStatus(status)
                     }
                 )
 
                 try Task.checkCancellation()
-                UserDefaults.standard.set(installedPath, forKey: "ODAFileConverterPath")
-                await self.completeInstall(
-                    generation: generation,
+                workerState.finish(
                     success: true,
-                    message: "ODA FileConverter installed. You can now open and save DWG files."
+                    message: "ODA FileConverter installed. You can now open and save DWG files.",
+                    installedPath: installedPath
                 )
             } catch is CancellationError {
-                await self.completeInstall(
-                    generation: generation,
+                workerState.finish(
                     success: false,
                     message: "Cancelled."
                 )
             } catch {
-                await self.completeInstall(
-                    generation: generation,
+                workerState.finish(
                     success: false,
-                    message: error.localizedDescription
+                    message: Self.failureMessage(
+                        error,
+                        sourceURL: requestURL
+                    )
                 )
             }
         }
@@ -1022,40 +1092,59 @@ public final class InstallODACommand: FeatureCommand {
         stopActiveInstall()
         statusText = ""
         downloadSpeed = ""
+        operationStartedAt = nil
         state = .finished(success: false, message: "Cancelled.")
     }
 
     private func stopActiveInstall() {
-        installGeneration = UUID()
+        let workerState = self.workerState
+        self.workerState = nil
+        workerState?.cancel()
 
         let download = activeDownload
         activeDownload = nil
         download?.cancel()
-
-        let process = activeProcess
-        activeProcess = nil
-        if let process, process.isRunning {
-            process.terminate()
-        }
 
         let task = installTask
         installTask = nil
         task?.cancel()
     }
 
-    private func setActiveProcess(_ process: Process?, generation: UUID) {
-        guard installGeneration == generation else {
-            if let process, process.isRunning {
-                process.terminate()
-            }
-            return
+    private func drainWorkerState() {
+        guard let workerState else { return }
+        let snapshot = workerState.drain()
+
+        if let update = snapshot.downloadUpdate {
+            applyDownloadUpdate(update)
         }
-        activeProcess = process
+
+        if let status = snapshot.installStatus {
+            if case .downloading = state {
+                state = .installing
+                operationStartedAt = Date()
+                downloadSpeed = ""
+            }
+            statusText = status
+        }
+
+        if let completion = snapshot.completion {
+            activeDownload = nil
+            installTask = nil
+            self.workerState = nil
+            operationStartedAt = nil
+
+            if completion.success, let installedPath = completion.installedPath {
+                UserDefaults.standard.set(installedPath, forKey: "ODAFileConverterPath")
+            }
+
+            state = .finished(
+                success: completion.success,
+                message: completion.message
+            )
+        }
     }
 
-    private func applyDownloadUpdate(_ update: ODADownloadUpdate, generation: UUID) {
-        guard installGeneration == generation else { return }
-
+    private func applyDownloadUpdate(_ update: ODADownloadUpdate) {
         if let progress = update.progress {
             hasDeterminateProgress = true
             downloadProgress = max(0, min(progress, 1))
@@ -1070,36 +1159,11 @@ public final class InstallODACommand: FeatureCommand {
         } else {
             statusText = "\(Self.formatBytes(update.downloadedBytes)) downloaded"
         }
-        downloadSpeed = update.bytesPerSecond > 0
-            ? Self.formatSpeed(update.bytesPerSecond)
-            : ""
-    }
-
-    private func beginInstalling(generation: UUID) -> Bool {
-        guard installGeneration == generation else { return false }
-        activeDownload = nil
-        activeProcess = nil
-        state = .installing
-        statusText = "Preparing installer..."
-        downloadSpeed = ""
-        return true
-    }
-
-    private func applyInstallStatus(_ status: String, generation: UUID) {
-        guard installGeneration == generation else { return }
-        statusText = status
-    }
-
-    private func completeInstall(
-        generation: UUID,
-        success: Bool,
-        message: String
-    ) {
-        guard installGeneration == generation else { return }
-        activeDownload = nil
-        activeProcess = nil
-        installTask = nil
-        state = .finished(success: success, message: message)
+        if update.bytesPerSecond > 0 {
+            downloadSpeed = Self.formatSpeed(update.bytesPerSecond)
+        } else if update.downloadedBytes <= 0 {
+            downloadSpeed = ""
+        }
     }
 
     private func resolveURL() throws -> URL {
@@ -1178,8 +1242,8 @@ public final class InstallODACommand: FeatureCommand {
 
     nonisolated private static func runInstall(
         file: URL,
-        onProcess: @escaping @Sendable (Process?) async -> Void,
-        onStatus: @escaping @Sendable (String) async -> Void
+        onProcess: @escaping @Sendable (Process?) -> Void,
+        onStatus: @escaping @Sendable (String) -> Void
     ) async throws -> String {
         guard let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
@@ -1202,23 +1266,58 @@ public final class InstallODACommand: FeatureCommand {
         )
 
         #if os(Windows)
-        await onStatus("Extracting ODA FileConverter...")
+        onStatus("Starting Windows Installer...")
         let windowsDirectory = ProcessInfo.processInfo.environment["WINDIR"] ?? "C:\\Windows"
         let msiexec = windowsDirectory
             .trimmingCharacters(in: CharacterSet(charactersIn: "\\/"))
             + "\\System32\\msiexec.exe"
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+        let installerID = UUID().uuidString
+        let installerLog = temporaryDirectory
+            .appendingPathComponent("oda-msi-\(installerID).log")
+        let installerScript = temporaryDirectory
+            .appendingPathComponent("oda-msi-\(installerID).cmd")
+        defer {
+            try? FileManager.default.removeItem(at: installerLog)
+            try? FileManager.default.removeItem(at: installerScript)
+        }
+
+        let cmd = windowsDirectory
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\\/"))
+            + "\\System32\\cmd.exe"
+        let nativeMSIPath = windowsNativePath(file.path)
+        let nativeLogPath = windowsNativePath(installerLog.path)
+        let nativeTargetPath = windowsNativePath(target.path)
+        let nativeMSIExecPath = windowsNativePath(msiexec)
+
+        let script = """
+        @echo off
+        "%ODA_MSIEXEC%" /a "%ODA_MSI_PACKAGE%" /qn /norestart /L*v "%ODA_MSI_LOG%" TARGETDIR="%ODA_MSI_TARGET%"
+        exit /b %ERRORLEVEL%
+        """
+        try Data(script.utf8).write(to: installerScript, options: .atomic)
+
+        print(
+            "[InstallODA] msiexec /a \"\(nativeMSIPath)\" /qn "
+                + "/norestart /L*v \"\(nativeLogPath)\" "
+                + "TARGETDIR=\"\(nativeTargetPath)\""
+        )
 
         _ = try await run(
-            exe: msiexec,
-            args: [
-                "/a",
-                file.path,
-                "/qn",
-                "/norestart",
-                "TARGETDIR=\(target.path)",
-            ],
+            exe: cmd,
+            args: ["/D", "/Q", "/C", installerScript.lastPathComponent],
             successfulExitCodes: [0, 1641, 3010],
-            onProcess: onProcess
+            onProcess: onProcess,
+            runningStatus: "Windows Installer is extracting ODA FileConverter",
+            onStatus: onStatus,
+            diagnosticFile: installerLog,
+            environment: [
+                "ODA_MSIEXEC": nativeMSIExecPath,
+                "ODA_MSI_PACKAGE": nativeMSIPath,
+                "ODA_MSI_LOG": nativeLogPath,
+                "ODA_MSI_TARGET": nativeTargetPath,
+            ],
+            currentDirectoryURL: temporaryDirectory
         )
 
         guard let converter = findConverter(
@@ -1236,7 +1335,7 @@ public final class InstallODACommand: FeatureCommand {
         }
         return converter.path
         #elseif os(macOS)
-        await onStatus("Mounting disk image...")
+        onStatus("Mounting disk image...")
         let output = try await run(
             exe: "/usr/bin/hdiutil",
             args: ["attach", file.path, "-nobrowse", "-plist"],
@@ -1264,7 +1363,7 @@ public final class InstallODACommand: FeatureCommand {
             )
         }
 
-        await onStatus("Copying ODA FileConverter...")
+        onStatus("Copying ODA FileConverter...")
         let source = URL(fileURLWithPath: "\(mountPoint)/ODAFileConverter.app")
         let destination = target.appendingPathComponent("ODAFileConverter.app")
         if FileManager.default.fileExists(atPath: destination.path) {
@@ -1272,7 +1371,7 @@ public final class InstallODACommand: FeatureCommand {
         }
         try FileManager.default.copyItem(at: source, to: destination)
 
-        await onStatus("Clearing quarantine...")
+        onStatus("Clearing quarantine...")
         _ = try? await run(
             exe: "/usr/bin/xattr",
             args: ["-r", "-d", "com.apple.quarantine", destination.path],
@@ -1288,6 +1387,11 @@ public final class InstallODACommand: FeatureCommand {
             userInfo: [NSLocalizedDescriptionKey: "Unsupported platform"]
         )
         #endif
+    }
+
+
+    nonisolated private static func windowsNativePath(_ path: String) -> String {
+        path.replacingOccurrences(of: "/", with: "\\")
     }
 
     nonisolated private static func findConverter(
@@ -1322,7 +1426,12 @@ public final class InstallODACommand: FeatureCommand {
         exe: String,
         args: [String],
         successfulExitCodes: Set<Int32> = [0],
-        onProcess: @escaping @Sendable (Process?) async -> Void
+        onProcess: @escaping @Sendable (Process?) -> Void,
+        runningStatus: String? = nil,
+        onStatus: (@Sendable (String) -> Void)? = nil,
+        diagnosticFile: URL? = nil,
+        environment: [String: String]? = nil,
+        currentDirectoryURL: URL? = nil
     ) async throws -> String {
         let fileManager = FileManager.default
         let outputFile = fileManager.temporaryDirectory
@@ -1356,6 +1465,13 @@ public final class InstallODACommand: FeatureCommand {
         process.arguments = args
         process.standardOutput = outputHandle
         process.standardError = errorHandle
+        process.currentDirectoryURL = currentDirectoryURL
+
+        if let environment {
+            var mergedEnvironment = ProcessInfo.processInfo.environment
+            mergedEnvironment.merge(environment) { _, replacement in replacement }
+            process.environment = mergedEnvironment
+        }
 
         print("[InstallODA] \(exe) \(args.joined(separator: " "))")
 
@@ -1372,11 +1488,25 @@ public final class InstallODACommand: FeatureCommand {
             )
         }
 
-        await onProcess(process)
+        onProcess(process)
 
         do {
+            let processStartedAt = Date()
+            var lastStatusUpdate = Date.distantPast
+
             while process.isRunning {
                 try Task.checkCancellation()
+
+                if let runningStatus,
+                   let onStatus,
+                   Date().timeIntervalSince(lastStatusUpdate) >= 1 {
+                    let elapsed = Date().timeIntervalSince(processStartedAt)
+                    onStatus(
+                        "\(runningStatus)... \(Self.formatDuration(elapsed)) elapsed"
+                    )
+                    lastStatusUpdate = Date()
+                }
+
                 try await Task.sleep(for: .milliseconds(100))
             }
             try Task.checkCancellation()
@@ -1384,19 +1514,31 @@ public final class InstallODACommand: FeatureCommand {
             if process.isRunning {
                 process.terminate()
             }
-            await onProcess(nil)
+            onProcess(nil)
             throw error
         }
 
-        await onProcess(nil)
+        onProcess(nil)
         try? outputHandle.synchronize()
         try? errorHandle.synchronize()
+        try? outputHandle.close()
+        try? errorHandle.close()
 
         let output = (try? String(contentsOf: outputFile, encoding: .utf8)) ?? ""
         let errorOutput = (try? String(contentsOf: errorFile, encoding: .utf8)) ?? ""
 
         guard successfulExitCodes.contains(process.terminationStatus) else {
-            let detail = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+            let standardError = errorOutput.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            let standardOutput = output.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            let diagnostic = diagnosticFile
+                .flatMap { Self.readDiagnosticTail($0) } ?? ""
+            let detail = [standardError, standardOutput, diagnostic]
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
             let message = detail.isEmpty
                 ? "\(URL(fileURLWithPath: exe).lastPathComponent) exited with code \(process.terminationStatus)."
                 : detail
@@ -1409,6 +1551,56 @@ public final class InstallODACommand: FeatureCommand {
         }
 
         return output
+    }
+
+    nonisolated private static func failureMessage(
+        _ error: Error,
+        sourceURL: URL
+    ) -> String {
+        let description = error.localizedDescription
+        return "\(description)\n\nSource URL:\n\(sourceURL.absoluteString)"
+    }
+
+    nonisolated private static func readDiagnosticTail(_ url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            return nil
+        }
+
+        let maximumBytes = 16 * 1024
+        let tail = data.suffix(maximumBytes)
+        guard let text = String(data: tail, encoding: .utf8) else {
+            return nil
+        }
+
+        let lines = text
+            .components(separatedBy: .newlines)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard !lines.isEmpty else { return nil }
+
+        let important = lines.filter {
+            $0.localizedCaseInsensitiveContains("error")
+                || $0.localizedCaseInsensitiveContains("return value 3")
+        }
+        return (important.isEmpty ? Array(lines.suffix(12)) : Array(important.suffix(12)))
+            .joined(separator: "\n")
+    }
+
+    nonisolated private static func activityProgress() -> Float {
+        let seconds = Date().timeIntervalSinceReferenceDate
+        let phase = seconds.truncatingRemainder(dividingBy: 2.0) / 2.0
+        let pulse = phase <= 0.5
+            ? phase * 2.0
+            : (1.0 - phase) * 2.0
+        return Float(0.12 + pulse * 0.76)
+    }
+
+    nonisolated private static func formatDuration(_ interval: TimeInterval) -> String {
+        let totalSeconds = max(0, Int(interval))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return minutes > 0
+            ? String(format: "%d:%02d", minutes, seconds)
+            : "\(seconds)s"
     }
 
     nonisolated private static func formatBytes(_ bytes: Int64) -> String {
