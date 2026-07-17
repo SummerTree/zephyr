@@ -13,6 +13,30 @@ import WinSDK
 
 public enum CADFontManager {
 
+    public static func resolveTextStyleFont(
+        styleName: String?,
+        textStyleFonts: [String: String],
+        fallback: String = "simplex.shx"
+    ) -> String {
+        guard let styleName else { return fallback }
+        let trimmed = styleName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return fallback }
+
+        if let exact = textStyleFonts[trimmed], !exact.isEmpty {
+            return exact
+        }
+
+        let normalized = trimmed.lowercased()
+        for (name, font) in textStyleFonts {
+            if name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized,
+               !font.isEmpty {
+                return font
+            }
+        }
+
+        return fallback
+    }
+
     internal nonisolated static let cacheLock = NSRecursiveLock()
     internal static nonisolated(unsafe) var shxFontCache: [String: SHXShapeFont] = [:]
 

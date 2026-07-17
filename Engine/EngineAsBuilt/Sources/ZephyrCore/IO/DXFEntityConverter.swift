@@ -1497,7 +1497,12 @@ public enum DXFEntityConverter {
     public static func cleanMTextFormatting(_ text: String) -> String {
         var clean = ""; var i = text.startIndex
         while i < text.endIndex {
-            let c = text[i]; let nextI = text.index(after: i)
+            let c = text[i]
+            if c == "{" || c == "}" {
+                i = text.index(after: i)
+                continue
+            }
+            let nextI = text.index(after: i)
             guard nextI < text.endIndex else { clean.append(c); break }
             let next = text[nextI]
             if c == "\\" || c == "¥" {

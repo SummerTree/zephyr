@@ -533,7 +533,9 @@ public final class CADRendererBridge {
                                     : currentZ + 1000000.0
 
                                 if case .text(let pos, let text, let height, let rotation, let style, let alignH, let alignV, let mtextWidth, _) = primitive {
-                                    let fontFile = style.flatMap { snapshot.textStyleFonts[$0] } ?? "simplex.shx"
+                                    let fontFile = CADFontManager.resolveTextStyleFont(
+                                        styleName: style,
+                                        textStyleFonts: snapshot.textStyleFonts)
                                     let resolvedColor = drawStyle.color
                                     let spriteColor = (resolvedColor.r, resolvedColor.g, resolvedColor.b, resolvedColor.a)
 
@@ -693,12 +695,9 @@ public final class CADRendererBridge {
                         for vt in chunk {
                             let baseZ = Double(vt.index) * zBand + 1000000.0
                             let color = (vt.color.r, vt.color.g, vt.color.b, vt.color.a)
-                            let fontFile: String
-                            if let styleName = vt.textStyle, let mappedFont = snapshot.textStyleFonts[styleName] {
-                                fontFile = mappedFont
-                            } else {
-                                fontFile = "simplex.shx"
-                            }
+                            let fontFile = CADFontManager.resolveTextStyleFont(
+                                styleName: vt.textStyle,
+                                textStyleFonts: snapshot.textStyleFonts)
                             
                             var specs: [PrimitiveSpec] = []
                             var textSprites: [TextSpriteSpec] = []

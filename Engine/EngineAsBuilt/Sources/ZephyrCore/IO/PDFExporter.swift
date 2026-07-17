@@ -285,11 +285,15 @@ public enum PDFExporter {
                 if let th = entity.xdata["dxf.textHeight"], case .double(let v) = th { height = v }
                 else { height = 2.5 }
 
-                var fontFile = "simplex.shx"
-                if let ts = entity.xdata["dxf.textStyle"], case .string(let styleName) = ts,
-                   let mapped = document.textStyleFonts[styleName] {
-                    fontFile = mapped
+                let styleName: String?
+                if let ts = entity.xdata["dxf.textStyle"], case .string(let value) = ts {
+                    styleName = value
+                } else {
+                    styleName = nil
                 }
+                let fontFile = CADFontManager.resolveTextStyleFont(
+                    styleName: styleName,
+                    textStyleFonts: document.textStyleFonts)
 
                 let alignH: Int
                 if let ah = entity.xdata["dxf.alignH"], case .int(let v) = ah { alignH = v }

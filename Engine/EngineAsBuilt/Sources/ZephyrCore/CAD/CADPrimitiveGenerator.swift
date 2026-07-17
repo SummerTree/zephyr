@@ -711,7 +711,9 @@ public enum CADPrimitiveGenerator {
             specs.append(contentsOf: makePathSpecs(points: pts, dashPattern: dashPattern, scale: lineTypeScale, weight: lineWeight, z: z, color: finalColor))
             
         case .text(let pos, let text, let height, let rotation, let style, let alignH, let alignV, let mtextWidth, _):
-            let fontFile = style.flatMap { textStyleFonts[$0] } ?? "simplex.shx"
+            let fontFile = CADFontManager.resolveTextStyleFont(
+                styleName: style,
+                textStyleFonts: textStyleFonts)
 
             let origin = transform.transformPoint(pos)
             let localX = Vector3(x: cos(rotation), y: sin(rotation), z: 0)

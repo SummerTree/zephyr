@@ -457,6 +457,7 @@ public enum DXFImporter {
                             attribute,
                             bylayerColor: nil)
                         guard !primitives.isEmpty else { continue }
+                        let normalized = Self.normalizedStandaloneTextGeometry(primitives)
                         let attributeLayerID = attribute.layer.isEmpty
                             || attribute.layer == "0"
                             ? layerID(for: insert)
@@ -465,8 +466,8 @@ public enum DXFImporter {
                             handle: UUID(),
                             layerID: attributeLayerID,
                             blockID: nil,
-                            localGeometry: primitives,
-                            transform: .identity,
+                            localGeometry: normalized.geometry,
+                            transform: normalized.transform,
                             xdata: Self.attributeStyleXData(
                                 from: attribute,
                                 insert: insert,
@@ -526,12 +527,13 @@ public enum DXFImporter {
                     bylayerColor: nil,
                     showAttributeDefinitionTagWhenEmpty: entity.eType == .aTTDEF)
                 guard !primitives.isEmpty || entity.eType == .pOINT else { continue }
+                let normalized = Self.normalizedStandaloneTextGeometry(primitives)
                 var cadEnt = CADEntity(
                     handle: UUID(),
                     layerID: layerID(for: entity),
                     blockID: nil,
-                    localGeometry: primitives,
-                    transform: .identity,
+                    localGeometry: normalized.geometry,
+                    transform: normalized.transform,
                     xdata: Self.entityStyleXData(
                         from: entity,
                         globalLineTypeScale: globalLineTypeScale))
@@ -820,6 +822,7 @@ public enum DXFImporter {
         _ entity: DXFEntity,
         insideBlockDefinition: Bool = false
     ) -> Bool {
+        guard entity.visible else { return false }
         guard let text = entity as? DXFTextEntity else { return true }
 
         let invisibleFlag = 1
@@ -841,6 +844,36 @@ public enum DXFImporter {
         default:
             return true
         }
+    }
+
+    private static func normalizedStandaloneTextGeometry(
+        _ primitives: [CADPrimitive]
+    ) -> (geometry: [CADPrimitive], transform: Transform3D) {
+        guard primitives.count == 1,
+              case .text(
+                let position, let text, let height, let rotation, let style,
+                let alignH, let alignV, let mtextWidth, let color
+              ) = primitives[0]
+        else {
+            return (primitives, .identity)
+        }
+
+        var transform = Transform3D.translated(by: position)
+        if abs(rotation) > 1e-12 {
+            transform = transform.multiplying(by: .rotated(by: rotation))
+        }
+
+        let localText = CADPrimitive.text(
+            position: .zero,
+            text: text,
+            height: height,
+            rotation: 0,
+            style: style,
+            alignH: alignH,
+            alignV: alignV,
+            mtextWidth: mtextWidth,
+            color: color)
+        return ([localText], transform)
     }
 
     private static func attributeStyleXData(

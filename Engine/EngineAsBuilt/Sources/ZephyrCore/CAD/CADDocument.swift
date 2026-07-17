@@ -1012,7 +1012,9 @@ public final class CADDocument {
         let worldHeight = height * max(worldY.magnitude, 1e-12)
         let worldWidth = mtextWidth.map { $0 * max(worldX.magnitude, 1e-12) }
         let worldRotation = atan2(worldX.y, worldX.x)
-        let fontFile = style.flatMap { textStyleFonts[$0] } ?? "simplex.shx"
+        let fontFile = CADFontManager.resolveTextStyleFont(
+            styleName: style,
+            textStyleFonts: textStyleFonts)
 
         if let font = CADFontManager.getOrLoadSHXFont(filename: fontFile) {
             let primitives = font.renderText(

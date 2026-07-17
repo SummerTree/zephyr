@@ -146,7 +146,9 @@ enum PDFPrimitives {
         let finalMaxWidth = mtextWidth.map { $0 * widthScale }
 
         let resolvedColor = color ?? entityColor
-        let fontFile = style.flatMap { document.textStyleFonts[$0] } ?? "simplex.shx"
+        let fontFile = CADFontManager.resolveTextStyleFont(
+            styleName: style,
+            textStyleFonts: document.textStyleFonts)
 
         if let font = CADFontManager.getOrLoadSHXFont(filename: fontFile) {
             let glyphPrims = font.renderText(
