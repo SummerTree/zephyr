@@ -70,6 +70,15 @@ public final class EngineTextManager {
     // MARK: - Font Cache
     
     internal var fontCache: [String: OpaquePointer?] = [:]
+
+    private struct CADFontMetrics {
+        let capHeightPixels: Double
+        let lineHeightPixels: Double
+        let ascentPixels: Double
+        let descentPixels: Double
+    }
+
+    private var cadFontMetricsCache: [UInt: CADFontMetrics] = [:]
     
     public init() {}
     
@@ -92,6 +101,36 @@ public final class EngineTextManager {
         print("Loaded font '\(path)' at size \(size) into cache.")
         fontCache[cacheKey] = newFont
         return newFont
+    }
+
+    private func cadFontMetrics(for font: OpaquePointer) -> CADFontMetrics {
+        let key = UInt(bitPattern: font)
+        if let cached = cadFontMetricsCache[key] {
+            return cached
+        }
+
+        var minX: Int32 = 0
+        var maxX: Int32 = 0
+        var minY: Int32 = 0
+        var maxY: Int32 = 0
+        var advance: Int32 = 0
+
+        let lineHeight = max(Double(TTF_GetFontHeight(font)), 1.0)
+        let hasCapMetrics = TTF_GetGlyphMetrics(
+            font, UInt32(72),
+            &minX, &maxX, &minY, &maxY, &advance)
+        let capHeight = hasCapMetrics
+            ? max(Double(maxY - minY), 1.0)
+            : lineHeight
+        let ascent = max(Double(TTF_GetFontAscent(font)), capHeight)
+        let descent = min(Double(TTF_GetFontDescent(font)), 0.0)
+        let metrics = CADFontMetrics(
+            capHeightPixels: capHeight,
+            lineHeightPixels: max(lineHeight, capHeight),
+            ascentPixels: ascent,
+            descentPixels: descent)
+        cadFontMetricsCache[key] = metrics
+        return metrics
     }
 
     /// Renders a string of text to a new SDL_Texture.
@@ -250,9 +289,12 @@ public final class EngineTextManager {
         position: Vector3,
         rotation: Double,
         height: Double,
+        widthFactor: Double = 1.0,
         maxWidth: Double?,
         alignH: Int,
         alignV: Int,
+        lineSpacingFactor: Double = 1.0,
+        lineSpacingStyle: Int = 1,
         color: (UInt8, UInt8, UInt8, UInt8),
         backgroundScale: Double? = nil,
         backgroundColor: (UInt8, UInt8, UInt8, UInt8)? = nil,
@@ -266,10 +308,10 @@ public final class EngineTextManager {
             return ([], [])
         }
 
-        let sample = measureTextPixels(font: font, text: "Hg")
-        let pixelHeight = max(sample.h, 1.0)
-        let worldScale = height / pixelHeight
-        let maxWidthPixels = maxWidth.map { $0 / worldScale }
+        let metrics = cadFontMetrics(for: font)
+        let worldScale = height / metrics.capHeightPixels
+        let horizontalWorldScale = worldScale * max(widthFactor, 1e-9)
+        let maxWidthPixels = maxWidth.map { $0 / horizontalWorldScale }
 
         let lines = CADTextFormatter.layout(text, maxWidth: maxWidthPixels) { s in
             measureTextPixels(font: font, text: s).w
@@ -277,7 +319,12 @@ public final class EngineTextManager {
 
         let cosR = cos(rotation)
         let sinR = sin(rotation)
-        let lineHeightWorld = height * 1.666
+        let spacingFactor = max(lineSpacingFactor, 0.01)
+        let requestedLineHeight = height * (5.0 / 3.0) * spacingFactor
+        let renderedLineHeight = metrics.lineHeightPixels * worldScale
+        let lineHeightWorld = lineSpacingStyle == 2
+            ? requestedLineHeight
+            : max(requestedLineHeight, renderedLineHeight)
         let blockHeight = Double(max(lines.count, 1) - 1) * lineHeightWorld + height
 
         let baseY: Double
@@ -317,7 +364,7 @@ public final class EngineTextManager {
 
             for (lineIndex, line) in lines.enumerated() where !line.text.isEmpty {
                 let metrics = measureTextPixels(font: font, text: line.text)
-                let lineWidthWorld = metrics.w * worldScale
+                let lineWidthWorld = metrics.w * horizontalWorldScale
                 let lineHeightWorldActual = max(metrics.h, 1.0) * worldScale
                 let offsetX: Double
                 switch alignH {
@@ -367,7 +414,7 @@ public final class EngineTextManager {
                 font: font, text: lineText, color: sdlColor, renderer: renderer, gpuDevice: gpuDevice)
             guard let texture = rendered.texture else { continue }
 
-            let lineWidthWorld = rendered.w * worldScale
+            let lineWidthWorld = rendered.w * horizontalWorldScale
 
             let offsetX: Double
             switch alignH {
@@ -380,7 +427,7 @@ public final class EngineTextManager {
             }
 
             let offsetY = baseY + Double(lineIndex) * lineHeightWorld
-            let quadWidth = rendered.w * worldScale
+            let quadWidth = rendered.w * horizontalWorldScale
             let quadHeight = rendered.h * worldScale
             let halfWidth = quadWidth * 0.5
             let halfHeight = quadHeight * 0.5
@@ -403,7 +450,7 @@ public final class EngineTextManager {
             let sprite = Sprite(
                 id: id,
                 position: (p.x, p.y, p.z),
-                scale: (worldScale, worldScale, 1.0),
+                scale: (horizontalWorldScale, worldScale, 1.0),
                 size: (rendered.w, rendered.h),
                 rotate: (0.0, 0.0, rotation * 180.0 / .pi),
                 color: color,
@@ -454,11 +501,15 @@ public final class EngineTextManager {
                 measureTextPixels(font: font, text: s).w
             }
 
-            let underlineY = offsetY + height * 0.92
+            let underlineOffsetPixels = max(
+                1.0,
+                min(metrics.capHeightPixels * 1, -metrics.descentPixels))
+            let underlineY = offsetY
+                + (metrics.ascentPixels + underlineOffsetPixels) * worldScale
 
             for range in ranges {
-                let x1 = offsetX + range.x * worldScale
-                let x2 = offsetX + (range.x + range.width) * worldScale
+                let x1 = offsetX + range.x * horizontalWorldScale
+                let x2 = offsetX + (range.x + range.width) * horizontalWorldScale
                 let p1 = worldPoint(localX: x1, localY: underlineY)
                 let p2 = worldPoint(localX: x2, localY: underlineY)
 

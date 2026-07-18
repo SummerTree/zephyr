@@ -54,10 +54,12 @@ public enum CADFontManager {
             return trimmed
         }
 
-        return resolveTextStyleFont(
+        let styleFont = resolveTextStyleFont(
             styleName: trimmed,
             textStyleFonts: textStyleFonts,
-            fallback: fallback)
+            fallback: "")
+
+        return styleFont.isEmpty ? trimmed : styleFont
     }
 
     public static func resolveFormattedSHXFont(

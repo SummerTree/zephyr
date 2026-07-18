@@ -21,9 +21,12 @@ import SwiftSDL
         public let z: Double
         public let rotation: Double
         public let height: Double
+        public let widthFactor: Double
         public let maxWidth: Double?
         public let alignH: Int
         public let alignV: Int
+        public let lineSpacingFactor: Double
+        public let lineSpacingStyle: Int
         public let color: (UInt8, UInt8, UInt8, UInt8)
         public let backgroundScale: Double?
         public let backgroundColor: (UInt8, UInt8, UInt8, UInt8)?
@@ -38,10 +41,13 @@ import SwiftSDL
             z: Double,
             rotation: Double,
             height: Double,
+            widthFactor: Double = 1.0,
             maxWidth: Double?,
             alignH: Int,
             alignV: Int,
             color: (UInt8, UInt8, UInt8, UInt8),
+            lineSpacingFactor: Double = 1.0,
+            lineSpacingStyle: Int = 1,
             backgroundScale: Double? = nil,
             backgroundColor: (UInt8, UInt8, UInt8, UInt8)? = nil,
             backgroundUsesViewportColor: Bool = false
@@ -54,9 +60,12 @@ import SwiftSDL
             self.z = z
             self.rotation = rotation
             self.height = height
+            self.widthFactor = widthFactor
             self.maxWidth = maxWidth
             self.alignH = alignH
             self.alignV = alignV
+            self.lineSpacingFactor = lineSpacingFactor
+            self.lineSpacingStyle = lineSpacingStyle
             self.color = color
             self.backgroundScale = backgroundScale
             self.backgroundColor = backgroundColor
@@ -303,6 +312,7 @@ public enum CADPrimitiveGenerator {
         lineWeight: Double = 0.25,
         lineTypeScale: Double = 1.0,
         geomWidth: Double = 0.0,
+        textWidthFactor: Double = 1.0,
         textStyleFonts: [String: String] = [:],
         linetypePatterns: [String: [Double]] = [:],
         opacityMultiplier: Double = 1.0,
@@ -725,6 +735,8 @@ public enum CADPrimitiveGenerator {
             let heightScale = max(worldY.magnitude, 1e-12)
             let widthScale = max(worldX.magnitude, 1e-12)
             let finalHeight = height * heightScale
+            let finalWidthFactor = max(textWidthFactor, 1e-9)
+                * widthScale / heightScale
             let finalMaxWidth = mtextWidth.map { $0 * widthScale }
 
             var localSpecs: [PrimitiveSpec] = []
@@ -736,6 +748,7 @@ public enum CADPrimitiveGenerator {
                     rotation: finalRotation,
                     alignH: alignH,
                     alignV: alignV,
+                    widthFactor: finalWidthFactor,
                     maxWidth: finalMaxWidth
                 )
                 if textPrims.count > 500 {
@@ -954,6 +967,7 @@ public enum CADPrimitiveGenerator {
                     color: finalColor, z: z,
                     lineType: lineType, lineWeight: lineWeight,
                     lineTypeScale: lineTypeScale, geomWidth: geomWidth,
+                    textWidthFactor: textWidthFactor,
                     textStyleFonts: textStyleFonts,
                     linetypePatterns: linetypePatterns,
                     opacityMultiplier: opacityMultiplier,

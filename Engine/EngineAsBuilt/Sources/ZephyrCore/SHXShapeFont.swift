@@ -598,41 +598,51 @@ public final class SHXShapeFont: @unchecked Sendable {
         rotation: Double = 0,
         alignH: Int = 0,
         alignV: Int = 0,
+        widthFactor: Double = 1.0,
         maxWidth: Double? = nil
     ) -> [CADPrimitive] {
         var primitives: [CADPrimitive] = []
-        let scale = height / fontHeight  // scale from font space to world space
+        let scaleY = height / fontHeight
+        let scaleX = scaleY * max(widthFactor, 1e-9)
         let cosR = cos(rotation)
         let sinR = sin(rotation)
-        let spaceAdvance = glyphs[0x20]?.advanceX ?? (fontHeight * 0.6)
+        let storedSpaceAdvance = glyphs[0x20]?.advanceX ?? 0.0
+        let spaceAdvance = storedSpaceAdvance > 0
+            ? min(storedSpaceAdvance, fontHeight * 0.4)
+            : fontHeight * 0.4
 
         // Split text into explicit paragraphs first
         let paragraphs = text.components(separatedBy: "\n")
         var finalLines: [String] = []
 
         if let maxW = maxWidth, maxW > 0 {
-            let maxWLocal = maxW / scale
+            let maxWLocal = maxW / scaleX
             for paragraph in paragraphs {
                 let words = paragraph.components(separatedBy: " ")
                 var currentLine = ""
-                var currentLineWidth: Double = 0
 
                 for word in words {
-                    let wordWidth = getLocalStringWidth(word, spaceAdvance: spaceAdvance)
-                    let spaceWidth = currentLine.isEmpty ? 0 : spaceAdvance
-                    
-                    if currentLineWidth + spaceWidth + wordWidth > maxWLocal && !currentLine.isEmpty {
+                    let candidate = currentLine.isEmpty
+                        ? word
+                        : currentLine + " " + word
+                    let candidateBounds = getLocalDrawableBounds(
+                        candidate,
+                        spaceAdvance: spaceAdvance)
+                    let candidateWidth = candidateBounds.map {
+                        max(0.0, $0.maxX)
+                    } ?? getLocalStringWidth(
+                        candidate,
+                        spaceAdvance: spaceAdvance)
+
+                    let wrappingWidth = max(
+                        0.0,
+                        candidateWidth - (currentLine.isEmpty ? 0.0 : spaceAdvance))
+
+                    if !currentLine.isEmpty && wrappingWidth > maxWLocal {
                         finalLines.append(currentLine)
                         currentLine = word
-                        currentLineWidth = wordWidth
                     } else {
-                        if currentLine.isEmpty {
-                            currentLine = word
-                            currentLineWidth = wordWidth
-                        } else {
-                            currentLine += " " + word
-                            currentLineWidth += spaceWidth + wordWidth
-                        }
+                        currentLine = candidate
                     }
                 }
                 if !currentLine.isEmpty {
@@ -662,7 +672,7 @@ public final class SHXShapeFont: @unchecked Sendable {
         }
 
         var isUnderlined = false
-        let underlineY = -0.15 * fontHeight // Underline slightly below baseline
+        let underlineY = -0.23 * fontHeight // Underline below baseline
 
         for (lineIndex, lineText) in finalLines.enumerated() {
             let lineScalars = Array(lineText.unicodeScalars)
@@ -695,10 +705,10 @@ public final class SHXShapeFont: @unchecked Sendable {
                     charAdvance = glyph.advanceX
                     
                     for seg in glyph.segments {
-                        let lx1 = (offsetX + cursorX + seg.x1) * scale
-                        let ly1 = -(currentLineOffsetY + seg.y1) * scale
-                        let lx2 = (offsetX + cursorX + seg.x2) * scale
-                        let ly2 = -(currentLineOffsetY + seg.y2) * scale
+                        let lx1 = (offsetX + cursorX + seg.x1) * scaleX
+                        let ly1 = -(currentLineOffsetY + seg.y1) * scaleY
+                        let lx2 = (offsetX + cursorX + seg.x2) * scaleX
+                        let ly2 = -(currentLineOffsetY + seg.y2) * scaleY
 
                         let wx1 = origin.x + lx1 * cosR - ly1 * sinR
                         let wy1 = origin.y + lx1 * sinR + ly1 * cosR
@@ -716,10 +726,10 @@ public final class SHXShapeFont: @unchecked Sendable {
 
                 // Draw underline if active
                 if isUnderlined {
-                    let lx1 = (offsetX + cursorX) * scale
-                    let ly1 = -(currentLineOffsetY + underlineY) * scale
-                    let lx2 = (offsetX + cursorX + charAdvance) * scale
-                    let ly2 = -(currentLineOffsetY + underlineY) * scale
+                    let lx1 = (offsetX + cursorX) * scaleX
+                    let ly1 = -(currentLineOffsetY + underlineY) * scaleY
+                    let lx2 = (offsetX + cursorX + charAdvance) * scaleX
+                    let ly2 = -(currentLineOffsetY + underlineY) * scaleY
 
                     let wx1 = origin.x + lx1 * cosR - ly1 * sinR
                     let wy1 = origin.y + lx1 * sinR + ly1 * cosR
@@ -792,6 +802,7 @@ public final class SHXShapeFont: @unchecked Sendable {
     private struct FormattedLineLayout {
         var glyphs: [FormattedGlyphLayout]
         let alignment: Int
+        let isLastInParagraph: Bool
     }
 
     public func renderFormattedText(
@@ -800,12 +811,14 @@ public final class SHXShapeFont: @unchecked Sendable {
         rotation: Double = 0,
         alignH: Int = 0,
         alignV: Int = 0,
+        widthFactor: Double = 1.0,
         maxWidth: Double? = nil,
         lineSpacingFactor: Double = 1.0,
         lineSpacingStyle: Int = 1,
         textStyleFonts: [String: String] = [:]
     ) -> [CADPrimitive] {
         let defaultHeight = max(formatted.defaultHeight, 1e-9)
+        let entityWidthFactor = max(widthFactor, 1e-9)
 
         func resolvedFont(for run: FormattedTextRun) -> SHXShapeFont {
             let filename = CADFontManager.resolveFontReference(
@@ -822,7 +835,10 @@ public final class SHXShapeFont: @unchecked Sendable {
         }
 
         func spaceAdvance(for font: SHXShapeFont) -> Double {
-            font.glyphs[0x20]?.advanceX ?? (font.fontHeight * 0.6)
+            let storedAdvance = font.glyphs[0x20]?.advanceX ?? 0.0
+            return storedAdvance > 0
+                ? min(storedAdvance, font.fontHeight * 0.4)
+                : font.fontHeight * 0.4
         }
 
         func makeGlyphs(_ run: FormattedTextRun) -> [FormattedGlyphLayout] {
@@ -834,7 +850,7 @@ public final class SHXShapeFont: @unchecked Sendable {
             }
             let font = resolvedFont(for: run)
             let height = max(run.height ?? defaultHeight, 1e-9)
-            let widthFactor = max(run.widthFactor ?? 1.0, 1e-9)
+            let widthFactor = max(run.widthFactor ?? 1.0, 1e-9) * entityWidthFactor
             let tracking = max(run.tracking ?? 1.0, 0.0)
             let oblique = (run.oblique ?? 0.0) * .pi / 180.0
             return text.unicodeScalars.map {
@@ -869,6 +885,40 @@ public final class SHXShapeFont: @unchecked Sendable {
             glyphs.reduce(0.0) { $0 + advance($1) }
         }
 
+        func drawableBounds(
+            _ glyphs: [FormattedGlyphLayout]
+        ) -> (minX: Double, maxX: Double)? {
+            var cursor = 0.0
+            var minX = Double.infinity
+            var maxX = -Double.infinity
+
+            for glyph in glyphs {
+                let codePoint = Int(glyph.scalar.value)
+                let scaleY = glyph.height / glyph.font.fontHeight
+                let scaleX = scaleY * glyph.widthFactor
+                let shear = tan(glyph.oblique)
+                if let shape = glyph.font.glyphs[codePoint] {
+                    for segment in shape.segments {
+                        let x1 = cursor + (segment.x1 + shear * segment.y1) * scaleX
+                        let x2 = cursor + (segment.x2 + shear * segment.y2) * scaleX
+                        minX = min(minX, x1, x2)
+                        maxX = max(maxX, x1, x2)
+                    }
+                }
+                cursor += advance(glyph)
+            }
+
+            guard minX.isFinite, maxX.isFinite else { return nil }
+            return (minX, maxX)
+        }
+
+        func wrappingWidth(_ glyphs: [FormattedGlyphLayout]) -> Double {
+            guard let bounds = drawableBounds(glyphs) else {
+                return lineAdvance(glyphs)
+            }
+            return max(0.0, bounds.maxX)
+        }
+
         func splitWords(_ glyphs: [FormattedGlyphLayout]) -> [[FormattedGlyphLayout]] {
             var words: [[FormattedGlyphLayout]] = []
             var current: [FormattedGlyphLayout] = []
@@ -894,21 +944,25 @@ public final class SHXShapeFont: @unchecked Sendable {
             guard let maxWidth, maxWidth > 0 else {
                 lines.append(FormattedLineLayout(
                     glyphs: paragraphGlyphs,
-                    alignment: paragraph.alignment))
+                    alignment: paragraph.alignment,
+                    isLastInParagraph: true))
                 continue
             }
 
             let words = splitWords(paragraphGlyphs)
             if words.isEmpty {
-                lines.append(FormattedLineLayout(glyphs: [], alignment: paragraph.alignment))
+                lines.append(FormattedLineLayout(
+                    glyphs: [], alignment: paragraph.alignment,
+                    isLastInParagraph: true))
                 continue
             }
 
             var current: [FormattedGlyphLayout] = []
             for word in words {
                 var candidate = current
+                var breakSpaceAdvance = 0.0
                 if !candidate.isEmpty, let style = word.first ?? current.last {
-                    candidate.append(FormattedGlyphLayout(
+                    let spaceGlyph = FormattedGlyphLayout(
                         scalar: " ",
                         font: style.font,
                         height: style.height,
@@ -916,14 +970,20 @@ public final class SHXShapeFont: @unchecked Sendable {
                         overline: style.overline,
                         widthFactor: style.widthFactor,
                         tracking: style.tracking,
-                        oblique: style.oblique))
+                        oblique: style.oblique)
+                    breakSpaceAdvance = advance(spaceGlyph)
+                    candidate.append(spaceGlyph)
                 }
                 candidate.append(contentsOf: word)
 
-                if !current.isEmpty && lineAdvance(candidate) > maxWidth {
+                let candidateWrappingWidth = max(
+                    0.0,
+                    wrappingWidth(candidate) - breakSpaceAdvance)
+                if !current.isEmpty && candidateWrappingWidth > maxWidth {
                     lines.append(FormattedLineLayout(
                         glyphs: current,
-                        alignment: paragraph.alignment))
+                        alignment: paragraph.alignment,
+                        isLastInParagraph: false))
                     current = word
                 } else {
                     current = candidate
@@ -931,11 +991,14 @@ public final class SHXShapeFont: @unchecked Sendable {
             }
             lines.append(FormattedLineLayout(
                 glyphs: current,
-                alignment: paragraph.alignment))
+                alignment: paragraph.alignment,
+                isLastInParagraph: true))
         }
 
         if lines.isEmpty {
-            lines = [FormattedLineLayout(glyphs: [], alignment: 0)]
+            lines = [FormattedLineLayout(
+                glyphs: [], alignment: 0,
+                isLastInParagraph: true)]
         }
 
         let lineHeights = lines.map { line in
@@ -986,43 +1049,65 @@ public final class SHXShapeFont: @unchecked Sendable {
 
         for lineIndex in lines.indices {
             let line = lines[lineIndex]
-            var cursor = 0.0
-            var minX = Double.infinity
-            var maxX = -Double.infinity
+            let measuredBounds = drawableBounds(line.glyphs)
+            let minX = measuredBounds?.minX ?? 0.0
+            let maxX = measuredBounds?.maxX ?? lineAdvance(line.glyphs)
 
-            for glyph in line.glyphs {
-                let codePoint = Int(glyph.scalar.value)
-                let scaleY = glyph.height / glyph.font.fontHeight
-                let scaleX = scaleY * glyph.widthFactor
-                if let shape = glyph.font.glyphs[codePoint] {
-                    let shear = tan(glyph.oblique)
-                    for segment in shape.segments {
-                        let x1 = cursor + (segment.x1 + shear * segment.y1) * scaleX
-                        let x2 = cursor + (segment.x2 + shear * segment.y2) * scaleX
-                        minX = min(minX, x1, x2)
-                        maxX = max(maxX, x1, x2)
-                    }
+            let hasParagraphAlignment = line.alignment != 0
+            let paragraphAlignment = hasParagraphAlignment ? line.alignment : alignH
+            let effectiveAlignment = paragraphAlignment == 5 ? 0 : paragraphAlignment
+            let referenceBoxLeft: Double
+            if let maxWidth, maxWidth > 0 {
+                switch alignH {
+                case 1:
+                    referenceBoxLeft = -maxWidth * 0.5
+                case 2:
+                    referenceBoxLeft = -maxWidth
+                default:
+                    referenceBoxLeft = 0
                 }
-                cursor += advance(glyph)
+            } else {
+                referenceBoxLeft = 0
             }
 
-            if !minX.isFinite || !maxX.isFinite {
-                minX = 0
-                maxX = cursor
-            }
-
-            let effectiveAlignment = line.alignment == 0 ? alignH : line.alignment
             let offsetX: Double
-            switch effectiveAlignment {
-            case 1, 4:
-                offsetX = -0.5 * (minX + maxX)
-            case 2:
-                offsetX = -maxX
-            default:
-                offsetX = 0
+            if hasParagraphAlignment, let maxWidth, maxWidth > 0 {
+                switch effectiveAlignment {
+                case 1:
+                    offsetX = referenceBoxLeft + maxWidth * 0.5
+                        - 0.5 * (minX + maxX)
+                case 2:
+                    offsetX = referenceBoxLeft + maxWidth - maxX
+                default:
+                    offsetX = referenceBoxLeft - minX
+                }
+            } else {
+                switch effectiveAlignment {
+                case 1:
+                    offsetX = -0.5 * (minX + maxX)
+                case 2:
+                    offsetX = -maxX
+                default:
+                    offsetX = 0
+                }
             }
 
-            cursor = 0
+            let shouldJustify = effectiveAlignment == 4
+                || (effectiveAlignment == 3 && !line.isLastInParagraph)
+            let spaceCount = line.glyphs.reduce(into: 0) { count, glyph in
+                if glyph.scalar.value == 0x20 || glyph.scalar.value == 0x09 {
+                    count += 1
+                }
+            }
+            let extraSpace: Double
+            if shouldJustify, spaceCount > 0, let maxWidth {
+                extraSpace = max(0.0, maxWidth - lineAdvance(line.glyphs))
+                    / Double(spaceCount)
+            } else {
+                extraSpace = 0
+            }
+
+            var cursor = 0.0
             let lineTop = verticalOffset + lineTops[lineIndex]
             for glyph in line.glyphs {
                 let codePoint = Int(glyph.scalar.value)
@@ -1047,7 +1132,7 @@ public final class SHXShapeFont: @unchecked Sendable {
                     let localX1 = offsetX + cursor
                     let localX2 = offsetX + cursor + glyphAdvance
                     if glyph.underline {
-                        let y = lineTop + glyph.height * 1.15
+                        let y = lineTop + glyph.height * 1.23
                         primitives.append(.line(
                             start: worldPoint(localX1, y),
                             end: worldPoint(localX2, y)))
@@ -1061,6 +1146,9 @@ public final class SHXShapeFont: @unchecked Sendable {
                 }
 
                 cursor += glyphAdvance
+                if glyph.scalar.value == 0x20 || glyph.scalar.value == 0x09 {
+                    cursor += extraSpace
+                }
             }
         }
 

@@ -101,7 +101,8 @@ public struct FormattedTextRun: Codable, Sendable, Hashable {
 /// A paragraph of formatted text: a sequence of runs with a single
 /// alignment setting.
 public struct FormattedParagraph: Codable, Sendable, Hashable {
-    /// 0 = left, 1 = center, 2 = right, 3 = justified
+    /// 0 = inherit entity alignment, 1 = center, 2 = right,
+    /// 3 = justified, 4 = distributed, 5 = explicit left
     public var alignment: Int
     public var runs: [FormattedTextRun]
 
@@ -193,7 +194,9 @@ public struct FormattedText: Codable, Sendable, Hashable {
 /// | `\W2.0;` | Width factor |
 /// | `\T1.5;` | Tracking |
 /// | `\Q30;` | Oblique angle |
-/// | `\A0;` / `\A1;` / `\A2;` | Paragraph alignment |
+/// | `\A0;` / `\A1;` / `\A2;` | Legacy alignment override |
+/// | `\pxql;` / `\pxqc;` / `\pxqr;` | Paragraph left/center/right justification |
+/// | `\pxqj;` / `\pxqd;` | Paragraph justified/distributed justification |
 /// | `\P` | Paragraph break |
 /// | `\{` `\}` `\\` | Escaped braces and backslash |
 /// | `{...}` | Nested formatting group |
@@ -239,9 +242,13 @@ public enum MTEXTFormatter {
             if pIdx > 0 {
                 out += "\\P"
             }
-            // Alignment (only emit if non-default)
-            if paragraph.alignment > 0 && paragraph.alignment <= 2 {
-                out += "\\A\(paragraph.alignment);"
+            switch paragraph.alignment {
+            case 1: out += "\\pxqc;"
+            case 2: out += "\\pxqr;"
+            case 3: out += "\\pxqj;"
+            case 4: out += "\\pxqd;"
+            case 5: out += "\\pxql;"
+            default: break
             }
             for run in paragraph.runs {
                 if let stack = run.stack {
@@ -514,13 +521,51 @@ extension MTEXTFormatter {
                 textBuf.append("}")
 
             case "p":
-                // Paragraph properties (ignore — skip to semicolon)
-                skipToSemicolon()
+                parseParagraphProperties()
 
             default:
                 // Unknown control code — skip everything up to semicolon if present
                 // Some codes are followed by semicolon, others aren't
                 break
+            }
+        }
+
+        // MARK: - Paragraph Properties: \pxql; \pxqc; \pxqr; \pxqj; \pxqd;
+
+        private mutating func parseParagraphProperties() {
+            var spec = ""
+            while pos < chars.count && chars[pos] != ";" {
+                spec.append(chars[pos])
+                pos += 1
+            }
+            if pos < chars.count && chars[pos] == ";" {
+                pos += 1
+            }
+
+            let values = Array(spec.lowercased())
+            var index = 0
+            while index < values.count {
+                switch values[index] {
+                case "x":
+                    currentAlignment = 0
+                    index += 1
+                case "q":
+                    guard index + 1 < values.count else {
+                        index += 1
+                        continue
+                    }
+                    switch values[index + 1] {
+                    case "c": currentAlignment = 1
+                    case "r": currentAlignment = 2
+                    case "j": currentAlignment = 3
+                    case "d": currentAlignment = 4
+                    case "l": currentAlignment = 5
+                    default: break
+                    }
+                    index += 2
+                default:
+                    index += 1
+                }
             }
         }
 

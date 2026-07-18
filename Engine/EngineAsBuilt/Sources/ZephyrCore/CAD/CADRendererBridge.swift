@@ -288,6 +288,7 @@ public final class CADRendererBridge {
             [(
                 index: Int, handle: UUID,
                 geometry: [CADPrimitive], primitiveStyles: [Int: CADPrimitiveStyle],
+                primitiveXData: [Int: [String: XDataValue]],
                 transform: Transform3D, color: ColorRGBA,
                 lineType: String,
                 lineWeight: Double,
@@ -299,7 +300,8 @@ public final class CADRendererBridge {
                 textBackgroundUsesViewportColor: Bool
             )] = []
         var visibleText: [(index: Int, handle: UUID, text: String, height: Double, textStyle: String?,
-                            alignH: Int, alignV: Int, mtextWidth: Double?, mtextLineSpacing: Double,
+                            alignH: Int, alignV: Int, widthFactor: Double,
+                            mtextWidth: Double?, mtextLineSpacing: Double,
                             mtextLineSpacingStyle: Int,
                             transform: Transform3D, color: ColorRGBA,
                             formattedText: FormattedText?, textBackgroundScale: Double?,
@@ -392,6 +394,24 @@ public final class CADRendererBridge {
                 if let av = entity.xdata["dxf.alignV"], case .int(let v) = av { alignV = v }
                 else { alignV = 0 }
 
+                let isMTextEntity: Bool
+                if let entityType = entity.xdata["dxf.textEntityType"],
+                   case .string(let value) = entityType {
+                    isMTextEntity = value.uppercased() == "MTEXT"
+                } else {
+                    isMTextEntity = false
+                }
+
+                let widthFactor: Double
+                if !isMTextEntity,
+                   let width = entity.xdata["dxf.textWidthScale"],
+                   case .double(let value) = width,
+                   value > 0 {
+                    widthFactor = value
+                } else {
+                    widthFactor = 1.0
+                }
+
                 let mtextWidth: Double?
                 if let mw = entity.xdata["dxf.mtextWidth"], case .double(let v) = mw { mtextWidth = v }
                 else { mtextWidth = nil }
@@ -429,7 +449,7 @@ public final class CADRendererBridge {
 
                 visibleText.append((
                     index, entity.handle, displayText, h, style, alignH, alignV,
-                    mtextWidth, mtextLineSpacing, mtextLineSpacingStyle,
+                    widthFactor, mtextWidth, mtextLineSpacing, mtextLineSpacingStyle,
                     entity.transform, effectiveColor, ft,
                     entityTextBackgroundScale, entityTextBackgroundColor,
                     entityTextBackgroundUsesViewportColor))
@@ -439,15 +459,18 @@ public final class CADRendererBridge {
             // Resolve geometry from block or local
             let resolved: [CADPrimitive]?
             var primitiveStyles: [Int: CADPrimitiveStyle]
+            var primitiveXData: [Int: [String: XDataValue]]
             if let bid = entity.blockID, let block = snapshot.blocks[bid] {
                 // ACAD_TABLE entities are imported as references to their anonymous
                 // *T display blocks. Render those references so table cell text and
                 // borders survive DXF/EAB/DXF round-trips.
                 resolved = block.geometry
                 primitiveStyles = block.primitiveStyles
+                primitiveXData = block.primitiveXData
             } else {
                 resolved = entity.localGeometry
                 primitiveStyles = [:]
+                primitiveXData = [:]
             }
             guard var geometry = resolved else { continue }
             
@@ -455,6 +478,7 @@ public final class CADRendererBridge {
                 if let localBox = entity.localBoundingBox {
                     geometry = [.rect(origin: localBox.min, size: localBox.size, color: nil)]
                     primitiveStyles = [:]
+                    primitiveXData = [:]
                 }
             }
             
@@ -487,7 +511,7 @@ public final class CADRendererBridge {
             }
 
             visible.append((index, entity.handle, geometry, primitiveStyles,
-                            entity.transform, entityColor, lineType, lineWeight,
+                            primitiveXData, entity.transform, entityColor, lineType, lineWeight,
                             lineTypeScale, geomWidth, combinedLayerOpacity,
                             entityTextBackgroundScale, entityTextBackgroundColor,
                             entityTextBackgroundUsesViewportColor))
@@ -539,6 +563,7 @@ public final class CADRendererBridge {
                             for item in orderedGeometry {
                                 let primitive = item.primitive
                                 let primitiveStyle = v.primitiveStyles[item.index]
+                                let primitiveXData = v.primitiveXData[item.index] ?? [:]
                                 let drawStyle = Self.resolvedPrimitiveStyle(
                                     primitive: primitive,
                                     style: primitiveStyle,
@@ -552,6 +577,7 @@ public final class CADRendererBridge {
                                 let primZ = Self.isFillPrimitive(primitive)
                                     ? currentZ
                                     : currentZ + 1000000.0
+                                var primitiveTextWidthFactor = 1.0
 
                                 if case .text(let pos, let text, let height, let rotation, let style, let alignH, let alignV, let mtextWidth, _) = primitive {
                                     let fontFile = CADFontManager.resolveTextStyleFont(
@@ -573,6 +599,26 @@ public final class CADRendererBridge {
                                     let finalRotation = atan2(worldX.y, worldX.x)
                                     let heightScale = max(worldY.magnitude, 1e-12)
                                     let widthScale = max(worldX.magnitude, 1e-12)
+                                    let isMTextPrimitive: Bool
+                                    if let entityType = primitiveXData["dxf.textEntityType"],
+                                       case .string(let value) = entityType {
+                                        isMTextPrimitive = value.uppercased() == "MTEXT"
+                                    } else {
+                                        isMTextPrimitive = false
+                                    }
+
+                                    let entityWidthFactor: Double
+                                    if !isMTextPrimitive,
+                                       let width = primitiveXData["dxf.textWidthScale"],
+                                       case .double(let value) = width,
+                                       value > 0 {
+                                        entityWidthFactor = value
+                                    } else {
+                                        entityWidthFactor = 1.0
+                                    }
+                                    primitiveTextWidthFactor = entityWidthFactor
+                                    let effectiveWidthFactor =
+                                        entityWidthFactor * widthScale / heightScale
                                     let worldHeight = height * heightScale
                                     let worldWidth = mtextWidth.map { $0 * widthScale }
                                     let backgroundScale = primitiveStyle?.textBackgroundScale
@@ -597,6 +643,7 @@ public final class CADRendererBridge {
                                             z: primZ,
                                             rotation: finalRotation,
                                             height: worldHeight,
+                                            widthFactor: effectiveWidthFactor,
                                             maxWidth: worldWidth,
                                             alignH: alignH,
                                             alignV: alignV,
@@ -637,6 +684,7 @@ public final class CADRendererBridge {
                                     lineWeight: drawStyle.lineWeight,
                                     lineTypeScale: drawStyle.lineTypeScale,
                                     geomWidth: drawStyle.geomWidth,
+                                    textWidthFactor: primitiveTextWidthFactor,
                                     textStyleFonts: snapshot.textStyleFonts,
                                     linetypePatterns: snapshot.linetypePatterns,
                                     opacityMultiplier: drawStyle.opacityMultiplier,
@@ -742,6 +790,8 @@ public final class CADRendererBridge {
                             let worldY = vt.transform.transformPoint(localY) - origin
                             let heightScale = max(worldY.magnitude, 1e-12)
                             let widthScale = max(worldX.magnitude, 1e-12)
+                            let effectiveWidthFactor =
+                                vt.widthFactor * widthScale / heightScale
                             let worldHeight = vt.height * heightScale
                             let worldWidth = vt.mtextWidth.map { $0 * widthScale }
                             let worldRotation = atan2(worldX.y, worldX.x)
@@ -778,6 +828,7 @@ public final class CADRendererBridge {
                                         rotation: worldRotation,
                                         alignH: vt.alignH,
                                         alignV: vt.alignV,
+                                        widthFactor: effectiveWidthFactor,
                                         maxWidth: worldWidth,
                                         lineSpacingFactor: vt.mtextLineSpacing,
                                         lineSpacingStyle: vt.mtextLineSpacingStyle,
@@ -787,6 +838,7 @@ public final class CADRendererBridge {
                                         vt.text, origin: origin,
                                         height: worldHeight, rotation: worldRotation,
                                         alignH: vt.alignH, alignV: vt.alignV,
+                                        widthFactor: effectiveWidthFactor,
                                         maxWidth: worldWidth)
                                 }
                                 if textPrims.count > 500 {
@@ -813,10 +865,13 @@ public final class CADRendererBridge {
                                     z: baseZ,
                                     rotation: worldRotation,
                                     height: worldHeight,
+                                    widthFactor: effectiveWidthFactor,
                                     maxWidth: worldWidth,
                                     alignH: vt.alignH,
                                     alignV: vt.alignV,
                                     color: color,
+                                    lineSpacingFactor: vt.mtextLineSpacing,
+                                    lineSpacingStyle: vt.mtextLineSpacingStyle,
                                     backgroundScale: vt.textBackgroundScale,
                                     backgroundColor: vt.textBackgroundColor.map {
                                         ($0.r, $0.g, $0.b, $0.a)
@@ -943,9 +998,12 @@ public final class CADRendererBridge {
                     position: Vector3(x: ts.x, y: ts.y, z: ts.z),
                     rotation: ts.rotation,
                     height: ts.height,
+                    widthFactor: ts.widthFactor,
                     maxWidth: ts.maxWidth,
                     alignH: ts.alignH,
                     alignV: ts.alignV,
+                    lineSpacingFactor: ts.lineSpacingFactor,
+                    lineSpacingStyle: ts.lineSpacingStyle,
                     color: ts.color,
                     backgroundScale: ts.backgroundScale,
                     backgroundColor: ts.backgroundUsesViewportColor
