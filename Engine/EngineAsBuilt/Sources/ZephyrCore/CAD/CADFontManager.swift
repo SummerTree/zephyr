@@ -37,10 +37,76 @@ public enum CADFontManager {
         return fallback
     }
 
+    public static func resolveFontReference(
+        _ reference: String?,
+        textStyleFonts: [String: String],
+        fallback: String = "simplex.shx"
+    ) -> String {
+        guard let reference else { return fallback }
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return fallback }
+
+        let lower = trimmed.lowercased()
+        let extensions = [".shx", ".ttf", ".otf", ".ttc"]
+        if extensions.contains(where: lower.hasSuffix)
+            || trimmed.contains("/")
+            || trimmed.contains("\\") {
+            return trimmed
+        }
+
+        return resolveTextStyleFont(
+            styleName: trimmed,
+            textStyleFonts: textStyleFonts,
+            fallback: fallback)
+    }
+
+    public static func resolveFormattedSHXFont(
+        _ formatted: FormattedText?,
+        styleName: String?,
+        textStyleFonts: [String: String]
+    ) -> SHXShapeFont? {
+        var references: [String] = []
+
+        if let formatted {
+            for paragraph in formatted.paragraphs {
+                for run in paragraph.runs {
+                    if let name = run.fontName, !name.isEmpty {
+                        references.append(name)
+                    }
+                }
+            }
+            if !formatted.defaultFont.isEmpty {
+                references.append(formatted.defaultFont)
+            }
+        }
+
+        if let styleName, !styleName.isEmpty {
+            references.append(styleName)
+        }
+
+        var seen = Set<String>()
+        for reference in references {
+            let filename = resolveFontReference(
+                reference,
+                textStyleFonts: textStyleFonts,
+                fallback: "")
+            let key = filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !key.isEmpty, seen.insert(key).inserted else { continue }
+            if let font = getOrLoadSHXFont(filename: filename, allowFallback: false) {
+                return font
+            }
+        }
+
+        return nil
+    }
+
     internal nonisolated static let cacheLock = NSRecursiveLock()
     internal static nonisolated(unsafe) var shxFontCache: [String: SHXShapeFont] = [:]
 
-    public static func getOrLoadSHXFont(filename: String) -> SHXShapeFont? {
+    public static func getOrLoadSHXFont(
+        filename: String,
+        allowFallback: Bool = true
+    ) -> SHXShapeFont? {
         let rawName = filename.trimmingCharacters(in: .whitespacesAndNewlines)
         let normName = rawName.lowercased()
 
@@ -112,7 +178,7 @@ public enum CADFontManager {
             }
         }
 
-        if normName != "simplex.shx" {
+        if allowFallback && normName != "simplex.shx" {
             return getOrLoadSHXFont(filename: "simplex.shx")
         }
 

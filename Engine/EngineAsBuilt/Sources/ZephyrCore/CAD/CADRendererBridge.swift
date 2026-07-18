@@ -299,7 +299,9 @@ public final class CADRendererBridge {
                 textBackgroundUsesViewportColor: Bool
             )] = []
         var visibleText: [(index: Int, handle: UUID, text: String, height: Double, textStyle: String?,
-                            alignH: Int, alignV: Int, mtextWidth: Double?, transform: Transform3D, color: ColorRGBA,
+                            alignH: Int, alignV: Int, mtextWidth: Double?, mtextLineSpacing: Double,
+                            mtextLineSpacingStyle: Int,
+                            transform: Transform3D, color: ColorRGBA,
                             formattedText: FormattedText?, textBackgroundScale: Double?,
                             textBackgroundColor: ColorRGBA?, textBackgroundUsesViewportColor: Bool)] = []
         var index = 0
@@ -394,6 +396,24 @@ public final class CADRendererBridge {
                 if let mw = entity.xdata["dxf.mtextWidth"], case .double(let v) = mw { mtextWidth = v }
                 else { mtextWidth = nil }
 
+                let mtextLineSpacing: Double
+                if let spacing = entity.xdata["dxf.mtextLineSpacing"],
+                   case .double(let value) = spacing,
+                   value > 0 {
+                    mtextLineSpacing = value
+                } else {
+                    mtextLineSpacing = 1.0
+                }
+
+                let mtextLineSpacingStyle: Int
+                if let style = entity.xdata["dxf.mtextLineSpacingStyle"],
+                   case .int(let value) = style,
+                   value == 2 {
+                    mtextLineSpacingStyle = 2
+                } else {
+                    mtextLineSpacingStyle = 1
+                }
+
                 // Decode formatted text if present
                 let ft: FormattedText?
                 if let ftJSON = entity.xdata["dxf.formattedText"], case .string(let jsonStr) = ftJSON,
@@ -409,7 +429,8 @@ public final class CADRendererBridge {
 
                 visibleText.append((
                     index, entity.handle, displayText, h, style, alignH, alignV,
-                    mtextWidth, entity.transform, effectiveColor, ft,
+                    mtextWidth, mtextLineSpacing, mtextLineSpacingStyle,
+                    entity.transform, effectiveColor, ft,
                     entityTextBackgroundScale, entityTextBackgroundColor,
                     entityTextBackgroundUsesViewportColor))
                 index += 1
@@ -698,6 +719,19 @@ public final class CADRendererBridge {
                             let fontFile = CADFontManager.resolveTextStyleFont(
                                 styleName: vt.textStyle,
                                 textStyleFonts: snapshot.textStyleFonts)
+                            let formattedSHXFont = CADFontManager.resolveFormattedSHXFont(
+                                vt.formattedText,
+                                styleName: vt.textStyle,
+                                textStyleFonts: snapshot.textStyleFonts)
+                            let exactStyleSHXFont = CADFontManager.getOrLoadSHXFont(
+                                filename: fontFile,
+                                allowFallback: false)
+                            let ttfPath = CADFontManager.getTTFEquivalent(filename: fontFile)
+                            let shapeFont = formattedSHXFont
+                                ?? exactStyleSHXFont
+                                ?? (ttfPath == nil
+                                    ? CADFontManager.getOrLoadSHXFont(filename: "simplex.shx")
+                                    : nil)
                             
                             var specs: [PrimitiveSpec] = []
                             var textSprites: [TextSpriteSpec] = []
@@ -712,7 +746,7 @@ public final class CADRendererBridge {
                             let worldWidth = vt.mtextWidth.map { $0 * widthScale }
                             let worldRotation = atan2(worldX.y, worldX.x)
                             
-                            if let font = CADFontManager.getOrLoadSHXFont(filename: fontFile) {
+                            if let font = shapeFont {
                                 if let backgroundScale = vt.textBackgroundScale,
                                    let mask = Self.makeTextBackgroundSpec(
                                     text: vt.text,
@@ -728,11 +762,33 @@ public final class CADRendererBridge {
                                     z: baseZ - 0.02) {
                                     specs.append(mask)
                                 }
-                                let textPrims = font.renderText(
-                                    vt.text, origin: origin,
-                                    height: worldHeight, rotation: worldRotation,
-                                    alignH: vt.alignH, alignV: vt.alignV,
-                                    maxWidth: worldWidth)
+                                let textPrims: [CADPrimitive]
+                                if var formatted = vt.formattedText {
+                                    formatted.defaultHeight *= heightScale
+                                    for paragraphIndex in formatted.paragraphs.indices {
+                                        for runIndex in formatted.paragraphs[paragraphIndex].runs.indices {
+                                            if let runHeight = formatted.paragraphs[paragraphIndex].runs[runIndex].height {
+                                                formatted.paragraphs[paragraphIndex].runs[runIndex].height = runHeight * heightScale
+                                            }
+                                        }
+                                    }
+                                    textPrims = font.renderFormattedText(
+                                        formatted,
+                                        origin: origin,
+                                        rotation: worldRotation,
+                                        alignH: vt.alignH,
+                                        alignV: vt.alignV,
+                                        maxWidth: worldWidth,
+                                        lineSpacingFactor: vt.mtextLineSpacing,
+                                        lineSpacingStyle: vt.mtextLineSpacingStyle,
+                                        textStyleFonts: snapshot.textStyleFonts)
+                                } else {
+                                    textPrims = font.renderText(
+                                        vt.text, origin: origin,
+                                        height: worldHeight, rotation: worldRotation,
+                                        alignH: vt.alignH, alignV: vt.alignV,
+                                        maxWidth: worldWidth)
+                                }
                                 if textPrims.count > 500 {
                                     let preview = vt.text.prefix(40).replacingOccurrences(of: "\n", with: "\\n")
                                     print("[CADBridge] SHX text '\(preview)...' → \(textPrims.count) line primitives (height=\(vt.height))")
@@ -747,7 +803,7 @@ public final class CADRendererBridge {
                                     specs.append(contentsOf: s)
                                     z += 0.01
                                 }
-                            } else if let ttfPath = CADFontManager.getTTFEquivalent(filename: fontFile) {
+                            } else if let ttfPath {
                                 let spec = TextSpriteSpec(
                                     text: vt.text,
                                     fontPath: ttfPath,

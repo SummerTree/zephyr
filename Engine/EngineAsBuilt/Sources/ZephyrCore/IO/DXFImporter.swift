@@ -779,8 +779,17 @@ public enum DXFImporter {
             if text.eType == .mTEXT {
                 xdata["dxf.mtextRaw"] = .string(text.text)
                 xdata["dxf.mtextWidth"] = .double(text.widthScale)
+                let formatted = MTEXTFormatter.parse(
+                    text.text,
+                    defaultFont: text.style.isEmpty ? "STANDARD" : text.style,
+                    defaultHeight: text.height > 0 ? text.height : 2.5)
+                if let data = try? JSONEncoder().encode(formatted),
+                   let json = String(data: data, encoding: .utf8) {
+                    xdata["dxf.formattedText"] = .string(json)
+                }
                 if let mtext = text as? DXFMTextEntity {
                     xdata["dxf.mtextLineSpacing"] = .double(mtext.interlin)
+                    xdata["dxf.mtextLineSpacingStyle"] = .int(mtext.lineSpacingStyle)
                 }
             }
         }

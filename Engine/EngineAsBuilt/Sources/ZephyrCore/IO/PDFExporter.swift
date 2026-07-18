@@ -272,15 +272,15 @@ public enum PDFExporter {
 
             // ---- Standalone TEXT/MTEXT entity (renderer's visibleText path) ----
             if let tv = entity.xdata["dxf.text"], case .string(let text) = tv, !text.isEmpty {
-                // Use plain text from formatted text if available (for round-trip fidelity)
-                let displayText: String
+                let formatted: FormattedText?
                 if let ftJSON = entity.xdata["dxf.formattedText"], case .string(let jsonStr) = ftJSON,
                    let jsonData = jsonStr.data(using: .utf8),
-                   let formatted = try? JSONDecoder().decode(FormattedText.self, from: jsonData) {
-                    displayText = formatted.toPlainText()
+                   let decoded = try? JSONDecoder().decode(FormattedText.self, from: jsonData) {
+                    formatted = decoded
                 } else {
-                    displayText = text
+                    formatted = nil
                 }
+                let displayText = formatted?.toPlainText() ?? text
                 let height: Double
                 if let th = entity.xdata["dxf.textHeight"], case .double(let v) = th { height = v }
                 else { height = 2.5 }
@@ -294,6 +294,12 @@ public enum PDFExporter {
                 let fontFile = CADFontManager.resolveTextStyleFont(
                     styleName: styleName,
                     textStyleFonts: document.textStyleFonts)
+                let formattedSHXFont = CADFontManager.resolveFormattedSHXFont(
+                    formatted,
+                    styleName: styleName,
+                    textStyleFonts: document.textStyleFonts)
+                let shapeFont = formattedSHXFont
+                    ?? CADFontManager.getOrLoadSHXFont(filename: fontFile)
 
                 let alignH: Int
                 if let ah = entity.xdata["dxf.alignH"], case .int(let v) = ah { alignH = v }
@@ -305,17 +311,45 @@ public enum PDFExporter {
                 if let mw = entity.xdata["dxf.mtextWidth"], case .double(let v) = mw { mtextWidth = v }
                 else { mtextWidth = nil }
 
-                if let font = CADFontManager.getOrLoadSHXFont(filename: fontFile) {
-                    // Same call the renderer makes: world-space stroke primitives
-                    // with alignment, wrapping, and rotation already applied.
-                    let prims = font.renderText(
-                        displayText,
-                        origin: entity.transform.position,
-                        height: height,
-                        rotation: entity.transform.rotation,
-                        alignH: alignH,
-                        alignV: alignV,
-                        maxWidth: mtextWidth)
+                if let font = shapeFont {
+                    let lineSpacingFactor: Double
+                    if let spacing = entity.xdata["dxf.mtextLineSpacing"],
+                       case .double(let value) = spacing,
+                       value > 0 {
+                        lineSpacingFactor = value
+                    } else {
+                        lineSpacingFactor = 1.0
+                    }
+                    let lineSpacingStyle: Int
+                    if let style = entity.xdata["dxf.mtextLineSpacingStyle"],
+                       case .int(let value) = style,
+                       value == 2 {
+                        lineSpacingStyle = 2
+                    } else {
+                        lineSpacingStyle = 1
+                    }
+                    let prims: [CADPrimitive]
+                    if let formatted {
+                        prims = font.renderFormattedText(
+                            formatted,
+                            origin: entity.transform.position,
+                            rotation: entity.transform.rotation,
+                            alignH: alignH,
+                            alignV: alignV,
+                            maxWidth: mtextWidth,
+                            lineSpacingFactor: lineSpacingFactor,
+                            lineSpacingStyle: lineSpacingStyle,
+                            textStyleFonts: document.textStyleFonts)
+                    } else {
+                        prims = font.renderText(
+                            displayText,
+                            origin: entity.transform.position,
+                            height: height,
+                            rotation: entity.transform.rotation,
+                            alignH: alignH,
+                            alignV: alignV,
+                            maxWidth: mtextWidth)
+                    }
                     items.append(.textStrokes(prims: prims, color: entityColor))
                 } else {
                     items.append(.textFallback(

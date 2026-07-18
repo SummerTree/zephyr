@@ -603,6 +603,7 @@ open class DXFTextEntity: DXFLineEntity {
 
 public class DXFMTextEntity: DXFTextEntity {
     public var interlin: Double   // 44
+    public var lineSpacingStyle: Int   // 73: 1 = at least, 2 = exact
     public var backgroundFillFlags: Int   // 90
     public var backgroundScale: Double    // 45
     public var backgroundColor: Int       // 63
@@ -611,6 +612,7 @@ public class DXFMTextEntity: DXFTextEntity {
 
     public override init(eType: DXFEType = .mTEXT) {
         self.interlin = 1
+        self.lineSpacingStyle = 1
         self.backgroundFillFlags = 0
         self.backgroundScale = 1.5
         self.backgroundColor = -1

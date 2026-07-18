@@ -52,6 +52,12 @@ public final class SHXShapeFont: @unchecked Sendable {
     // Glyph width cache (used for text layout)
     private var widths: [Int: Double] = [:]
 
+    // Code 7 can invoke another shape from the same SHX file. Keep the raw
+    // definitions so referenced shapes can be interpreted in the caller's
+    // current position, scale, draw mode, and position stack.
+    private var shapeDefinitions: [Int: Data] = [:]
+    private var subshapeNumberByteCount: Int = 2
+
     // MARK: - Initialization
 
     /// Load an SHX font from a file URL.
@@ -114,14 +120,15 @@ public final class SHXShapeFont: @unchecked Sendable {
         var reader = BinaryReader(data: data)
         let header = reader.readString()
         
-        // Skip trailing terminators like \n or \x1a or \0
-        while reader.pos < data.count {
-            let nextByte = data[reader.pos]
-            if nextByte == 0x0A || nextByte == 0x1A || nextByte == 0x00 {
-                reader.pos += 1
-            } else {
-                break
-            }
+        // The compiled header ends with CR/LF/SUB. `readString()` already
+        // consumed CR (or the single terminator used by older variants), so
+        // consume only the remaining LF/SUB bytes. Do not skip NUL bytes here:
+        // shape fonts commonly begin their content with start-code 0x0000.
+        if reader.pos < data.count && data[reader.pos] == 0x0A {
+            reader.pos += 1
+        }
+        if reader.pos < data.count && data[reader.pos] == 0x1A {
+            reader.pos += 1
         }
         
         let parts = header.components(separatedBy: " ")
@@ -132,6 +139,7 @@ public final class SHXShapeFont: @unchecked Sendable {
         let fontType = parts[1].lowercased()
         
         if fontType == "unifont" {
+            subshapeNumberByteCount = 2
             let count = Int(reader.readUInt32())
             _ = reader.readUInt16() // length
             
@@ -168,6 +176,7 @@ public final class SHXShapeFont: @unchecked Sendable {
                 }
             }
         } else if fontType == "shapes" {
+            subshapeNumberByteCount = 1
             let start = Int(reader.readUInt16())
             let end = Int(reader.readUInt16())
             let count = Int(reader.readUInt16())
@@ -182,10 +191,19 @@ public final class SHXShapeFont: @unchecked Sendable {
                 glyphRef.append((index, len))
             }
             
+            var definitions: [Int: Data] = [:]
             for ref in glyphRef {
                 guard reader.pos + ref.length <= data.count else { break }
-                let rawGlyphData = reader.readBytes(ref.length)
-                
+                definitions[ref.index] = reader.readBytes(ref.length)
+            }
+
+            // All definitions must be available before decoding because a glyph
+            // can reference a shape that appears later in the compiled table.
+            shapeDefinitions = definitions
+
+            for ref in glyphRef {
+                guard let rawGlyphData = definitions[ref.index] else { continue }
+
                 if ref.index == 0 {
                     // Font metadata shape
                     var subReader = BinaryReader(data: rawGlyphData)
@@ -197,19 +215,23 @@ public final class SHXShapeFont: @unchecked Sendable {
                             print("[SHX] Parsed fontHeight from shape 0: \(fontHeight)")
                         }
                     }
-                } else {
-                    if let glyph = decodeShape(data: rawGlyphData, offset: 0, length: rawGlyphData.count) {
-                        glyphs[ref.index] = glyph
-                        if !glyph.segments.isEmpty {
-                            let allX = glyph.segments.flatMap { [$0.x1, $0.x2] }
-                            widths[ref.index] = (allX.max() ?? 0) - (allX.min() ?? 0)
-                        } else {
-                            widths[ref.index] = 0
-                        }
+                } else if let glyph = decodeShape(
+                    data: rawGlyphData,
+                    offset: 0,
+                    length: rawGlyphData.count,
+                    rootShapeNumber: ref.index
+                ) {
+                    glyphs[ref.index] = glyph
+                    if !glyph.segments.isEmpty {
+                        let allX = glyph.segments.flatMap { [$0.x1, $0.x2] }
+                        widths[ref.index] = (allX.max() ?? 0) - (allX.min() ?? 0)
+                    } else {
+                        widths[ref.index] = 0
                     }
                 }
             }
         } else if fontType == "bigfont" {
+            subshapeNumberByteCount = 2
             let count = Int(reader.readUInt16())
             let length = Int(reader.readUInt16())
             let changeCount = Int(reader.readUInt16())
@@ -271,243 +293,143 @@ public final class SHXShapeFont: @unchecked Sendable {
     /// - COND_MODE_2 (0x0E) skips the next command in horizontal text mode
     /// - DIVIDE/MULTIPLY scale is cumulative, not reset
     /// - Segment start points track the last drawn/moved position separately
-    private func decodeShape(data: Data, offset: Int, length: Int) -> GlyphShape? {
+    private func decodeShape(
+        data: Data,
+        offset: Int,
+        length: Int,
+        rootShapeNumber: Int? = nil
+    ) -> GlyphShape? {
         guard length > 0 else { return nil }
 
-        var pos = offset
-        let end = offset + length
-        
-        // Skip the null-terminated name at the beginning of the shape description
-        while pos < end {
-            let b = data[pos]
-            pos += 1
-            if b == 0 {
-                break
-            }
-        }
-
-        var x: Double = 0, y: Double = 0
-        var lastX: Double = 0, lastY: Double = 0
+        var x: Double = 0
+        var y: Double = 0
+        var lastX: Double = 0
+        var lastY: Double = 0
         var penDown = true
         var segments: [(x1: Double, y1: Double, x2: Double, y2: Double)] = []
         var scale: Double = 1.0
         var stack: [(Double, Double)] = []
         var skip = false
+        var activeShapes = Set<Int>()
+        if let rootShapeNumber {
+            activeShapes.insert(rootShapeNumber)
+        }
 
-        // SHX integer-based direction table (16 directions at 22.5° increments)
-        // These use integer dx/dy multipliers per the AutoCAD SHX specification.
-        // NOT trigonometric values — the SHX format defines these as grid steps.
         let dirs: [(dx: Double, dy: Double)] = [
-            ( 1.0,  0.0),   //  0: E
-            ( 1.0,  0.5),   //  1: ENE
-            ( 1.0,  1.0),   //  2: NE
-            ( 0.5,  1.0),   //  3: NNE
-            ( 0.0,  1.0),   //  4: N
-            (-0.5,  1.0),   //  5: NNW
-            (-1.0,  1.0),   //  6: NW
-            (-1.0,  0.5),   //  7: WNW
-            (-1.0,  0.0),   //  8: W
-            (-1.0, -0.5),   //  9: WSW
-            (-1.0, -1.0),   // 10: SW
-            (-0.5, -1.0),   // 11: SSW
-            ( 0.0, -1.0),   // 12: S
-            ( 0.5, -1.0),   // 13: SSE
-            ( 1.0, -1.0),   // 14: SE
-            ( 1.0, -0.5),   // 15: ESE
+            ( 1.0,  0.0),
+            ( 1.0,  0.5),
+            ( 1.0,  1.0),
+            ( 0.5,  1.0),
+            ( 0.0,  1.0),
+            (-0.5,  1.0),
+            (-1.0,  1.0),
+            (-1.0,  0.5),
+            (-1.0,  0.0),
+            (-1.0, -0.5),
+            (-1.0, -1.0),
+            (-0.5, -1.0),
+            ( 0.0, -1.0),
+            ( 0.5, -1.0),
+            ( 1.0, -1.0),
+            ( 1.0, -0.5),
         ]
 
-        while pos < end {
-            let b = data[pos]
-            pos += 1
+        func interpret(
+            _ shapeData: Data,
+            offset: Int,
+            length: Int,
+            depth: Int
+        ) {
+            guard depth <= 32, length > 0 else { return }
 
-            let direction = Int(b & 0x0F)
-            let vecLength = Int(b >> 4)
+            var pos = offset
+            let end = min(shapeData.count, offset + length)
 
-            if vecLength == 0 {
-                // Special control code (high nibble = 0)
-                switch direction {
-                case 0: // END_OF_SHAPE
-                    break
+            // Each compiled definition starts with a null-terminated shape name.
+            while pos < end {
+                let byte = shapeData[pos]
+                pos += 1
+                if byte == 0 { break }
+            }
 
-                case 1: // PEN_DOWN
-                    if !skip {
-                        penDown = true
-                    }
-                    skip = false
+            while pos < end {
+                let b = shapeData[pos]
+                pos += 1
 
-                case 2: // PEN_UP
-                    if !skip {
-                        penDown = false
-                    }
-                    skip = false
+                let direction = Int(b & 0x0F)
+                let vecLength = Int(b >> 4)
 
-                case 3: // DIVIDE_VECTOR (cumulative)
-                    guard pos < end else { break }
-                    let factor = Double(data[pos])
-                    pos += 1
-                    if !skip && factor != 0 {
-                        scale /= factor
-                    }
-                    skip = false
+                if vecLength == 0 {
+                    switch direction {
+                    case 0:
+                        return
 
-                case 4: // MULTIPLY_VECTOR (cumulative)
-                    guard pos < end else { break }
-                    let factor = Double(data[pos])
-                    pos += 1
-                    if !skip && factor != 0 {
-                        scale *= factor
-                    }
-                    skip = false
-
-                case 5: // PUSH_STACK
-                    if !skip {
-                        stack.append((x, y))
-                    }
-                    skip = false
-
-                case 6: // POP_STACK
-                    if !skip, let saved = stack.popLast() {
-                        x = saved.0
-                        y = saved.1
-                        lastX = x
-                        lastY = y
-                    }
-                    skip = false
-
-                case 7: // DRAW_SUBSHAPE
-                    // For unifont, subshape number is 2 bytes (u16 LE)
-                    guard pos + 1 < end else {
-                        // For shapes font, subshape is 1 byte
-                        if pos < end { pos += 1 }
+                    case 1:
+                        if !skip { penDown = true }
                         skip = false
-                        break
-                    }
-                    _ = data[pos]       // low byte
-                    _ = data[pos + 1]   // high byte
-                    pos += 2
-                    // TODO: inline subshape glyph data here
-                    skip = false
 
-                case 8: // XY_DISPLACEMENT
-                    guard pos + 1 < end else { break }
-                    let dx = Double(Int8(bitPattern: data[pos])) * scale
-                    let dy = Double(Int8(bitPattern: data[pos + 1])) * scale
-                    pos += 2
-                    if !skip {
-                        x += dx
-                        y += dy
-                        if penDown {
-                            segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
-                        }
-                        lastX = x
-                        lastY = y
-                    }
-                    skip = false
+                    case 2:
+                        if !skip { penDown = false }
+                        skip = false
 
-                case 9: // POLY_XY_DISPLACEMENT (terminated by 0,0)
-                    while pos + 1 < end {
-                        let dx = Double(Int8(bitPattern: data[pos])) * scale
-                        let dy = Double(Int8(bitPattern: data[pos + 1])) * scale
-                        pos += 2
-                        if dx == 0 && dy == 0 { break }
-                        if !skip {
-                            x += dx
-                            y += dy
-                            if penDown {
-                                segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
-                            }
-                            lastX = x
-                            lastY = y
-                        }
-                    }
-                    if skip { skip = false }
-
-                case 10: // OCTANT_ARC
-                    guard pos + 1 < end else { break }
-                    let radius = Double(data[pos]) * scale
-                    let sc = Int8(bitPattern: data[pos + 1])
-                    pos += 2
-                    if !skip {
-                        // Decode octant arc parameters
-                        let s = Int((sc >> 4) & 0x7)
-                        var c = Int(sc & 0x7)
-                        let ccw = (sc >> 7) & 1
-                        if c == 0 { c = 8 }
-                        let octant = Double.pi / 4.0
-                        let sDir = ccw != 0 ? -s : s
-                        let startAngle = Double(sDir) * octant
-                        let endAngle = Double(c + sDir) * octant
-                        // Move to end position of the arc
-                        let cx = x - radius * cos(startAngle)
-                        let cy = y - radius * sin(startAngle)
-                        x = cx + radius * cos(endAngle)
-                        y = cy + radius * sin(endAngle)
-                        // Approximate arc as line segment from start to end
-                        if penDown {
-                            segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
-                        }
-                        lastX = x
-                        lastY = y
-                    }
-                    skip = false
-
-                case 11: // FRACTIONAL_ARC
-                    guard pos + 4 < end else { break }
-                    let startOff = Double(data[pos])
-                    let endOff = Double(data[pos + 1])
-                    let radiusHigh = Int(data[pos + 2])
-                    let radiusLow = Int(data[pos + 3])
-                    let sc = Int8(bitPattern: data[pos + 4])
-                    pos += 5
-                    if !skip {
-                        let radius = Double(256 * radiusHigh + radiusLow) * scale
-                        let octant = Double.pi / 4.0
-                        let s = Int((sc >> 4) & 0x7)
-                        var c = Int(sc & 0x7)
-                        let ccw = (sc >> 7) & 1
-                        if c == 0 { c = 8 }
-                        let sDir = ccw != 0 ? -s : s
-                        let startAngle = (startOff / 256.0) * octant + Double(sDir) * octant
-                        let endAngle = Double(c + sDir) * octant + (endOff / 256.0) * octant
-                        let cx = x - radius * cos(startAngle)
-                        let cy = y - radius * sin(startAngle)
-                        x = cx + radius * cos(endAngle)
-                        y = cy + radius * sin(endAngle)
-                        if penDown {
-                            segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
-                        }
-                        lastX = x
-                        lastY = y
-                    }
-                    skip = false
-
-                case 12: // BULGE_ARC
-                    guard pos + 2 < end else { break }
-                    let dx = Double(Int8(bitPattern: data[pos])) * scale
-                    let dy = Double(Int8(bitPattern: data[pos + 1])) * scale
-                    _ = Int8(bitPattern: data[pos + 2]) // bulge height
-                    pos += 3
-                    if !skip {
-                        x += dx
-                        y += dy
-                        // Approximate as straight line (proper arc would use bulge factor)
-                        if penDown {
-                            segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
-                        }
-                        lastX = x
-                        lastY = y
-                    }
-                    skip = false
-
-                case 13: // POLY_BULGE_ARC (terminated by dx=0, dy=0)
-                    while pos + 1 < end {
-                        let dx = Double(Int8(bitPattern: data[pos])) * scale
-                        let dy = Double(Int8(bitPattern: data[pos + 1])) * scale
-                        pos += 2
-                        if dx == 0 && dy == 0 { break }
-                        guard pos < end else { break }
-                        _ = Int8(bitPattern: data[pos]) // bulge height
+                    case 3:
+                        guard pos < end else { return }
+                        let factor = Double(shapeData[pos])
                         pos += 1
+                        if !skip && factor != 0 { scale /= factor }
+                        skip = false
+
+                    case 4:
+                        guard pos < end else { return }
+                        let factor = Double(shapeData[pos])
+                        pos += 1
+                        if !skip && factor != 0 { scale *= factor }
+                        skip = false
+
+                    case 5:
+                        if !skip { stack.append((x, y)) }
+                        skip = false
+
+                    case 6:
+                        if !skip, let saved = stack.popLast() {
+                            x = saved.0
+                            y = saved.1
+                            lastX = x
+                            lastY = y
+                        }
+                        skip = false
+
+                    case 7:
+                        let subshapeNumber: Int
+                        if subshapeNumberByteCount == 2 {
+                            guard pos + 1 < end else { return }
+                            subshapeNumber = Int(shapeData[pos])
+                                | (Int(shapeData[pos + 1]) << 8)
+                            pos += 2
+                        } else {
+                            guard pos < end else { return }
+                            subshapeNumber = Int(shapeData[pos])
+                            pos += 1
+                        }
+
+                        if !skip,
+                           let subshape = shapeDefinitions[subshapeNumber],
+                           !activeShapes.contains(subshapeNumber) {
+                            activeShapes.insert(subshapeNumber)
+                            interpret(
+                                subshape,
+                                offset: 0,
+                                length: subshape.count,
+                                depth: depth + 1)
+                            activeShapes.remove(subshapeNumber)
+                        }
+                        skip = false
+
+                    case 8:
+                        guard pos + 1 < end else { return }
+                        let dx = Double(Int8(bitPattern: shapeData[pos])) * scale
+                        let dy = Double(Int8(bitPattern: shapeData[pos + 1])) * scale
+                        pos += 2
                         if !skip {
                             x += dx
                             y += dy
@@ -517,34 +439,144 @@ public final class SHXShapeFont: @unchecked Sendable {
                             lastX = x
                             lastY = y
                         }
-                    }
-                    if skip { skip = false }
+                        skip = false
 
-                case 14: // COND_MODE_2 (vertical text only)
-                    // In horizontal mode: skip the next command.
-                    // The skipped command is typically a vertical-text repositioning move.
-                    skip = true
+                    case 9:
+                        while pos + 1 < end {
+                            let dx = Double(Int8(bitPattern: shapeData[pos])) * scale
+                            let dy = Double(Int8(bitPattern: shapeData[pos + 1])) * scale
+                            pos += 2
+                            if dx == 0 && dy == 0 { break }
+                            if !skip {
+                                x += dx
+                                y += dy
+                                if penDown {
+                                    segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
+                                }
+                                lastX = x
+                                lastY = y
+                            }
+                        }
+                        skip = false
 
-                default:
-                    break
-                }
-            } else {
-                // Direction-length move: high nibble = length, low nibble = direction
-                if !skip {
-                    let len = Double(vecLength) * scale
-                    let (dx, dy) = dirs[direction]
-                    x += dx * len
-                    y += dy * len
-                    if penDown {
-                        segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
+                    case 10:
+                        guard pos + 1 < end else { return }
+                        let radius = Double(shapeData[pos]) * scale
+                        let sc = Int8(bitPattern: shapeData[pos + 1])
+                        pos += 2
+                        if !skip {
+                            let s = Int((sc >> 4) & 0x7)
+                            var c = Int(sc & 0x7)
+                            let ccw = (sc >> 7) & 1
+                            if c == 0 { c = 8 }
+                            let octant = Double.pi / 4.0
+                            let sDir = ccw != 0 ? -s : s
+                            let startAngle = Double(sDir) * octant
+                            let endAngle = Double(c + sDir) * octant
+                            let cx = x - radius * cos(startAngle)
+                            let cy = y - radius * sin(startAngle)
+                            x = cx + radius * cos(endAngle)
+                            y = cy + radius * sin(endAngle)
+                            if penDown {
+                                segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
+                            }
+                            lastX = x
+                            lastY = y
+                        }
+                        skip = false
+
+                    case 11:
+                        guard pos + 4 < end else { return }
+                        let startOff = Double(shapeData[pos])
+                        let endOff = Double(shapeData[pos + 1])
+                        let radiusHigh = Int(shapeData[pos + 2])
+                        let radiusLow = Int(shapeData[pos + 3])
+                        let sc = Int8(bitPattern: shapeData[pos + 4])
+                        pos += 5
+                        if !skip {
+                            let radius = Double(256 * radiusHigh + radiusLow) * scale
+                            let octant = Double.pi / 4.0
+                            let s = Int((sc >> 4) & 0x7)
+                            var c = Int(sc & 0x7)
+                            let ccw = (sc >> 7) & 1
+                            if c == 0 { c = 8 }
+                            let sDir = ccw != 0 ? -s : s
+                            let startAngle = (startOff / 256.0) * octant
+                                + Double(sDir) * octant
+                            let endAngle = Double(c + sDir) * octant
+                                + (endOff / 256.0) * octant
+                            let cx = x - radius * cos(startAngle)
+                            let cy = y - radius * sin(startAngle)
+                            x = cx + radius * cos(endAngle)
+                            y = cy + radius * sin(endAngle)
+                            if penDown {
+                                segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
+                            }
+                            lastX = x
+                            lastY = y
+                        }
+                        skip = false
+
+                    case 12:
+                        guard pos + 2 < end else { return }
+                        let dx = Double(Int8(bitPattern: shapeData[pos])) * scale
+                        let dy = Double(Int8(bitPattern: shapeData[pos + 1])) * scale
+                        pos += 3
+                        if !skip {
+                            x += dx
+                            y += dy
+                            if penDown {
+                                segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
+                            }
+                            lastX = x
+                            lastY = y
+                        }
+                        skip = false
+
+                    case 13:
+                        while pos + 1 < end {
+                            let dx = Double(Int8(bitPattern: shapeData[pos])) * scale
+                            let dy = Double(Int8(bitPattern: shapeData[pos + 1])) * scale
+                            pos += 2
+                            if dx == 0 && dy == 0 { break }
+                            guard pos < end else { return }
+                            pos += 1
+                            if !skip {
+                                x += dx
+                                y += dy
+                                if penDown {
+                                    segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
+                                }
+                                lastX = x
+                                lastY = y
+                            }
+                        }
+                        skip = false
+
+                    case 14:
+                        skip = true
+
+                    default:
+                        skip = false
                     }
-                    lastX = x
-                    lastY = y
+                } else {
+                    if !skip {
+                        let len = Double(vecLength) * scale
+                        let vector = dirs[direction]
+                        x += vector.dx * len
+                        y += vector.dy * len
+                        if penDown {
+                            segments.append((x1: lastX, y1: lastY, x2: x, y2: y))
+                        }
+                        lastX = x
+                        lastY = y
+                    }
+                    skip = false
                 }
-                skip = false
             }
         }
 
+        interpret(data, offset: offset, length: length, depth: 0)
         return GlyphShape(segments: segments, advanceX: x)
     }
 
@@ -739,6 +771,296 @@ public final class SHXShapeFont: @unchecked Sendable {
                 let codePoint = Int(char.value)
                 renderCharacter(codePoint)
                 i += 1
+            }
+        }
+
+        return primitives
+    }
+
+
+    private struct FormattedGlyphLayout {
+        let scalar: Unicode.Scalar
+        let font: SHXShapeFont
+        let height: Double
+        let underline: Bool
+        let overline: Bool
+        let widthFactor: Double
+        let tracking: Double
+        let oblique: Double
+    }
+
+    private struct FormattedLineLayout {
+        var glyphs: [FormattedGlyphLayout]
+        let alignment: Int
+    }
+
+    public func renderFormattedText(
+        _ formatted: FormattedText,
+        origin: Vector3,
+        rotation: Double = 0,
+        alignH: Int = 0,
+        alignV: Int = 0,
+        maxWidth: Double? = nil,
+        lineSpacingFactor: Double = 1.0,
+        lineSpacingStyle: Int = 1,
+        textStyleFonts: [String: String] = [:]
+    ) -> [CADPrimitive] {
+        let defaultHeight = max(formatted.defaultHeight, 1e-9)
+
+        func resolvedFont(for run: FormattedTextRun) -> SHXShapeFont {
+            let filename = CADFontManager.resolveFontReference(
+                run.fontName ?? formatted.defaultFont,
+                textStyleFonts: textStyleFonts,
+                fallback: "")
+            if !filename.isEmpty,
+               let font = CADFontManager.getOrLoadSHXFont(
+                filename: filename,
+                allowFallback: false) {
+                return font
+            }
+            return self
+        }
+
+        func spaceAdvance(for font: SHXShapeFont) -> Double {
+            font.glyphs[0x20]?.advanceX ?? (font.fontHeight * 0.6)
+        }
+
+        func makeGlyphs(_ run: FormattedTextRun) -> [FormattedGlyphLayout] {
+            let text: String
+            if let stack = run.stack {
+                text = stack.numerator + "/" + stack.denominator
+            } else {
+                text = run.text
+            }
+            let font = resolvedFont(for: run)
+            let height = max(run.height ?? defaultHeight, 1e-9)
+            let widthFactor = max(run.widthFactor ?? 1.0, 1e-9)
+            let tracking = max(run.tracking ?? 1.0, 0.0)
+            let oblique = (run.oblique ?? 0.0) * .pi / 180.0
+            return text.unicodeScalars.map {
+                FormattedGlyphLayout(
+                    scalar: $0,
+                    font: font,
+                    height: height,
+                    underline: run.underline,
+                    overline: run.overline,
+                    widthFactor: widthFactor,
+                    tracking: tracking,
+                    oblique: oblique)
+            }
+        }
+
+        func advance(_ glyph: FormattedGlyphLayout) -> Double {
+            let codePoint = Int(glyph.scalar.value)
+            let localAdvance: Double
+            let glyphSpaceAdvance = spaceAdvance(for: glyph.font)
+            if codePoint == 0x20 || codePoint == 0x09 {
+                localAdvance = glyphSpaceAdvance
+            } else {
+                localAdvance = glyph.font.glyphs[codePoint]?.advanceX ?? glyphSpaceAdvance
+            }
+            return localAdvance
+                * (glyph.height / glyph.font.fontHeight)
+                * glyph.widthFactor
+                * glyph.tracking
+        }
+
+        func lineAdvance(_ glyphs: [FormattedGlyphLayout]) -> Double {
+            glyphs.reduce(0.0) { $0 + advance($1) }
+        }
+
+        func splitWords(_ glyphs: [FormattedGlyphLayout]) -> [[FormattedGlyphLayout]] {
+            var words: [[FormattedGlyphLayout]] = []
+            var current: [FormattedGlyphLayout] = []
+            for glyph in glyphs {
+                if glyph.scalar.value == 0x20 || glyph.scalar.value == 0x09 {
+                    if !current.isEmpty {
+                        words.append(current)
+                        current.removeAll(keepingCapacity: true)
+                    }
+                } else {
+                    current.append(glyph)
+                }
+            }
+            if !current.isEmpty {
+                words.append(current)
+            }
+            return words
+        }
+
+        var lines: [FormattedLineLayout] = []
+        for paragraph in formatted.paragraphs {
+            let paragraphGlyphs = paragraph.runs.flatMap(makeGlyphs)
+            guard let maxWidth, maxWidth > 0 else {
+                lines.append(FormattedLineLayout(
+                    glyphs: paragraphGlyphs,
+                    alignment: paragraph.alignment))
+                continue
+            }
+
+            let words = splitWords(paragraphGlyphs)
+            if words.isEmpty {
+                lines.append(FormattedLineLayout(glyphs: [], alignment: paragraph.alignment))
+                continue
+            }
+
+            var current: [FormattedGlyphLayout] = []
+            for word in words {
+                var candidate = current
+                if !candidate.isEmpty, let style = word.first ?? current.last {
+                    candidate.append(FormattedGlyphLayout(
+                        scalar: " ",
+                        font: style.font,
+                        height: style.height,
+                        underline: style.underline,
+                        overline: style.overline,
+                        widthFactor: style.widthFactor,
+                        tracking: style.tracking,
+                        oblique: style.oblique))
+                }
+                candidate.append(contentsOf: word)
+
+                if !current.isEmpty && lineAdvance(candidate) > maxWidth {
+                    lines.append(FormattedLineLayout(
+                        glyphs: current,
+                        alignment: paragraph.alignment))
+                    current = word
+                } else {
+                    current = candidate
+                }
+            }
+            lines.append(FormattedLineLayout(
+                glyphs: current,
+                alignment: paragraph.alignment))
+        }
+
+        if lines.isEmpty {
+            lines = [FormattedLineLayout(glyphs: [], alignment: 0)]
+        }
+
+        let lineHeights = lines.map { line in
+            line.glyphs.map(\.height).max() ?? defaultHeight
+        }
+        let spacingFactor = max(lineSpacingFactor, 0.01)
+        let defaultLineAdvance = defaultHeight * (5.0 / 3.0) * spacingFactor
+        var lineTops = [Double](repeating: 0, count: lines.count)
+        if lines.count > 1 {
+            for index in 1..<lines.count {
+                let previousHeight = lineHeights[index - 1]
+                let requestedAdvance: Double
+                if lineSpacingStyle == 2 {
+                    requestedAdvance = defaultLineAdvance
+                } else {
+                    requestedAdvance = previousHeight * (5.0 / 3.0) * spacingFactor
+                }
+                let lineAdvance = lineSpacingStyle == 2
+                    ? requestedAdvance
+                    : max(previousHeight, requestedAdvance)
+                lineTops[index] = lineTops[index - 1] + lineAdvance
+            }
+        }
+        let contentHeight = (lineTops.last ?? 0) + (lineHeights.last ?? defaultHeight)
+
+        let verticalOffset: Double
+        switch alignV {
+        case 1:
+            verticalOffset = -contentHeight
+        case 2, 4:
+            verticalOffset = -contentHeight * 0.5
+        case 3:
+            verticalOffset = 0
+        default:
+            verticalOffset = -contentHeight
+        }
+
+        let cosR = cos(rotation)
+        let sinR = sin(rotation)
+        var primitives: [CADPrimitive] = []
+
+        func worldPoint(_ x: Double, _ y: Double) -> Vector3 {
+            Vector3(
+                x: origin.x + x * cosR - y * sinR,
+                y: origin.y + x * sinR + y * cosR,
+                z: origin.z)
+        }
+
+        for lineIndex in lines.indices {
+            let line = lines[lineIndex]
+            var cursor = 0.0
+            var minX = Double.infinity
+            var maxX = -Double.infinity
+
+            for glyph in line.glyphs {
+                let codePoint = Int(glyph.scalar.value)
+                let scaleY = glyph.height / glyph.font.fontHeight
+                let scaleX = scaleY * glyph.widthFactor
+                if let shape = glyph.font.glyphs[codePoint] {
+                    let shear = tan(glyph.oblique)
+                    for segment in shape.segments {
+                        let x1 = cursor + (segment.x1 + shear * segment.y1) * scaleX
+                        let x2 = cursor + (segment.x2 + shear * segment.y2) * scaleX
+                        minX = min(minX, x1, x2)
+                        maxX = max(maxX, x1, x2)
+                    }
+                }
+                cursor += advance(glyph)
+            }
+
+            if !minX.isFinite || !maxX.isFinite {
+                minX = 0
+                maxX = cursor
+            }
+
+            let effectiveAlignment = line.alignment == 0 ? alignH : line.alignment
+            let offsetX: Double
+            switch effectiveAlignment {
+            case 1, 4:
+                offsetX = -0.5 * (minX + maxX)
+            case 2:
+                offsetX = -maxX
+            default:
+                offsetX = 0
+            }
+
+            cursor = 0
+            let lineTop = verticalOffset + lineTops[lineIndex]
+            for glyph in line.glyphs {
+                let codePoint = Int(glyph.scalar.value)
+                let glyphAdvance = advance(glyph)
+                let scaleY = glyph.height / glyph.font.fontHeight
+                let scaleX = scaleY * glyph.widthFactor
+                let shear = tan(glyph.oblique)
+
+                if let shape = glyph.font.glyphs[codePoint] {
+                    for segment in shape.segments {
+                        let localX1 = offsetX + cursor + (segment.x1 + shear * segment.y1) * scaleX
+                        let localY1 = lineTop + glyph.height - segment.y1 * scaleY
+                        let localX2 = offsetX + cursor + (segment.x2 + shear * segment.y2) * scaleX
+                        let localY2 = lineTop + glyph.height - segment.y2 * scaleY
+                        primitives.append(.line(
+                            start: worldPoint(localX1, localY1),
+                            end: worldPoint(localX2, localY2)))
+                    }
+                }
+
+                if glyph.underline || glyph.overline {
+                    let localX1 = offsetX + cursor
+                    let localX2 = offsetX + cursor + glyphAdvance
+                    if glyph.underline {
+                        let y = lineTop + glyph.height * 1.15
+                        primitives.append(.line(
+                            start: worldPoint(localX1, y),
+                            end: worldPoint(localX2, y)))
+                    }
+                    if glyph.overline {
+                        let y = lineTop + glyph.height * 0.05
+                        primitives.append(.line(
+                            start: worldPoint(localX1, y),
+                            end: worldPoint(localX2, y)))
+                    }
+                }
+
+                cursor += glyphAdvance
             }
         }
 

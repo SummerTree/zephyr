@@ -1256,6 +1256,7 @@ public class DXFWriter {
             writeDbl(40, mt.height, &out)
             writeDbl(41, mt.widthScale, &out)
             writeDbl(44, mt.interlin, &out)
+            writeInt(73, mt.lineSpacingStyle, &out)
             writeDbl(50, mt.angle_p, &out)  // degrees
             writeInt(71, mt.textGen, &out)  // attachment
             writeInt(72, mt.alignH, &out)   // drawing direction

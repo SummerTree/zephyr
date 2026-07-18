@@ -1529,6 +1529,8 @@ public enum DXFWriterBridge {
                 entity.style = style ?? xdataString(xdata, "dxf.textStyle") ?? "STANDARD"
                 entity.textGen = mtextAttachment(alignH: alignH, alignV: alignV)
                 entity.interlin = xdataDouble(xdata, "dxf.mtextLineSpacing") ?? 1.0
+                entity.lineSpacingStyle = xdataInt(
+                    xdata, "dxf.mtextLineSpacingStyle") == 2 ? 2 : 1
                 applyMTextBackground(xdata, to: entity)
                 applyColor(color, to: entity)
                 return entity

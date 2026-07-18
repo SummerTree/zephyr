@@ -697,6 +697,7 @@ extension DXFReader {
             case 63:  e.backgroundColor = i(v)
             case 71:  e.textGen = i(v)     // attachment point
             case 72:  break                 // drawing direction, not alignment
+            case 73:  e.lineSpacingStyle = i(v)
             case 90:  e.backgroundFillFlags = i(v)
             case 421: e.backgroundColor24 = i(v)
             case 441: e.backgroundTransparency = i(v)
