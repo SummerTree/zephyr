@@ -14,10 +14,19 @@ public enum CADTextFormatter {
     public struct Glyph: Sendable {
         public let text: String
         public let underline: Bool
+        public let bold: Bool
+        public let italic: Bool
 
-        public init(_ text: String, underline: Bool) {
+        public init(
+            _ text: String,
+            underline: Bool,
+            bold: Bool = false,
+            italic: Bool = false
+        ) {
             self.text = text
             self.underline = underline
+            self.bold = bold
+            self.italic = italic
         }
     }
 
@@ -33,18 +42,29 @@ public enum CADTextFormatter {
         }
     }
 
-    /// Layout from structured `FormattedText`. Produces lines with per-glyph
-    /// formatting. Currently renders plain text; per-run font/color/height
-    /// changes are preserved in xdata for future rich rendering.
     public static func layout(
         formatted: FormattedText,
         maxWidth: Double?,
         measure: (String) -> Double
     ) -> [Line] {
-        // For now, use plain text. The formatted structure is preserved
-        // in xdata for round-trip and future per-run rendering.
-        let plain = formatted.toPlainText()
-        return layout(plain, maxWidth: maxWidth, measure: measure)
+        let paragraphs = formatted.paragraphs.map { paragraph in
+            paragraph.runs.flatMap { run -> [Glyph] in
+                let value: String
+                if let stack = run.stack {
+                    value = "\(stack.numerator)/\(stack.denominator)"
+                } else {
+                    value = run.text
+                }
+                return value.map {
+                    Glyph(
+                        String($0),
+                        underline: run.underline,
+                        bold: run.bold,
+                        italic: run.italic)
+                }
+            }
+        }
+        return layoutParagraphs(paragraphs, maxWidth: maxWidth, measure: measure)
     }
 
     public static func layout(
@@ -52,7 +72,14 @@ public enum CADTextFormatter {
         maxWidth: Double?,
         measure: (String) -> Double
     ) -> [Line] {
-        let paragraphs = parse(raw)
+        layoutParagraphs(parse(raw), maxWidth: maxWidth, measure: measure)
+    }
+
+    private static func layoutParagraphs(
+        _ paragraphs: [[Glyph]],
+        maxWidth: Double?,
+        measure: (String) -> Double
+    ) -> [Line] {
         guard let maxWidth, maxWidth > 0 else {
             return paragraphs.map { Line(glyphs: $0) }
         }
@@ -74,7 +101,14 @@ public enum CADTextFormatter {
                 if current.isEmpty {
                     candidate = word
                 } else {
-                    candidate = current + [Glyph(" ", underline: false)] + word
+                    let left = current.last
+                    let right = word.first
+                    let separator = Glyph(
+                        " ",
+                        underline: left?.underline == true && right?.underline == true,
+                        bold: left?.bold == true && right?.bold == true,
+                        italic: left?.italic == true && right?.italic == true)
+                    candidate = current + [separator] + word
                 }
 
                 if !current.isEmpty && measure(string(from: candidate)) > maxWidth {

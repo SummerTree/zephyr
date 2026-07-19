@@ -672,8 +672,7 @@ extension DXFReader {
         for (pairIndex, pair) in pairs.enumerated() {
             let (c, v) = pair
             switch c {
-            case 1:   e.text = decode(v)
-            case 3:   e.text += decode(v)  // MText continuation chunks
+            case 1, 3: e.text += decode(v)
             case 7:   e.style = decode(v)
             case 10:  e.basePoint.x = d(v)
             case 20:  e.basePoint.y = d(v)

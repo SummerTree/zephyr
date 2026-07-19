@@ -628,6 +628,15 @@ public final class CADRendererBridge {
                                     let backgroundUsesViewportColor =
                                         primitiveStyle?.textBackgroundUsesViewportColor == true
                                         || v.textBackgroundUsesViewportColor
+                                    let formattedText: FormattedText?
+                                    if let value = primitiveXData["dxf.formattedText"],
+                                       case .string(let json) = value {
+                                        formattedText = try? JSONDecoder().decode(
+                                            FormattedText.self,
+                                            from: Data(json.utf8))
+                                    } else {
+                                        formattedText = nil
+                                    }
 
                                     if CADFontManager.getOrLoadSHXFont(filename: fontFile) == nil,
                                        let ttfPath = CADFontManager.getTTFEquivalent(filename: fontFile) {
@@ -650,7 +659,8 @@ public final class CADRendererBridge {
                                             color: spriteColor,
                                             backgroundScale: backgroundScale,
                                             backgroundColor: backgroundRGBA,
-                                            backgroundUsesViewportColor: backgroundUsesViewportColor
+                                            backgroundUsesViewportColor: backgroundUsesViewportColor,
+                                            formattedText: formattedText
                                         ))
 
                                         currentZ += 0.01
@@ -876,7 +886,8 @@ public final class CADRendererBridge {
                                     backgroundColor: vt.textBackgroundColor.map {
                                         ($0.r, $0.g, $0.b, $0.a)
                                     },
-                                    backgroundUsesViewportColor: vt.textBackgroundUsesViewportColor
+                                    backgroundUsesViewportColor: vt.textBackgroundUsesViewportColor,
+                                    formattedText: vt.formattedText
                                 )
                                 textSprites.append(spec)
                             }
@@ -1004,6 +1015,7 @@ public final class CADRendererBridge {
                     alignV: ts.alignV,
                     lineSpacingFactor: ts.lineSpacingFactor,
                     lineSpacingStyle: ts.lineSpacingStyle,
+                    formattedText: ts.formattedText,
                     color: ts.color,
                     backgroundScale: ts.backgroundScale,
                     backgroundColor: ts.backgroundUsesViewportColor

@@ -103,6 +103,66 @@ public final class EngineTextManager {
         return newFont
     }
 
+    private func styledFontPath(
+        basePath: String,
+        bold: Bool,
+        italic: Bool
+    ) -> String {
+        guard bold || italic else { return basePath }
+
+        let baseURL = URL(fileURLWithPath: basePath)
+        let directory = baseURL.deletingLastPathComponent()
+        let ext = baseURL.pathExtension
+        let stem = baseURL.deletingPathExtension().lastPathComponent
+        let lowerStem = stem.lowercased()
+        var candidates: [String] = []
+
+        func add(_ name: String) {
+            guard !name.isEmpty, !candidates.contains(name) else { return }
+            candidates.append(name)
+        }
+
+        if lowerStem == "arialn" || lowerStem.contains("arial narrow") {
+            if bold && italic {
+                add("ARIALNBI.TTF")
+                add("arialnbi.ttf")
+                add("Arial Narrow Bold Italic.ttf")
+                add("Arial Narrow BoldItalic.ttf")
+            } else if bold {
+                add("ARIALNB.TTF")
+                add("arialnb.ttf")
+                add("Arial Narrow Bold.ttf")
+            } else {
+                add("ARIALNI.TTF")
+                add("arialni.ttf")
+                add("Arial Narrow Italic.ttf")
+            }
+        }
+
+        let suffixes: [String]
+        if bold && italic {
+            suffixes = [" Bold Italic", " BoldItalic", "-BoldItalic", "BI"]
+        } else if bold {
+            suffixes = [" Bold", "-Bold", "Bold", "B"]
+        } else {
+            suffixes = [" Italic", "-Italic", "Italic", "I"]
+        }
+
+        let extensionSuffix = ext.isEmpty ? "" : ".\(ext)"
+        for suffix in suffixes {
+            add(stem + suffix + extensionSuffix)
+        }
+
+        for candidate in candidates {
+            let url = directory.appendingPathComponent(candidate)
+            if FileManager.default.fileExists(atPath: url.path) {
+                return url.path
+            }
+        }
+
+        return basePath
+    }
+
     private func cadFontMetrics(for font: OpaquePointer) -> CADFontMetrics {
         let key = UInt(bitPattern: font)
         if let cached = cadFontMetricsCache[key] {
@@ -295,6 +355,7 @@ public final class EngineTextManager {
         alignV: Int,
         lineSpacingFactor: Double = 1.0,
         lineSpacingStyle: Int = 1,
+        formattedText: FormattedText? = nil,
         color: (UInt8, UInt8, UInt8, UInt8),
         backgroundScale: Double? = nil,
         backgroundColor: (UInt8, UInt8, UInt8, UInt8)? = nil,
@@ -313,8 +374,25 @@ public final class EngineTextManager {
         let horizontalWorldScale = worldScale * max(widthFactor, 1e-9)
         let maxWidthPixels = maxWidth.map { $0 / horizontalWorldScale }
 
-        let lines = CADTextFormatter.layout(text, maxWidth: maxWidthPixels) { s in
-            measureTextPixels(font: font, text: s).w
+        let lines: [CADTextFormatter.Line]
+        if let formattedText {
+            lines = CADTextFormatter.layout(
+                formatted: formattedText,
+                maxWidth: maxWidthPixels
+            ) { value in
+                measureTextPixels(font: font, text: value).w
+            }
+        } else {
+            lines = CADTextFormatter.layout(text, maxWidth: maxWidthPixels) { value in
+                measureTextPixels(font: font, text: value).w
+            }
+        }
+
+        let linePixelMetrics = lines.map { line -> (w: Double, h: Double) in
+            if line.text.isEmpty {
+                return (0.0, metrics.lineHeightPixels)
+            }
+            return measureTextPixels(font: font, text: line.text)
         }
 
         let cosR = cos(rotation)
@@ -325,7 +403,12 @@ public final class EngineTextManager {
         let lineHeightWorld = lineSpacingStyle == 2
             ? requestedLineHeight
             : max(requestedLineHeight, renderedLineHeight)
-        let blockHeight = Double(max(lines.count, 1) - 1) * lineHeightWorld + height
+        let lastLineHeight = max(
+            linePixelMetrics.last?.h ?? metrics.lineHeightPixels,
+            1.0) * worldScale
+        let blockHeight =
+            Double(max(lines.count, 1) - 1) * lineHeightWorld
+            + lastLineHeight
 
         let baseY: Double
         if alignH == 4 {
@@ -351,6 +434,25 @@ public final class EngineTextManager {
             )
         }
 
+        func styledSegments(
+            for line: CADTextFormatter.Line
+        ) -> [(text: String, bold: Bool, italic: Bool)] {
+            var result: [(text: String, bold: Bool, italic: Bool)] = []
+            for glyph in line.glyphs {
+                if let last = result.last,
+                   last.bold == glyph.bold,
+                   last.italic == glyph.italic {
+                    result[result.count - 1].text += glyph.text
+                } else {
+                    result.append((
+                        text: glyph.text,
+                        bold: glyph.bold,
+                        italic: glyph.italic))
+                }
+            }
+            return result
+        }
+
         var spriteIDs: [SpriteID] = []
         var primitiveIDs: [SpriteID] = []
 
@@ -363,9 +465,9 @@ public final class EngineTextManager {
             var maxY = -Double.greatestFiniteMagnitude
 
             for (lineIndex, line) in lines.enumerated() where !line.text.isEmpty {
-                let metrics = measureTextPixels(font: font, text: line.text)
-                let lineWidthWorld = metrics.w * horizontalWorldScale
-                let lineHeightWorldActual = max(metrics.h, 1.0) * worldScale
+                let lineMetrics = linePixelMetrics[lineIndex]
+                let lineWidthWorld = lineMetrics.w * horizontalWorldScale
+                let lineHeightWorldActual = max(lineMetrics.h, 1.0) * worldScale
                 let offsetX: Double
                 switch alignH {
                 case 1, 4:
@@ -406,15 +508,9 @@ public final class EngineTextManager {
             let lineText = line.text
             guard !lineText.isEmpty else { continue }
 
-            // Bake texture in white so the display-adaptive tint color
-            // (computed from sprite.color in renderSprite) produces the
-            // exact adjusted color via ImDrawListAddImageQuad modulation.
-            let sdlColor = SDL_Color(r: 255, g: 255, b: 255, a: color.3)
-            let rendered = renderTextToTexture(
-                font: font, text: lineText, color: sdlColor, renderer: renderer, gpuDevice: gpuDevice)
-            guard let texture = rendered.texture else { continue }
-
-            let lineWidthWorld = rendered.w * horizontalWorldScale
+            let lineMetrics = linePixelMetrics[lineIndex]
+            let lineWidthWorld = lineMetrics.w * horizontalWorldScale
+            let lineHeightWorldActual = max(lineMetrics.h, 1.0) * worldScale
 
             let offsetX: Double
             switch alignH {
@@ -427,53 +523,16 @@ public final class EngineTextManager {
             }
 
             let offsetY = baseY + Double(lineIndex) * lineHeightWorld
-            let quadWidth = rendered.w * horizontalWorldScale
-            let quadHeight = rendered.h * worldScale
-            let halfWidth = quadWidth * 0.5
-            let halfHeight = quadHeight * 0.5
-
-            // Sprite.position is the unrotated top-left of a quad that the
-            // renderer rotates around position + half-size. Convert the
-            // text's local, rotated top-left into that representation by
-            // calculating the desired rotated center first. Passing the
-            // rotated top-left directly shifts 90-degree MTEXT perpendicular
-            // to its insertion point (notably vertical dimension labels).
-            let desiredCenter = worldPoint(
+            let halfWidth = lineWidthWorld * 0.5
+            let halfHeight = lineHeightWorldActual * 0.5
+            let lineCenter = worldPoint(
                 localX: offsetX + halfWidth,
                 localY: offsetY + halfHeight)
-            let p = Vector3(
-                x: desiredCenter.x - halfWidth,
-                y: desiredCenter.y - halfHeight,
-                z: z)
-
-            let id = SpriteID(id1: Int64.random(in: 1...Int64.max), id2: Int64.random(in: 1...Int64.max))
-            let sprite = Sprite(
-                id: id,
-                position: (p.x, p.y, p.z),
-                scale: (horizontalWorldScale, worldScale, 1.0),
-                size: (rendered.w, rendered.h),
-                rotate: (0.0, 0.0, rotation * 180.0 / .pi),
-                color: color,
-                speed: (0.0, 0.0),
-                texture: texture,
-                text: lineText,
-                font: font,
-                useBoundsWhilePanning: true
-            )
-
-            spriteManager.addRawSprite(sprite)
-            spriteIDs.append(id)
-
-            // Build the pan placeholder in the CAD geometry path. Unlike the
-            // ImGui texture quad, these lines use the exact CAD GPU camera
-            // matrix and remain locked to the drawing during pan.
-            let centerX = p.x + halfWidth
-            let centerY = p.y + halfHeight
 
             func rotatedCorner(_ x: Double, _ y: Double) -> Vector3 {
                 Vector3(
-                    x: centerX + x * cosR - y * sinR,
-                    y: centerY + x * sinR + y * cosR,
+                    x: lineCenter.x + x * cosR - y * sinR,
+                    y: lineCenter.y + x * sinR + y * cosR,
                     z: z)
             }
 
@@ -497,13 +556,80 @@ public final class EngineTextManager {
                 primitiveIDs.append(proxyID)
             }
 
-            let ranges = CADTextFormatter.underlineRanges(for: line) { s in
-                measureTextPixels(font: font, text: s).w
+            let sdlColor = SDL_Color(r: 255, g: 255, b: 255, a: color.3)
+            var segmentCursorPixels = 0.0
+
+            for segment in styledSegments(for: line) where !segment.text.isEmpty {
+                let segmentPath = styledFontPath(
+                    basePath: fontPath,
+                    bold: segment.bold,
+                    italic: segment.italic)
+                let segmentFont =
+                    getOrCreateFont(path: segmentPath, size: fontSize) ?? font
+                let rendered = renderTextToTexture(
+                    font: segmentFont,
+                    text: segment.text,
+                    color: sdlColor,
+                    renderer: renderer,
+                    gpuDevice: gpuDevice)
+                guard let texture = rendered.texture else {
+                    continue
+                }
+
+                let quadWidth = rendered.w * horizontalWorldScale
+                let quadHeight = rendered.h * worldScale
+                let segmentX =
+                    offsetX + segmentCursorPixels * horizontalWorldScale
+
+                func addSegmentSprite(localXOffset: Double, spriteZ: Double) {
+                    let segmentHalfWidth = quadWidth * 0.5
+                    let segmentHalfHeight = quadHeight * 0.5
+                    let desiredCenter = worldPoint(
+                        localX: segmentX + localXOffset + segmentHalfWidth,
+                        localY: offsetY + segmentHalfHeight)
+                    let spritePosition = Vector3(
+                        x: desiredCenter.x - segmentHalfWidth,
+                        y: desiredCenter.y - segmentHalfHeight,
+                        z: spriteZ)
+                    let id = SpriteID(
+                        id1: Int64.random(in: 1...Int64.max),
+                        id2: Int64.random(in: 1...Int64.max))
+                    let sprite = Sprite(
+                        id: id,
+                        position: (
+                            spritePosition.x,
+                            spritePosition.y,
+                            spritePosition.z),
+                        scale: (horizontalWorldScale, worldScale, 1.0),
+                        size: (rendered.w, rendered.h),
+                        rotate: (0.0, 0.0, rotation * 180.0 / .pi),
+                        color: color,
+                        speed: (0.0, 0.0),
+                        texture: texture,
+                        text: segment.text,
+                        font: segmentFont,
+                        useBoundsWhilePanning: true)
+                    spriteManager.addRawSprite(sprite)
+                    spriteIDs.append(id)
+                }
+
+                addSegmentSprite(localXOffset: 0, spriteZ: z)
+                if segment.bold && segmentPath == fontPath {
+                    addSegmentSprite(
+                        localXOffset: horizontalWorldScale,
+                        spriteZ: z + 0.001)
+                }
+
+                segmentCursorPixels += rendered.w
+            }
+
+            let ranges = CADTextFormatter.underlineRanges(for: line) { value in
+                measureTextPixels(font: font, text: value).w
             }
 
             let underlineOffsetPixels = max(
                 1.0,
-                min(metrics.capHeightPixels * 1, -metrics.descentPixels))
+                min(metrics.capHeightPixels, -metrics.descentPixels))
             let underlineY = offsetY
                 + (metrics.ascentPixels + underlineOffsetPixels) * worldScale
 
@@ -519,8 +645,7 @@ public final class EngineTextManager {
                     x2: Float(p2.x),
                     y2: Float(p2.y),
                     z: z + 0.01,
-                    color: color
-                )
+                    color: color)
                 primitiveIDs.append(underlineID)
             }
         }

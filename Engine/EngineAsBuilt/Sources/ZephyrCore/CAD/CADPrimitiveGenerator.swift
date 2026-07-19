@@ -31,6 +31,7 @@ import SwiftSDL
         public let backgroundScale: Double?
         public let backgroundColor: (UInt8, UInt8, UInt8, UInt8)?
         public let backgroundUsesViewportColor: Bool
+        public let formattedText: FormattedText?
 
         public init(
             text: String,
@@ -50,7 +51,8 @@ import SwiftSDL
             lineSpacingStyle: Int = 1,
             backgroundScale: Double? = nil,
             backgroundColor: (UInt8, UInt8, UInt8, UInt8)? = nil,
-            backgroundUsesViewportColor: Bool = false
+            backgroundUsesViewportColor: Bool = false,
+            formattedText: FormattedText? = nil
         ) {
             self.text = text
             self.fontPath = fontPath
@@ -70,6 +72,7 @@ import SwiftSDL
             self.backgroundScale = backgroundScale
             self.backgroundColor = backgroundColor
             self.backgroundUsesViewportColor = backgroundUsesViewportColor
+            self.formattedText = formattedText
         }
     }
 
