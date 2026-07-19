@@ -1193,18 +1193,21 @@ public struct CADEntity: Entity, Snappable, AttributeAttachable, Hashable, Senda
                 addMidpoint(Vector3(x: (c1.x + c2.x) / 2, y: (c1.y + c2.y) / 2, z: (c1.z + c2.z) / 2))
                 addMidpoint(Vector3(x: (c2.x + c3.x) / 2, y: (c2.y + c3.y) / 2, z: (c2.z + c3.z) / 2))
                 addMidpoint(Vector3(x: (c3.x + c0.x) / 2, y: (c3.y + c0.y) / 2, z: (c3.z + c0.z) / 2))
-            case .table(_, let origin, _):
+            case .table(let data, let origin, _):
                 pts.append(.insertionPoint(localPosition: origin))
-                // 4 corners from derived size (approximate for grips)
+                let size = DataTableTessellator.computeSize(data: data)
                 let c0 = origin
-                let c1 = Vector3(x: origin.x + 50, y: origin.y, z: origin.z)
-                let c2 = Vector3(x: origin.x + 50, y: origin.y + 50, z: origin.z)
-                let c3 = Vector3(x: origin.x, y: origin.y + 50, z: origin.z)
+                let c1 = Vector3(x: origin.x + size.width, y: origin.y, z: origin.z)
+                let c2 = Vector3(x: origin.x + size.width, y: origin.y + size.height, z: origin.z)
+                let c3 = Vector3(x: origin.x, y: origin.y + size.height, z: origin.z)
                 addVertex(c0)
                 addVertex(c1)
                 addVertex(c2)
                 addVertex(c3)
-                pts.append(.center(localPosition: Vector3(x: (c0.x + c2.x) / 2, y: (c0.y + c2.y) / 2, z: 0)))
+                pts.append(.center(localPosition: Vector3(
+                    x: (c0.x + c2.x) / 2,
+                    y: (c0.y + c2.y) / 2,
+                    z: origin.z)))
             }
         }
 

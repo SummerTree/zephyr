@@ -85,6 +85,76 @@ public final class EngineInteractionManager {
     /// Accumulated scale factor during corner grip drag.
     public var gripDragAccumScale: Double = 1.0
 
+    // MARK: - Data Table Editing
+
+    public var selectedTableHandle: UUID? = nil
+    public var tableSelectionRange: DataTableCellRange? = nil
+    public var tableEditingMode: DataTableEditingMode = .table
+    public var tableCellEditorActive: Bool = false
+    public var tableCellEditBuffer: String = ""
+    public var tableCellEditNeedsFocus: Bool = false
+    public var hoveredTableBoundary: DataTableBoundaryHit? = nil
+
+    public struct DataTableBoundaryDragState {
+        public var handle: UUID
+        public var boundary: DataTableBoundaryHit
+        public var startLocalPoint: Vector3
+        public var originalData: DataTableData
+        public var undoSnapshot: CADDocumentSnapshot
+        public var moved: Bool
+
+        public init(
+            handle: UUID,
+            boundary: DataTableBoundaryHit,
+            startLocalPoint: Vector3,
+            originalData: DataTableData,
+            undoSnapshot: CADDocumentSnapshot,
+            moved: Bool = false
+        ) {
+            self.handle = handle
+            self.boundary = boundary
+            self.startLocalPoint = startLocalPoint
+            self.originalData = originalData
+            self.undoSnapshot = undoSnapshot
+            self.moved = moved
+        }
+    }
+
+    public var tableBoundaryDrag: DataTableBoundaryDragState? = nil
+
+    public func selectTableCell(
+        handle: UUID,
+        address: DataTableCellAddress,
+        extending: Bool
+    ) {
+        if extending, selectedTableHandle == handle, let current = tableSelectionRange {
+            tableSelectionRange = DataTableCellRange(anchor: current.anchor, focus: address)
+        } else {
+            tableSelectionRange = DataTableCellRange(address)
+        }
+        selectedTableHandle = handle
+        tableEditingMode = .cell
+    }
+
+    public func selectTable(handle: UUID) {
+        selectedTableHandle = handle
+        tableSelectionRange = nil
+        tableEditingMode = .table
+        tableCellEditorActive = false
+        tableCellEditNeedsFocus = false
+    }
+
+    public func clearDataTableEditingState() {
+        selectedTableHandle = nil
+        tableSelectionRange = nil
+        tableEditingMode = .table
+        tableCellEditorActive = false
+        tableCellEditBuffer = ""
+        tableCellEditNeedsFocus = false
+        hoveredTableBoundary = nil
+        tableBoundaryDrag = nil
+    }
+
     // MARK: - Double-Click Tracking
     
     /// Last left-click time (SDL ticks) for double-click detection.

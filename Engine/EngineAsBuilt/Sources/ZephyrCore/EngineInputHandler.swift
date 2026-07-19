@@ -297,14 +297,25 @@ internal final class EngineInputHandler {
                     } else if engine.interaction.rectSelectActive {
                         engine.interaction.rectSelectActive = false
                         engine.interaction.rectSelectPreviewHandles.removeAll()
+                    } else if engine.interaction.tableCellEditorActive {
+                        DataTableEditor.cancelCellEditing(engine: engine)
+                    } else if let handle = engine.interaction.selectedTableHandle,
+                              engine.interaction.tableSelectionRange != nil {
+                        engine.interaction.selectTable(handle: handle)
                     } else if engine.cadSelection.hasSelection {
                         engine.cadSelection.clearSelection()
+                        engine.interaction.clearDataTableEditingState()
                     }
                 case SDL_SCANCODE_DELETE, SDL_SCANCODE_BACKSPACE:
                     if !engine.commandProcessor.pendingDistanceBuffer.isEmpty {
                         _ = engine.commandProcessor.pendingDistanceBuffer.removeLast()
+                    } else if let handle = engine.interaction.selectedTableHandle,
+                              let range = engine.interaction.tableSelectionRange,
+                              engine.cadSelection.isSelected(handle) {
+                        DataTableEditor.clearCells(handle: handle, range: range, engine: engine)
                     } else {
                         engine.deleteSelected()
+                        engine.interaction.clearDataTableEditingState()
                     }
                 case SDL_SCANCODE_F8:
                     engine.snap.orthoEnabled.toggle()

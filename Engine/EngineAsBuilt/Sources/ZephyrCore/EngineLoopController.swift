@@ -185,6 +185,10 @@ public final class EngineLoopController {
             testY = y
         }
         
+        if beginTableBoundaryDragIfNeeded(worldX: wx, worldY: wy) {
+            return
+        }
+
         if let gripHit = engine.cadSelection.gripHitTest(
             screenX: testX, screenY: testY, document: engine.document, cam: cam,
             simplifyComplexBlocks: engine.simplifyComplexBlocks)
@@ -223,17 +227,66 @@ public final class EngineLoopController {
             let now = SDL_GetTicks()
             let dx = abs(x - interaction.lastClickScreenX)
             let dy = abs(y - interaction.lastClickScreenY)
-            if interaction.lastClickedHandle == handle && (now - interaction.lastClickTime) < 400 && dx < 8 && dy < 8 {
-                if let entity = engine.document.entity(for: handle) {
-                    // If entity has a .table primitive, open DataTable panel
-                    if let geom = entity.localGeometry, geom.contains(where: { if case .table = $0 { return true }; return false }) {
-                        interaction.lastClickTime = 0
-                        interaction.lastClickedHandle = nil
+            let isDoubleClick = interaction.lastClickedHandle == handle
+                && (now - interaction.lastClickTime) < 400
+                && dx < 8
+                && dy < 8
+
+            if let entity = engine.document.entity(for: handle),
+               DataTableEditor.payload(in: entity) != nil {
+                if interaction.tableCellEditorActive {
+                    DataTableEditor.commitCellEditing(engine: engine)
+                }
+
+                let wasSelectedTable = engine.cadSelection.selectedCount == 1
+                    && engine.cadSelection.isSelected(handle)
+                    && interaction.selectedTableHandle == handle
+                if !wasSelectedTable {
+                    engine.cadSelection.select(handle)
+                    interaction.selectTable(handle: handle)
+                    interaction.lastClickTime = now
+                    interaction.lastClickedHandle = handle
+                    interaction.lastClickScreenX = x
+                    interaction.lastClickScreenY = y
+                    return
+                }
+
+                engine.cadSelection.addToSelection(handle)
+                let worldPoint = Vector3(x: wx, y: wy, z: 0)
+                if let cellHit = DataTableEditor.cellHit(
+                    handle: handle,
+                    worldPoint: worldPoint,
+                    document: engine.document) {
+                    interaction.selectTableCell(
+                        handle: handle,
+                        address: cellHit.address,
+                        extending: shiftHeld && interaction.selectedTableHandle == handle)
+                    if isDoubleClick {
+                        DataTableEditor.beginCellEditing(
+                            handle: handle,
+                            address: cellHit.address,
+                            engine: engine)
+                    }
+                } else {
+                    interaction.selectTable(handle: handle)
+                    if isDoubleClick {
                         engine.ui.dataTablePanelVisible = true
-                        engine.cadSelection.addToSelection(handle)
-                        return
                     }
                 }
+
+                if isDoubleClick {
+                    interaction.lastClickTime = 0
+                    interaction.lastClickedHandle = nil
+                } else {
+                    interaction.lastClickTime = now
+                    interaction.lastClickedHandle = handle
+                    interaction.lastClickScreenX = x
+                    interaction.lastClickScreenY = y
+                }
+                return
+            }
+
+            if isDoubleClick {
                 if let entity = engine.document.entity(for: handle),
                    let blockID = entity.blockID {
                     // Skip internal table display blocks (*T blocks)
@@ -298,6 +351,17 @@ public final class EngineLoopController {
 
     internal func handleToolMouseUp(x: Float, y: Float) {
         let interaction = engine.interaction
+        if let tableDrag = interaction.tableBoundaryDrag {
+            if tableDrag.moved {
+                engine.document.pushUndo(tableDrag.undoSnapshot)
+                engine.document.invalidateEntityGrid()
+                engine.document.markEdited(regenerate: true)
+                engine.tabManager.markActiveDirty()
+            }
+            interaction.tableBoundaryDrag = nil
+            interaction.hoveredTableBoundary = nil
+            return
+        }
         if interaction.gripActive {
             let moved = interaction.dragTotalWorldX != 0 || interaction.dragTotalWorldY != 0
             switch interaction.gripType {
@@ -368,8 +432,24 @@ public final class EngineLoopController {
         let isLeftDown = (engine.io != nil) ? engine.io.pointee.MouseDown.0 : false
 
         // Heal state if SDL missed a mouse up event (e.g., releasing outside window)
-        if (interaction.dragActive || interaction.gripActive) && !isLeftDown {
+        if (interaction.dragActive || interaction.gripActive || interaction.tableBoundaryDrag != nil) && !isLeftDown {
             handleToolMouseUp(x: x, y: y)
+        }
+
+        if var tableDrag = interaction.tableBoundaryDrag,
+           let entity = engine.document.entity(for: tableDrag.handle) {
+            let localPoint = entity.transform.inverse().transformPoint(Vector3(x: wx, y: wy, z: 0))
+            let delta = localPoint - tableDrag.startLocalPoint
+            DataTableEditor.applyBoundaryResize(
+                handle: tableDrag.handle,
+                boundary: tableDrag.boundary,
+                originalData: tableDrag.originalData,
+                deltaLocal: delta,
+                engine: engine,
+                live: true)
+            tableDrag.moved = tableDrag.moved || abs(delta.x) > 1e-9 || abs(delta.y) > 1e-9
+            interaction.tableBoundaryDrag = tableDrag
+            return
         }
 
         computeSnap(worldX: wx, worldY: wy)
@@ -641,6 +721,7 @@ public final class EngineLoopController {
 
         interaction.dragLastScreenX = x
         interaction.dragLastScreenY = y
+        updateHoveredTableBoundary(worldX: wx, worldY: wy)
 
         hoverCoordinator.update(
             worldX: wx,
@@ -651,6 +732,64 @@ public final class EngineLoopController {
         if let featureCmd = engine.commandProcessor.activeFeatureCommand {
             featureCmd.handleMouseMotion(worldX: snapWX, worldY: snapWY, engine: engine, processor: engine.commandProcessor)
         }
+    }
+
+    private func beginTableBoundaryDragIfNeeded(worldX: Double, worldY: Double) -> Bool {
+        let interaction = engine.interaction
+        guard engine.commandProcessor.activeCommand == nil,
+              engine.commandProcessor.activeFeatureCommand == nil,
+              engine.cadSelection.selectedCount == 1,
+              let handle = engine.cadSelection.lastSelectedHandle,
+              engine.cadSelection.isSelected(handle),
+              let entity = engine.document.entity(for: handle),
+              let table = DataTableEditor.payload(in: entity) else { return false }
+
+        let localPoint = entity.transform.inverse().transformPoint(Vector3(x: worldX, y: worldY, z: 0))
+        let scale = entity.transform.scale
+        let worldTolerance = 6.0 / max(engine.camera.zoom, 0.001)
+        let toleranceX = worldTolerance / max(abs(scale.x), 0.001)
+        let toleranceY = worldTolerance / max(abs(scale.y), 0.001)
+        guard let boundary = DataTableTessellator.boundaryHitTest(
+            data: table.data,
+            origin: table.origin,
+            localPoint: localPoint,
+            toleranceX: toleranceX,
+            toleranceY: toleranceY) else { return false }
+
+        if interaction.tableCellEditorActive {
+            DataTableEditor.commitCellEditing(engine: engine)
+        }
+        interaction.tableBoundaryDrag = EngineInteractionManager.DataTableBoundaryDragState(
+            handle: handle,
+            boundary: boundary,
+            startLocalPoint: localPoint,
+            originalData: table.data,
+            undoSnapshot: engine.document.snapshot())
+        interaction.hoveredTableBoundary = boundary
+        return true
+    }
+
+    private func updateHoveredTableBoundary(worldX: Double, worldY: Double) {
+        let interaction = engine.interaction
+        guard interaction.tableBoundaryDrag == nil,
+              engine.commandProcessor.activeCommand == nil,
+              engine.commandProcessor.activeFeatureCommand == nil,
+              engine.cadSelection.selectedCount == 1,
+              let handle = engine.cadSelection.lastSelectedHandle,
+              let entity = engine.document.entity(for: handle),
+              let table = DataTableEditor.payload(in: entity) else {
+            interaction.hoveredTableBoundary = nil
+            return
+        }
+        let localPoint = entity.transform.inverse().transformPoint(Vector3(x: worldX, y: worldY, z: 0))
+        let scale = entity.transform.scale
+        let worldTolerance = 6.0 / max(engine.camera.zoom, 0.001)
+        interaction.hoveredTableBoundary = DataTableTessellator.boundaryHitTest(
+            data: table.data,
+            origin: table.origin,
+            localPoint: localPoint,
+            toleranceX: worldTolerance / max(abs(scale.x), 0.001),
+            toleranceY: worldTolerance / max(abs(scale.y), 0.001))
     }
 
     private func computeSnap(worldX: Double, worldY: Double) {

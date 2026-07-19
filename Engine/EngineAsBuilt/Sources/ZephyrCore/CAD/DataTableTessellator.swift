@@ -1,33 +1,125 @@
 import Foundation
 
-// =========================================================================
-// MARK: - DataTableTessellator
-//
-// Converts DataTableData into visual CADPrimitives for rendering.
-// Generates grid lines, cell text, and fill rectangles for headers
-// and alternating rows. Results are cached by content hash.
-// =========================================================================
+public struct DataTableCellRect: Hashable, Sendable {
+    public var minX: Double
+    public var minY: Double
+    public var maxX: Double
+    public var maxY: Double
 
-public enum DataTableTessellator {
-
-    // MARK: - Cache
-
-    private static let _cacheLock = NSLock()
-    private nonisolated(unsafe) static var cache: [Int: ([CADPrimitive], Int)] = [:]  // [contentHash: (primitives, gen)]
-
-    /// Invalidate the cache (call on display palette changes).
-    public static func invalidateCache() {
-        cache.removeAll()
+    public init(minX: Double, minY: Double, maxX: Double, maxY: Double) {
+        self.minX = minX
+        self.minY = minY
+        self.maxX = maxX
+        self.maxY = maxY
     }
 
-    // MARK: - Public API
+    public var width: Double { maxX - minX }
+    public var height: Double { maxY - minY }
+    public var center: Vector3 {
+        Vector3(x: (minX + maxX) * 0.5, y: (minY + maxY) * 0.5, z: 0)
+    }
 
-    /// Generate visual primitives for a table. Results are cached by content hash.
-    /// - Parameters:
-    ///   - data: The table data.
-    ///   - origin: Top-left corner in local space.
-    ///   - transform: Entity transform (applied to all output primitives).
-    /// - Returns: Array of visual CADPrimitives (lines, text, fillRects).
+    public func union(_ other: DataTableCellRect) -> DataTableCellRect {
+        DataTableCellRect(
+            minX: min(minX, other.minX),
+            minY: min(minY, other.minY),
+            maxX: max(maxX, other.maxX),
+            maxY: max(maxY, other.maxY))
+    }
+}
+
+public struct DataTableLayout: Hashable, Sendable {
+    public var origin: Vector3
+    public var totalWidth: Double
+    public var totalHeight: Double
+    public var titleHeight: Double
+    public var columnEdges: [Double]
+    public var rowEdges: [Double]
+
+    public init(
+        origin: Vector3,
+        totalWidth: Double,
+        totalHeight: Double,
+        titleHeight: Double,
+        columnEdges: [Double],
+        rowEdges: [Double]
+    ) {
+        self.origin = origin
+        self.totalWidth = totalWidth
+        self.totalHeight = totalHeight
+        self.titleHeight = titleHeight
+        self.columnEdges = columnEdges
+        self.rowEdges = rowEdges
+    }
+
+    public var dataTop: Double { origin.y + titleHeight }
+    public var tableRect: DataTableCellRect {
+        DataTableCellRect(
+            minX: origin.x,
+            minY: origin.y,
+            maxX: origin.x + totalWidth,
+            maxY: origin.y + totalHeight)
+    }
+
+    public var titleRect: DataTableCellRect? {
+        guard titleHeight > 0 else { return nil }
+        return DataTableCellRect(
+            minX: origin.x,
+            minY: origin.y,
+            maxX: origin.x + totalWidth,
+            maxY: origin.y + titleHeight)
+    }
+}
+
+public struct DataTableCellHit: Hashable, Sendable {
+    public var address: DataTableCellAddress
+    public var rect: DataTableCellRect
+
+    public init(address: DataTableCellAddress, rect: DataTableCellRect) {
+        self.address = address
+        self.rect = rect
+    }
+}
+
+public enum DataTableBoundaryHit: Hashable, Sendable {
+    case column(index: Int)
+    case row(index: Int)
+}
+
+
+private struct DataTableGridLineKey: Hashable {
+    var x1: Double
+    var y1: Double
+    var x2: Double
+    var y2: Double
+    var z: Double
+
+    init(_ start: Vector3, _ end: Vector3) {
+        if start.x < end.x || start.x == end.x && start.y <= end.y {
+            x1 = start.x
+            y1 = start.y
+            x2 = end.x
+            y2 = end.y
+        } else {
+            x1 = end.x
+            y1 = end.y
+            x2 = start.x
+            y2 = start.y
+        }
+        z = start.z
+    }
+}
+
+public enum DataTableTessellator {
+    private static let _cacheLock = NSLock()
+    private nonisolated(unsafe) static var cache: [Int: [CADPrimitive]] = [:]
+
+    public static func invalidateCache() {
+        _cacheLock.lock()
+        cache.removeAll()
+        _cacheLock.unlock()
+    }
+
     public static func generateVisualPrimitives(
         data: DataTableData,
         origin: Vector3,
@@ -35,224 +127,466 @@ public enum DataTableTessellator {
     ) -> [CADPrimitive] {
         var hasher = Hasher()
         data.hash(into: &hasher)
+        origin.hash(into: &hasher)
         let contentHash = hasher.finalize()
 
-        if let (cached, _) = cache[contentHash] {
-            return cached.map { transformPrimitive($0, by: transform) }
-        }
+        _cacheLock.lock()
+        let cached = cache[contentHash]
+        _cacheLock.unlock()
 
-        let primitives = buildPrimitives(data: data, origin: origin)
-        cache[contentHash] = (primitives, 0)
+        let primitives: [CADPrimitive]
+        if let cached {
+            primitives = cached
+        } else {
+            primitives = buildPrimitives(data: data, origin: origin)
+            _cacheLock.lock()
+            cache[contentHash] = primitives
+            _cacheLock.unlock()
+        }
 
         if transform.isIdentity {
             return primitives
-        } else {
-            return primitives.map { transformPrimitive($0, by: transform) }
         }
+        return primitives.map { transformPrimitive($0, by: transform) }
     }
 
-    /// Explode table into world-space LINE and TEXT entities for DXF export.
-    /// - Parameters:
-    ///   - data: The table data.
-    ///   - transform: Entity world transform.
-    /// - Returns: Array of LINE and TEXT primitives in world space.
     public static func explodeForDXF(
         data: DataTableData,
+        origin: Vector3 = .zero,
         transform: Transform3D
     ) -> [CADPrimitive] {
-        let visual = buildPrimitives(data: data, origin: .zero)
-        return visual.compactMap { prim -> CADPrimitive? in
-            let transformed = transformPrimitive(prim, by: transform)
+        let visual = buildPrimitives(data: data, origin: origin)
+        var result: [CADPrimitive] = []
+        for primitive in visual {
+            let transformed = transformPrimitive(primitive, by: transform)
             switch transformed {
-            case .line(let s, let e, let c):
-                return .line(start: s, end: e, color: c)
-            case .text(let pos, let text, let h, let rot, let style, let ah, let av, let mw, let c):
-                return .text(position: pos, text: text, height: h, rotation: rot,
-                             style: style, alignH: ah, alignV: av, mtextWidth: mw, color: c)
-            case .fillRect(let o, let s, let c):
-                // Convert fill rect to four lines
-                let x2 = o.x + s.x, _ = o.y + s.y
-                return .line(start: o, end: Vector3(x: x2, y: o.y, z: o.z), color: c)
-                // Note: full rect → 4 lines omitted for brevity; actual impl adds all 4
+            case .line, .text:
+                result.append(transformed)
+            case .fillRect(let origin, let size, let color):
+                let p0 = origin
+                let p1 = Vector3(x: origin.x + size.x, y: origin.y, z: origin.z)
+                let p2 = Vector3(x: origin.x + size.x, y: origin.y + size.y, z: origin.z)
+                let p3 = Vector3(x: origin.x, y: origin.y + size.y, z: origin.z)
+                result.append(.line(start: p0, end: p1, color: color))
+                result.append(.line(start: p1, end: p2, color: color))
+                result.append(.line(start: p2, end: p3, color: color))
+                result.append(.line(start: p3, end: p0, color: color))
             default:
-                return nil
+                break
             }
         }
+        return result
     }
 
-    // MARK: - Layout Computation
-
-    /// Compute the total size of the table from column widths and row heights.
-    public static func computeSize(data: DataTableData) -> (width: Double, height: Double) {
-        let totalWidth = data.columns.reduce(0.0) { $0 + columnWidth($1, defaultWidth: data.defaultColumnWidth) }
-            + Double(data.columns.count + 1) * data.cellMargin
+    public static func layout(data: DataTableData, origin: Vector3) -> DataTableLayout {
+        let margin = max(0, data.cellMargin)
+        let widths = data.columns.map { columnWidth($0, defaultWidth: data.defaultColumnWidth) }
         let rowCount = max(data.rows.count, data.headerRowCount)
-        let totalHeight = rowHeights(data: data, rowCount: rowCount).reduce(0.0, +)
-            + Double(rowCount + 1) * data.cellMargin
-            + (data.title != nil ? data.defaultRowHeight + data.cellMargin : 0)
-        return (totalWidth, totalHeight)
+        let heights = rowHeights(data: data, rowCount: rowCount)
+        let titleHeight = data.title == nil ? 0 : max(data.defaultRowHeight, data.textHeight) + margin
+
+        var columnEdges: [Double] = [origin.x]
+        var x = origin.x
+        for (index, width) in widths.enumerated() {
+            x += margin + width
+            if index == widths.count - 1 {
+                x += margin
+            }
+            columnEdges.append(x)
+        }
+
+        var rowEdges: [Double] = [origin.y + titleHeight]
+        var y = origin.y + titleHeight
+        for (index, height) in heights.enumerated() {
+            y += margin + height
+            if index == heights.count - 1 {
+                y += margin
+            }
+            rowEdges.append(y)
+        }
+
+        let totalWidth = max(0, x - origin.x)
+        let totalHeight = max(0, y - origin.y)
+        return DataTableLayout(
+            origin: origin,
+            totalWidth: totalWidth,
+            totalHeight: totalHeight,
+            titleHeight: titleHeight,
+            columnEdges: columnEdges,
+            rowEdges: rowEdges)
     }
 
-    // MARK: - Private
+    public static func computeSize(data: DataTableData) -> (width: Double, height: Double) {
+        let value = layout(data: data, origin: .zero)
+        return (value.totalWidth, value.totalHeight)
+    }
+
+    public static func cellRect(
+        data: DataTableData,
+        layout: DataTableLayout,
+        row: Int,
+        column: Int,
+        expandMerged: Bool = true
+    ) -> DataTableCellRect? {
+        guard row >= 0, column >= 0,
+              row + 1 < layout.rowEdges.count,
+              column + 1 < layout.columnEdges.count else { return nil }
+
+        let anchor = expandMerged
+            ? mergeAnchor(data: data, row: row, column: column)
+            : DataTableCellAddress(row: row, column: column)
+        guard anchor.row >= 0, anchor.column >= 0,
+              anchor.row + 1 < layout.rowEdges.count,
+              anchor.column + 1 < layout.columnEdges.count else { return nil }
+
+        var rowSpan = 1
+        var colSpan = 1
+        if expandMerged,
+           anchor.row < data.rows.count,
+           anchor.column < data.columns.count,
+           let cell = cell(data: data, row: anchor.row, column: anchor.column) {
+            rowSpan = max(1, cell.rowSpan)
+            colSpan = max(1, cell.colSpan)
+        }
+
+        let endRow = min(layout.rowEdges.count - 1, anchor.row + rowSpan)
+        let endColumn = min(layout.columnEdges.count - 1, anchor.column + colSpan)
+        return DataTableCellRect(
+            minX: layout.columnEdges[anchor.column],
+            minY: layout.rowEdges[anchor.row],
+            maxX: layout.columnEdges[endColumn],
+            maxY: layout.rowEdges[endRow])
+    }
+
+    public static func rangeRect(
+        data: DataTableData,
+        layout: DataTableLayout,
+        range: DataTableCellRange
+    ) -> DataTableCellRect? {
+        guard let first = cellRect(
+            data: data,
+            layout: layout,
+            row: range.minRow,
+            column: range.minColumn,
+            expandMerged: false),
+              let last = cellRect(
+                data: data,
+                layout: layout,
+                row: range.maxRow,
+                column: range.maxColumn,
+                expandMerged: false) else { return nil }
+        return first.union(last)
+    }
+
+    public static func hitTestCell(
+        data: DataTableData,
+        origin: Vector3,
+        localPoint: Vector3
+    ) -> DataTableCellHit? {
+        let layout = layout(data: data, origin: origin)
+        guard localPoint.x >= layout.origin.x,
+              localPoint.x <= layout.origin.x + layout.totalWidth,
+              localPoint.y >= layout.dataTop,
+              localPoint.y <= layout.origin.y + layout.totalHeight else { return nil }
+
+        guard let column = intervalIndex(value: localPoint.x, edges: layout.columnEdges),
+              let row = intervalIndex(value: localPoint.y, edges: layout.rowEdges) else { return nil }
+        let address = mergeAnchor(data: data, row: row, column: column)
+        guard let rect = cellRect(
+            data: data,
+            layout: layout,
+            row: address.row,
+            column: address.column,
+            expandMerged: true) else { return nil }
+        return DataTableCellHit(address: address, rect: rect)
+    }
+
+    public static func boundaryHitTest(
+        data: DataTableData,
+        origin: Vector3,
+        localPoint: Vector3,
+        toleranceX: Double,
+        toleranceY: Double
+    ) -> DataTableBoundaryHit? {
+        let layout = layout(data: data, origin: origin)
+        let minX = layout.origin.x
+        let maxX = layout.origin.x + layout.totalWidth
+        let minY = layout.dataTop
+        let maxY = layout.origin.y + layout.totalHeight
+        guard localPoint.x >= minX - toleranceX,
+              localPoint.x <= maxX + toleranceX,
+              localPoint.y >= minY - toleranceY,
+              localPoint.y <= maxY + toleranceY else { return nil }
+
+        var bestDistance = Double.infinity
+        var best: DataTableBoundaryHit?
+
+        if layout.columnEdges.count > 1,
+           localPoint.y >= minY,
+           localPoint.y <= maxY {
+            for edgeIndex in 1..<layout.columnEdges.count {
+                let distance = abs(localPoint.x - layout.columnEdges[edgeIndex])
+                if distance <= toleranceX && distance < bestDistance {
+                    bestDistance = distance
+                    best = .column(index: edgeIndex - 1)
+                }
+            }
+        }
+
+        if layout.rowEdges.count > 1,
+           localPoint.x >= minX,
+           localPoint.x <= maxX {
+            for edgeIndex in 1..<layout.rowEdges.count {
+                let distance = abs(localPoint.y - layout.rowEdges[edgeIndex])
+                if distance <= toleranceY && distance < bestDistance {
+                    bestDistance = distance
+                    best = .row(index: edgeIndex - 1)
+                }
+            }
+        }
+
+        return best
+    }
+
+    public static func mergeAnchor(
+        data: DataTableData,
+        row: Int,
+        column: Int
+    ) -> DataTableCellAddress {
+        guard row >= 0, column >= 0,
+              row < data.rows.count,
+              column < data.columns.count else {
+            return DataTableCellAddress(row: row, column: column)
+        }
+
+        if let direct = cell(data: data, row: row, column: column), !direct.coveredByMerge {
+            return DataTableCellAddress(row: row, column: column)
+        }
+
+        for anchorRow in 0...row {
+            for anchorColumn in 0...column {
+                guard let candidate = cell(data: data, row: anchorRow, column: anchorColumn),
+                      !candidate.coveredByMerge,
+                      candidate.rowSpan > 1 || candidate.colSpan > 1 else { continue }
+                let maxRow = anchorRow + candidate.rowSpan - 1
+                let maxColumn = anchorColumn + candidate.colSpan - 1
+                if row >= anchorRow, row <= maxRow,
+                   column >= anchorColumn, column <= maxColumn {
+                    return DataTableCellAddress(row: anchorRow, column: anchorColumn)
+                }
+            }
+        }
+        return DataTableCellAddress(row: row, column: column)
+    }
 
     private static func buildPrimitives(data: DataTableData, origin: Vector3) -> [CADPrimitive] {
-        var prims: [CADPrimitive] = []
+        var primitives: [CADPrimitive] = []
+        var gridLines: Set<DataTableGridLineKey> = []
+        let layout = layout(data: data, origin: origin)
         let gridColor = data.gridColor ?? ColorRGBA(r: 128, g: 128, b: 128, a: 255)
         let textColor = data.textColor ?? ColorRGBA(r: 255, g: 255, b: 255, a: 255)
         let headerFill = data.headerFillColor ?? ColorRGBA(r: 40, g: 40, b: 60, a: 255)
-        let altFill = data.backgroundFillColor ?? ColorRGBA(r: 30, g: 30, b: 40, a: 255)
-        let margin = data.cellMargin
+        let alternateFill = data.backgroundFillColor ?? ColorRGBA(r: 30, g: 30, b: 40, a: 255)
+        let margin = max(0, data.cellMargin)
 
-        var currentY = origin.y
-
-        // Title
-        if let title = data.title {
-            prims.append(.text(
-                position: Vector3(x: origin.x + margin, y: currentY + margin, z: origin.z),
+        if let title = data.title, let titleRect = layout.titleRect {
+            primitives.append(.fillRect(
+                origin: Vector3(x: titleRect.minX, y: titleRect.minY, z: origin.z),
+                size: Vector3(x: titleRect.width, y: titleRect.height, z: 0),
+                color: headerFill))
+            primitives.append(.text(
+                position: Vector3(
+                    x: titleRect.minX + margin,
+                    y: titleRect.minY + margin,
+                    z: origin.z),
                 text: title,
                 height: data.textHeight,
                 rotation: 0,
                 style: data.textStyleName,
                 alignH: 0,
                 alignV: 0,
-                mtextWidth: nil,
-                color: textColor
-            ))
-            currentY += data.defaultRowHeight + margin
+                mtextWidth: max(0, titleRect.width - margin * 2),
+                color: textColor))
+            appendRectLines(
+                titleRect,
+                z: origin.z,
+                color: gridColor,
+                seen: &gridLines,
+                into: &primitives)
         }
-
-        let colWidths: [Double] = data.columns.map { columnWidth($0, defaultWidth: data.defaultColumnWidth) }
-        let totalWidth = colWidths.reduce(0.0, +) + Double(colWidths.count + 1) * margin
 
         let rowCount = max(data.rows.count, data.headerRowCount)
-        let heights = rowHeights(data: data, rowCount: rowCount)
+        guard rowCount > 0, !data.columns.isEmpty else { return primitives }
 
-        // Draw rows
-        for rowIdx in 0..<rowCount {
-            let rowTop = currentY + margin
-            let rowH = rowIdx < heights.count ? heights[rowIdx] : data.defaultRowHeight
-            let isHeader = rowIdx < data.headerRowCount
-
-            // Row background
-            if isHeader {
-                prims.append(.fillRect(
-                    origin: Vector3(x: origin.x, y: rowTop, z: origin.z),
-                    size: Vector3(x: totalWidth, y: rowH, z: 0),
-                    color: headerFill
-                ))
-            } else if rowIdx % 2 == 0 {
-                prims.append(.fillRect(
-                    origin: Vector3(x: origin.x, y: rowTop, z: origin.z),
-                    size: Vector3(x: totalWidth, y: rowH, z: 0),
-                    color: altFill
-                ))
-            }
-
-            // Cell text
-            if rowIdx < data.rows.count {
-                let row = data.rows[rowIdx]
-                var cellX = origin.x + margin
-                for (colIdx, col) in data.columns.enumerated() {
-                    let cw = colWidths[colIdx]
-                    var cellValue = ""
-                    for cell in row.cells where cell.columnID == col.id {
-                        if cell.coveredByMerge { break }
-                        switch cell.value {
-                        case .string(let s): cellValue = s
-                        case .number(let d): cellValue = String(format: "%g", d)
-                        case .integer(let i): cellValue = String(i)
-                        case .boolean(let b): cellValue = b ? "true" : "false"
-                        case .empty: cellValue = ""
-                        }
-                        // Prefer cached display text for FIELD cells
-                        if let display = cell.cachedDisplayText, !display.isEmpty {
-                            cellValue = display
-                        }
-                        break
-                    }
-                    if !cellValue.isEmpty {
-                        let alignH: Int
-                        switch col.alignment {
-                        case .left: alignH = 0
-                        case .center: alignH = 1
-                        case .right: alignH = 2
-                        }
-                        prims.append(.text(
-                            position: Vector3(x: cellX, y: rowTop + margin, z: origin.z),
-                            text: cellValue,
-                            height: data.textHeight,
-                            rotation: 0,
-                            style: data.textStyleName,
-                            alignH: alignH,
-                            alignV: 0,
-                            mtextWidth: cw - 2 * margin,
-                            color: textColor
-                        ))
-                    }
-                    cellX += cw + margin
+        for row in 0..<rowCount {
+            for column in 0..<data.columns.count {
+                if row < data.rows.count,
+                   let cell = cell(data: data, row: row, column: column),
+                   cell.coveredByMerge {
+                    continue
                 }
-            }
+                guard let rect = cellRect(
+                    data: data,
+                    layout: layout,
+                    row: row,
+                    column: column,
+                    expandMerged: true) else { continue }
 
-            currentY += rowH + margin
+                if row < data.headerRowCount {
+                    primitives.append(.fillRect(
+                        origin: Vector3(x: rect.minX, y: rect.minY, z: origin.z),
+                        size: Vector3(x: rect.width, y: rect.height, z: 0),
+                        color: headerFill))
+                } else if row % 2 == 0 {
+                    primitives.append(.fillRect(
+                        origin: Vector3(x: rect.minX, y: rect.minY, z: origin.z),
+                        size: Vector3(x: rect.width, y: rect.height, z: 0),
+                        color: alternateFill))
+                }
+
+                appendRectLines(
+                    rect,
+                    z: origin.z,
+                    color: gridColor,
+                    seen: &gridLines,
+                    into: &primitives)
+
+                guard row < data.rows.count else { continue }
+                let value = displayText(data: data, row: row, column: column)
+                guard !value.isEmpty else { continue }
+
+                let alignment = data.columns[column].alignment
+                let x: Double
+                let alignH: Int
+                switch alignment {
+                case .left:
+                    x = rect.minX + margin
+                    alignH = 0
+                case .center:
+                    x = (rect.minX + rect.maxX) * 0.5
+                    alignH = 1
+                case .right:
+                    x = rect.maxX - margin
+                    alignH = 2
+                }
+
+                primitives.append(.text(
+                    position: Vector3(x: x, y: rect.minY + margin, z: origin.z),
+                    text: value,
+                    height: data.textHeight,
+                    rotation: 0,
+                    style: data.textStyleName,
+                    alignH: alignH,
+                    alignV: 0,
+                    mtextWidth: max(0, rect.width - margin * 2),
+                    color: textColor))
+            }
         }
 
-        // Grid lines — horizontal
-        var gy = origin.y
-        for rowIdx in 0...rowCount {
-            prims.append(.line(
-                start: Vector3(x: origin.x, y: gy, z: origin.z),
-                end: Vector3(x: origin.x + totalWidth, y: gy, z: origin.z),
-                color: gridColor
-            ))
-            if rowIdx == 0 && data.title != nil {
-                gy += data.defaultRowHeight + margin
+        return primitives
+    }
+
+    private static func appendRectLines(
+        _ rect: DataTableCellRect,
+        z: Double,
+        color: ColorRGBA,
+        seen: inout Set<DataTableGridLineKey>,
+        into primitives: inout [CADPrimitive]
+    ) {
+        let p0 = Vector3(x: rect.minX, y: rect.minY, z: z)
+        let p1 = Vector3(x: rect.maxX, y: rect.minY, z: z)
+        let p2 = Vector3(x: rect.maxX, y: rect.maxY, z: z)
+        let p3 = Vector3(x: rect.minX, y: rect.maxY, z: z)
+        appendLine(start: p0, end: p1, color: color, seen: &seen, into: &primitives)
+        appendLine(start: p1, end: p2, color: color, seen: &seen, into: &primitives)
+        appendLine(start: p2, end: p3, color: color, seen: &seen, into: &primitives)
+        appendLine(start: p3, end: p0, color: color, seen: &seen, into: &primitives)
+    }
+
+    private static func appendLine(
+        start: Vector3,
+        end: Vector3,
+        color: ColorRGBA,
+        seen: inout Set<DataTableGridLineKey>,
+        into primitives: inout [CADPrimitive]
+    ) {
+        let key = DataTableGridLineKey(start, end)
+        guard seen.insert(key).inserted else { return }
+        primitives.append(.line(start: start, end: end, color: color))
+    }
+
+    private static func displayText(data: DataTableData, row: Int, column: Int) -> String {
+        guard let cell = cell(data: data, row: row, column: column) else { return "" }
+        if let cached = cell.cachedDisplayText, !cached.isEmpty { return cached }
+        switch cell.value {
+        case .string(let value): return value
+        case .number(let value): return String(format: "%g", value)
+        case .integer(let value): return String(value)
+        case .boolean(let value): return value ? "true" : "false"
+        case .empty: return ""
+        }
+    }
+
+    private static func cell(data: DataTableData, row: Int, column: Int) -> DataTableCell? {
+        guard row >= 0, row < data.rows.count,
+              column >= 0, column < data.columns.count else { return nil }
+        let columnID = data.columns[column].id
+        return data.rows[row].cells.first { $0.columnID == columnID }
+    }
+
+    private static func columnWidth(_ column: DataTableColumn, defaultWidth: Double) -> Double {
+        max(0.001, column.width > 0 ? column.width : defaultWidth)
+    }
+
+    public static func rowHeights(data: DataTableData, rowCount: Int) -> [Double] {
+        guard rowCount > 0 else { return [] }
+        return (0..<rowCount).map { index in
+            if index < data.rowHeights.count, data.rowHeights[index] > 0 {
+                return data.rowHeights[index]
             }
-            if rowIdx < rowCount {
-                gy += (rowIdx < heights.count ? heights[rowIdx] : data.defaultRowHeight) + margin
+            return max(0.001, data.defaultRowHeight)
+        }
+    }
+
+    private static func intervalIndex(value: Double, edges: [Double]) -> Int? {
+        guard edges.count >= 2, value >= edges[0], value <= edges[edges.count - 1] else { return nil }
+        for index in 0..<(edges.count - 1) {
+            if value >= edges[index],
+               value < edges[index + 1] || index == edges.count - 2 && value <= edges[index + 1] {
+                return index
             }
         }
-
-        // Grid lines — vertical
-        var gx = origin.x
-        for colIdx in 0...colWidths.count {
-            prims.append(.line(
-                start: Vector3(x: gx, y: origin.y, z: origin.z),
-                end: Vector3(x: gx, y: origin.y + (currentY - origin.y), z: origin.z),
-                color: gridColor
-            ))
-            if colIdx < colWidths.count {
-                gx += colWidths[colIdx] + margin
-            }
-        }
-
-        return prims
+        return nil
     }
 
-    private static func columnWidth(_ col: DataTableColumn, defaultWidth: Double) -> Double {
-        if col.width > 0 { return col.width }
-        return defaultWidth
-    }
-
-    private static func rowHeights(data: DataTableData, rowCount: Int) -> [Double] {
-        if !data.rowHeights.isEmpty { return data.rowHeights }
-        return Array(repeating: data.defaultRowHeight, count: rowCount)
-    }
-
-    private static func transformPrimitive(_ prim: CADPrimitive, by transform: Transform3D) -> CADPrimitive {
-        switch prim {
+    private static func transformPrimitive(_ primitive: CADPrimitive, by transform: Transform3D) -> CADPrimitive {
+        switch primitive {
         case .line(let start, let end, let color):
-            return .line(start: transform.transformPoint(start),
-                         end: transform.transformPoint(end),
-                         color: color)
-        case .text(let pos, let text, let h, let rot, let style, let ah, let av, let mw, let color):
-            return .text(position: transform.transformPoint(pos),
-                         text: text, height: h, rotation: rot + transform.rotation,
-                         style: style, alignH: ah, alignV: av, mtextWidth: mw, color: color)
-        case .fillRect(let o, let s, let color):
-            return .fillRect(origin: transform.transformPoint(o),
-                             size: s, color: color)
+            return .line(
+                start: transform.transformPoint(start),
+                end: transform.transformPoint(end),
+                color: color)
+        case .text(let position, let text, let height, let rotation, let style, let alignH, let alignV, let mtextWidth, let color):
+            return .text(
+                position: transform.transformPoint(position),
+                text: text,
+                height: height,
+                rotation: rotation + transform.rotation,
+                style: style,
+                alignH: alignH,
+                alignV: alignV,
+                mtextWidth: mtextWidth,
+                color: color)
+        case .fillRect(let origin, let size, let color):
+            return .fillRect(
+                origin: transform.transformPoint(origin),
+                size: Vector3(
+                    x: size.x * transform.scale.x,
+                    y: size.y * transform.scale.y,
+                    z: size.z * transform.scale.z),
+                color: color)
         default:
-            return prim
+            return primitive
         }
     }
 }

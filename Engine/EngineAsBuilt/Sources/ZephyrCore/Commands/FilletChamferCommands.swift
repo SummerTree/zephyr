@@ -144,12 +144,14 @@ private struct CornerPick {
     let nearestWorld: Vector3
 
     var segmentIndex: Int? {
-        if case .polyline(_, let segmentIndex, _) = kind { return segmentIndex }
+        let pickKind = kind
+        if case .polyline(_, let segmentIndex, _) = pickKind { return segmentIndex }
         return nil
     }
 
     var isLineLike: Bool {
-        switch kind {
+        let pickKind = kind
+        switch pickKind {
         case .line, .ray:
             return true
         case .polyline(let path, let segmentIndex, _):
@@ -160,12 +162,14 @@ private struct CornerPick {
     }
 
     var isCircle: Bool {
-        if case .circle = kind { return true }
+        let pickKind = kind
+        if case .circle = pickKind { return true }
         return false
     }
 
     var isCircularLike: Bool {
-        switch support {
+        let pickSupport = support
+        switch pickSupport {
         case .circle: return true
         case .line: return false
         }
@@ -476,9 +480,12 @@ private enum CornerSolver {
     ) -> CornerFilletSolution? {
         guard radius > cornerTolerance else { return nil }
 
+        let firstSupport = first.support
+        let secondSupport = second.support
+
         if first.isLineLike, second.isLineLike,
-           case .line(let origin1, let direction1) = first.support,
-           case .line(let origin2, let direction2) = second.support,
+           case .line(let origin1, let direction1) = firstSupport,
+           case .line(let origin2, let direction2) = secondSupport,
            abs(cornerCross(direction1, direction2)) <= cornerTolerance {
             return parallelLineFillet(
                 first: first,
@@ -489,8 +496,8 @@ private enum CornerSolver {
                 direction2: direction2)
         }
 
-        let loci1 = offsetLoci(for: first.support, radius: radius)
-        let loci2 = offsetLoci(for: second.support, radius: radius)
+        let loci1 = offsetLoci(for: firstSupport, radius: radius)
+        let loci2 = offsetLoci(for: secondSupport, radius: radius)
         var best: CornerFilletSolution?
         var bestScore = Double.infinity
 
@@ -498,11 +505,11 @@ private enum CornerSolver {
             for locus2 in loci2 {
                 for center in intersections(locus1, locus2) {
                     guard let tangent1 = tangentPoint(
-                        support: first.support,
+                        support: firstSupport,
                         filletCenter: center,
                         filletRadius: radius),
                           let tangent2 = tangentPoint(
-                            support: second.support,
+                            support: secondSupport,
                             filletCenter: center,
                             filletRadius: radius),
                           cornerDistanceSquared(tangent1, tangent2) > cornerTolerance * cornerTolerance
@@ -544,9 +551,12 @@ private enum CornerSolver {
         distance1: Double,
         distance2: Double
     ) -> CornerChamferSolution? {
+        let firstSupport = first.support
+        let secondSupport = second.support
+
         guard first.isLineLike, second.isLineLike,
-              case .line(let origin1, let direction1) = first.support,
-              case .line(let origin2, let direction2) = second.support,
+              case .line(let origin1, let direction1) = firstSupport,
+              case .line(let origin2, let direction2) = secondSupport,
               let intersection = cornerLineIntersection(origin1, direction1, origin2, direction2),
               let retained1 = retainedDirection(selection: first, corner: intersection),
               let retained2 = retainedDirection(selection: second, corner: intersection)
@@ -559,10 +569,11 @@ private enum CornerSolver {
     }
 
     static func retainedDirection(selection: CornerPick, corner: Vector3) -> Vector3? {
+        let pickSupport = selection.support
         let projected = cornerProjection(
             of: selection.nearestWorld,
             ontoLineAt: corner,
-            direction: lineDirection(selection.support))
+            direction: lineDirection(pickSupport))
         var direction = cornerVector(corner, projected)
         if cornerLength(direction) <= cornerTolerance {
             direction = cornerVector(corner, selection.pickWorld)
@@ -740,7 +751,9 @@ private enum CornerMutation {
         let localPoint = inverse.transformPoint(worldPoint)
         let replacement: CADPrimitive
 
-        switch selection.kind {
+        let pickKind = selection.kind
+
+        switch pickKind {
         case .line(let localStart, let localEnd, let color):
             let worldStart = entity.transform.transformPoint(localStart)
             let worldEnd = entity.transform.transformPoint(localEnd)
@@ -888,10 +901,12 @@ private enum CornerMutation {
         point2: Vector3,
         filletCenter: Vector3?
     ) -> CADEntity? {
+        let firstKind = first.kind
+        let secondKind = second.kind
         guard first.handle == second.handle,
               first.primitiveIndex == second.primitiveIndex,
-              case .polyline(var path, let segment1, let color) = first.kind,
-              case .polyline(_, let segment2, _) = second.kind,
+              case .polyline(var path, let segment1, let color) = firstKind,
+              case .polyline(_, let segment2, _) = secondKind,
               path.hatchEdges.isEmpty,
               path.arcParameters(forSegment: segment1) == nil,
               path.arcParameters(forSegment: segment2) == nil,
@@ -958,7 +973,8 @@ private enum CornerMutation {
         selection: CornerPick,
         radius: Double
     ) -> CADEntity? {
-        guard case .polyline(let path, _, let color) = selection.kind else { return nil }
+        let pickKind = selection.kind
+        guard case .polyline(let path, _, let color) = pickKind else { return nil }
         return rebuildWholePolyline(
             selection: selection,
             path: path,
@@ -978,7 +994,8 @@ private enum CornerMutation {
         distance1: Double,
         distance2: Double
     ) -> CADEntity? {
-        guard case .polyline(let path, _, let color) = selection.kind else { return nil }
+        let pickKind = selection.kind
+        guard case .polyline(let path, _, let color) = pickKind else { return nil }
         return rebuildWholePolyline(
             selection: selection,
             path: path,
@@ -998,7 +1015,8 @@ private enum CornerMutation {
         distance: Double,
         angleRadians: Double
     ) -> CADEntity? {
-        guard case .polyline(let path, _, let color) = selection.kind else { return nil }
+        let pickKind = selection.kind
+        guard case .polyline(let path, _, let color) = pickKind else { return nil }
         return rebuildWholePolyline(
             selection: selection,
             path: path,
@@ -1965,8 +1983,10 @@ public final class ChamferCommand: FeatureCommand {
         case .distance:
             return (Self.distance1, Self.distance2)
         case .angle:
-            guard case .line(let origin1, let direction1) = first.support,
-                  case .line(let origin2, let direction2) = second.support,
+            let firstSupport = first.support
+            let secondSupport = second.support
+            guard case .line(let origin1, let direction1) = firstSupport,
+                  case .line(let origin2, let direction2) = secondSupport,
                   let corner = cornerLineIntersection(origin1, direction1, origin2, direction2),
                   let retained1 = CornerSolver.retainedDirection(selection: first, corner: corner),
                   let retained2 = CornerSolver.retainedDirection(selection: second, corner: corner)

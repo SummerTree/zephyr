@@ -655,8 +655,22 @@ public enum DXFExporter {
         }
 
         for primitive in geometry {
-            writePrimitive(primitive, ctx: ctx, transform: entity.transform,
-                           layerName: layerName, into: &output)
+            if case .table(let data, let origin, _) = primitive {
+                let exploded = DataTableTessellator.explodeForDXF(
+                    data: data,
+                    origin: origin,
+                    transform: entity.transform)
+                for visualPrimitive in exploded {
+                    writePrimitive(
+                        visualPrimitive,
+                        ctx: ctx,
+                        layerName: layerName,
+                        into: &output)
+                }
+            } else {
+                writePrimitive(primitive, ctx: ctx, transform: entity.transform,
+                               layerName: layerName, into: &output)
+            }
         }
     }
 

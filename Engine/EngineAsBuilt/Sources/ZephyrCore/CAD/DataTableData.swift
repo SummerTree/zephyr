@@ -219,3 +219,85 @@ public struct DataTableData: Hashable, Sendable, Codable {
         self.nativeDXFPayload = try container.decodeIfPresent(DataTableNativeDXFPayload.self, forKey: .nativeDXFPayload)
     }
 }
+// =========================================================================
+// MARK: - Data Table Editing State
+// =========================================================================
+
+public struct DataTableCellAddress: Hashable, Sendable {
+    public var row: Int
+    public var column: Int
+
+    public init(row: Int, column: Int) {
+        self.row = row
+        self.column = column
+    }
+}
+
+public struct DataTableCellRange: Hashable, Sendable {
+    public var anchor: DataTableCellAddress
+    public var focus: DataTableCellAddress
+
+    public init(anchor: DataTableCellAddress, focus: DataTableCellAddress) {
+        self.anchor = anchor
+        self.focus = focus
+    }
+
+    public init(_ address: DataTableCellAddress) {
+        self.anchor = address
+        self.focus = address
+    }
+
+    public var minRow: Int { min(anchor.row, focus.row) }
+    public var maxRow: Int { max(anchor.row, focus.row) }
+    public var minColumn: Int { min(anchor.column, focus.column) }
+    public var maxColumn: Int { max(anchor.column, focus.column) }
+    public var rowCount: Int { maxRow - minRow + 1 }
+    public var columnCount: Int { maxColumn - minColumn + 1 }
+    public var isSingleCell: Bool { anchor == focus }
+}
+
+public enum DataTableEditingMode: Hashable, Sendable {
+    case table
+    case cell
+}
+
+public enum DataTableStylePreset: String, CaseIterable, Hashable, Sendable {
+    case standard = "Standard"
+    case light = "Light"
+    case minimal = "Minimal"
+    case alternating = "Alternating"
+}
+
+public struct DataTableInsertConfiguration: Hashable, Sendable {
+    public var columnCount: Int
+    public var dataRowCount: Int
+    public var includeTitle: Bool
+    public var headerRowCount: Int
+    public var title: String
+    public var defaultColumnWidth: Double
+    public var defaultRowHeight: Double
+    public var textHeight: Double
+    public var stylePreset: DataTableStylePreset
+
+    public init(
+        columnCount: Int = 3,
+        dataRowCount: Int = 3,
+        includeTitle: Bool = true,
+        headerRowCount: Int = 1,
+        title: String = "Table",
+        defaultColumnWidth: Double = 5.0,
+        defaultRowHeight: Double = 2.0,
+        textHeight: Double = 1.5,
+        stylePreset: DataTableStylePreset = .standard
+    ) {
+        self.columnCount = columnCount
+        self.dataRowCount = dataRowCount
+        self.includeTitle = includeTitle
+        self.headerRowCount = headerRowCount
+        self.title = title
+        self.defaultColumnWidth = defaultColumnWidth
+        self.defaultRowHeight = defaultRowHeight
+        self.textHeight = textHeight
+        self.stylePreset = stylePreset
+    }
+}

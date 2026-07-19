@@ -106,6 +106,9 @@ struct AppUI {
             renderHatchEditingRibbonIfNeeded(entity: entity, engine: engine)
         }
 
+        // 6c. Data table contextual ribbon and in-canvas cell editor.
+        DataTableRibbonUI.renderIfNeeded(engine: engine, displayWidth: dw)
+
         // 7. Block management panel — list/create/edit blocks.
         if engine.ui.blockPanelVisible {
             BlockPanelUI.render(engine: engine)

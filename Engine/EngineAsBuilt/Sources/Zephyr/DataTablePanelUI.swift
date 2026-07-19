@@ -2,47 +2,33 @@ import ZephyrCore
 import Foundation
 import ImGui
 
-// =========================================================================
-// MARK: - DataTablePanelUI
-//
-// ImGui panel for listing and editing DataTable entities in the document.
-// Shows a table list with create/delete controls, and a spreadsheet-like
-// cell editor for the selected table.
-// =========================================================================
-
 @MainActor
 struct DataTablePanelUI {
-
     static var _isDocked: Bool = false
-
-    /// Track which table entity is being edited and which cell is active.
-    private static var editingTableHandle: UUID? = nil
-    private static var editingCellRow: Int = -1
-    private static var editingCellCol: Int = -1
-    private static var cellEditBuffer: String = ""
+    private static var metadataTableHandle: UUID?
+    private static var titleEditBuffer = ""
+    private static var editingColumnIndex: Int?
+    private static var columnNameBuffer = ""
+    private static var metadataEditNeedsFocus = false
 
     static func render(engine: PhrostEngine) {
-        let doc = engine.document
-
         ImGuiSetNextWindowSize(
-            ImVec2(x: ImGuiGetFontSize() * 28, y: ImGuiGetFontSize() * 35),
+            ImVec2(x: ImGuiGetFontSize() * 42, y: ImGuiGetFontSize() * 38),
             Int32(ImGuiCond_FirstUseEver.rawValue))
 
         let isDocked = _isDocked
         var flags = Int32(ImGuiWindowFlags_NoSavedSettings.rawValue)
-        if isDocked {
-            flags |= Int32(ImGuiWindowFlags_NoTitleBar.rawValue)
-        }
+        if isDocked { flags |= Int32(ImGuiWindowFlags_NoTitleBar.rawValue) }
 
         var opened = true
+        ImGuiPushStyleColor(
+            Int32(ImGuiCol_WindowBg.rawValue),
+            isDocked ? engine.ui.theme.panelBg : engine.ui.theme.panelBgDim)
+        ImGuiPushStyleVar(Int32(ImGuiStyleVar_WindowBorderSize.rawValue), isDocked ? 0.0 : 1.0)
         let entered: Bool
         if isDocked {
-            ImGuiPushStyleColor(Int32(ImGuiCol_WindowBg.rawValue), engine.ui.theme.panelBg)
-            ImGuiPushStyleVar(Int32(ImGuiStyleVar_WindowBorderSize.rawValue), 0.0)
             entered = igBegin("Data Tables##DataTablePanel", nil, flags)
         } else {
-            ImGuiPushStyleColor(Int32(ImGuiCol_WindowBg.rawValue), engine.ui.theme.panelBgDim)
-            ImGuiPushStyleVar(Int32(ImGuiStyleVar_WindowBorderSize.rawValue), 1.0)
             entered = igBegin("Data Tables##DataTablePanel", &opened, flags)
         }
         _isDocked = ImGuiIsWindowDocked()
@@ -65,285 +51,416 @@ struct DataTablePanelUI {
             return
         }
 
-        ImGuiTextV("Data Tables")
-        ImGuiSameLine(0, 8)
-
-        if igButton("Create Table", ImVec2(x: 0, y: 0)) {
-            createNewTable(engine: engine)
-        }
-
+        renderHeader(engine: engine)
         igSeparator()
 
-        // Find all table entities
-        let tableEntities = doc.allEntities.compactMap { entity -> (CADEntity, DataTableData)? in
-            guard let geom = entity.localGeometry else { return nil }
-            for prim in geom {
-                if case .table(let data, _, _) = prim {
-                    return (entity, data)
-                }
-            }
-            return nil
+        guard let selection = selectedTable(engine: engine) else {
+            renderTableList(engine: engine)
+            return
         }
 
-        if tableEntities.isEmpty {
+        renderSelectedTable(
+            handle: selection.handle,
+            entity: selection.entity,
+            data: selection.data,
+            engine: engine)
+    }
+
+    private static func renderHeader(engine: PhrostEngine) {
+        if let bold = engine.ui.boldFont { ImGuiPushFont(bold, 0) }
+        ImGuiTextV("Data Tables")
+        if engine.ui.boldFont != nil { ImGuiPopFont() }
+        ImGuiSameLine(0, 10)
+        if igButton("New Table", ImVec2(x: 0, y: 0)) {
+            engine.commandProcessor.executeCommand("TABLE")
+        }
+        if engine.interaction.selectedTableHandle != nil {
+            ImGuiSameLine(0, 6)
+            if igButton("Show All", ImVec2(x: 0, y: 0)) {
+                if engine.interaction.tableCellEditorActive {
+                    DataTableEditor.commitCellEditing(engine: engine)
+                }
+                engine.cadSelection.clearSelection()
+                engine.interaction.clearDataTableEditingState()
+            }
+        }
+    }
+
+    private static func renderTableList(engine: PhrostEngine) {
+        let tables = engine.document.allEntities.compactMap { entity -> (CADEntity, DataTableData)? in
+            guard let payload = DataTableEditor.payload(in: entity) else { return nil }
+            return (entity, payload.data)
+        }
+
+        guard !tables.isEmpty else {
             ImGuiTextV("No tables in this document.")
-        } else {
-            // List tables and provide editing
-            for (entity, data) in tableEntities {
-                let title = data.title ?? "Table (\(data.rows.count) × \(data.columns.count))"
-                let label = "\(title)##tbl\(entity.handle)"
+            ImGuiTextV("Choose New Table to create one.")
+            return
+        }
 
-                var nodeFlags = Int32(ImGuiTreeNodeFlags_OpenOnArrow.rawValue) |
-                    Int32(ImGuiTreeNodeFlags_SpanAvailWidth.rawValue)
-                if editingTableHandle == entity.handle {
-                    nodeFlags |= Int32(ImGuiTreeNodeFlags_Selected.rawValue)
+        ImGuiTextV("Select a table to edit:")
+        ImGuiDummy(ImVec2(x: 0, y: 4))
+        for (entity, data) in tables {
+            let title = data.title?.isEmpty == false
+                ? data.title!
+                : "Table"
+            let label = "\(title)   \(data.rows.count) rows × \(data.columns.count) columns##\(entity.handle)"
+            if ImGuiSelectable(label, false, 0, ImVec2(x: 0, y: 0)) {
+                engine.cadSelection.select(entity.handle)
+                engine.interaction.selectTable(handle: entity.handle)
+            }
+            if igBeginPopupContextItem("##tableListContext\(entity.handle)", Int32(ImGuiPopupFlags_MouseButtonRight.rawValue)) {
+                if igMenuItem_Bool("Delete Table", nil, false, true) {
+                    engine.document.removeEntity(handle: entity.handle)
+                    engine.tabManager.markActiveDirty()
                 }
+                ImGuiEndPopup()
+            }
+        }
+    }
 
-                let expanded = igTreeNodeEx_Str(label, nodeFlags)
+    private static func renderSelectedTable(
+        handle: UUID,
+        entity: CADEntity,
+        data: DataTableData,
+        engine: PhrostEngine
+    ) {
+        if metadataTableHandle != handle {
+            metadataTableHandle = handle
+            titleEditBuffer = data.title ?? ""
+            editingColumnIndex = nil
+            columnNameBuffer = ""
+            metadataEditNeedsFocus = false
+        }
 
-                // Context menu for delete
-                if igBeginPopupContextItem("##tblctx\(entity.handle)", Int32(ImGuiPopupFlags_MouseButtonRight.rawValue)) {
-                    if igMenuItem_Bool("Delete Table", nil, false, true) {
-                        engine.document.removeEntity(handle: entity.handle)
-                        if editingTableHandle == entity.handle {
-                            editingTableHandle = nil
+        ImGuiTextV("Title")
+        ImGuiSameLine(0, 8)
+        ImGuiPushItemWidth(max(160, ImGuiGetContentRegionAvail().x - 150))
+        let titleSubmitted = inputText(
+            id: "##DataTableTitle",
+            value: &titleEditBuffer,
+            enterReturnsTrue: true)
+        let titleDeactivated = ImGuiIsItemDeactivatedAfterEdit()
+        ImGuiPopItemWidth()
+        if titleSubmitted || titleDeactivated {
+            DataTableEditor.setTitle(handle: handle, title: titleEditBuffer, engine: engine)
+        }
+        ImGuiSameLine(0, 10)
+        ImGuiTextV("\(data.rows.count) × \(data.columns.count)")
+
+        let range = engine.interaction.tableSelectionRange
+        if igSmallButton("Add Row") {
+            let index = min(data.rows.count, (range?.maxRow ?? data.rows.count - 1) + 1)
+            DataTableEditor.insertRow(handle: handle, at: index, engine: engine)
+            selectNearest(handle: handle, row: index, column: range?.minColumn ?? 0, engine: engine)
+        }
+        ImGuiSameLine(0, 4)
+        if igSmallButton("Add Column") {
+            let index = min(data.columns.count, (range?.maxColumn ?? data.columns.count - 1) + 1)
+            DataTableEditor.insertColumn(handle: handle, at: index, engine: engine)
+            selectNearest(handle: handle, row: range?.minRow ?? 0, column: index, engine: engine)
+        }
+        ImGuiSameLine(0, 4)
+        ImGuiBeginDisabled(range == nil)
+        if igSmallButton("Merge") {
+            if let range { DataTableEditor.mergeCells(handle: handle, range: range, engine: engine) }
+        }
+        ImGuiSameLine(0, 4)
+        if igSmallButton("Split") {
+            if let address = range?.focus {
+                DataTableEditor.splitCell(handle: handle, address: address, engine: engine)
+            }
+        }
+        ImGuiEndDisabled()
+        ImGuiSameLine(0, 4)
+        if igSmallButton("Delete Table") {
+            if engine.interaction.tableCellEditorActive {
+                DataTableEditor.cancelCellEditing(engine: engine)
+            }
+            engine.document.removeEntity(handle: handle)
+            engine.tabManager.markActiveDirty()
+            engine.cadSelection.clearSelection()
+            engine.interaction.clearDataTableEditingState()
+            return
+        }
+
+        ImGuiDummy(ImVec2(x: 0, y: 4))
+        ImGuiBeginDisabled(range == nil)
+        if igSmallButton("Delete Row") {
+            if let range, data.rows.count > 1 {
+                DataTableEditor.deleteRows(handle: handle, range: range.minRow...range.maxRow, engine: engine)
+                selectNearest(handle: handle, row: range.minRow, column: range.minColumn, engine: engine)
+            }
+        }
+        ImGuiSameLine(0, 4)
+        if igSmallButton("Delete Column") {
+            if let range, data.columns.count > 1 {
+                DataTableEditor.deleteColumns(handle: handle, range: range.minColumn...range.maxColumn, engine: engine)
+                selectNearest(handle: handle, row: range.minRow, column: range.minColumn, engine: engine)
+            }
+        }
+        ImGuiSameLine(0, 4)
+        if igSmallButton("Clear Cells"), let range {
+            DataTableEditor.clearCells(handle: handle, range: range, engine: engine)
+        }
+        ImGuiSameLine(0, 4)
+        if igSmallButton("Equal Rows"), let range {
+            DataTableEditor.sizeRowsEqually(handle: handle, range: range.minRow...range.maxRow, engine: engine)
+        }
+        ImGuiSameLine(0, 4)
+        if igSmallButton("Equal Columns"), let range {
+            DataTableEditor.sizeColumnsEqually(handle: handle, range: range.minColumn...range.maxColumn, engine: engine)
+        }
+        ImGuiEndDisabled()
+
+        ImGuiDummy(ImVec2(x: 0, y: 6))
+        renderGrid(handle: handle, data: data, engine: engine)
+    }
+
+    private static func renderGrid(
+        handle: UUID,
+        data: DataTableData,
+        engine: PhrostEngine
+    ) {
+        guard !data.columns.isEmpty else {
+            ImGuiTextV("This table has no columns.")
+            return
+        }
+
+        let flags = Int32(ImGuiTableFlags_Borders.rawValue)
+            | Int32(ImGuiTableFlags_ScrollX.rawValue)
+            | Int32(ImGuiTableFlags_ScrollY.rawValue)
+            | Int32(ImGuiTableFlags_RowBg.rawValue)
+        let height = max(180, ImGuiGetContentRegionAvail().y - 8)
+
+        guard igBeginTable(
+            "DataTableGrid##\(handle)",
+            Int32(data.columns.count + 1),
+            flags,
+            ImVec2(x: 0, y: height),
+            ImGuiGetFontSize() * 12) else { return }
+        defer { igEndTable() }
+
+        igTableSetupColumn("#", Int32(ImGuiTableColumnFlags_WidthFixed.rawValue), ImGuiGetFontSize() * 3.5, 0)
+        for (column, value) in data.columns.enumerated() {
+            igTableSetupColumn(
+                "\(value.name)##header\(column)",
+                Int32(ImGuiTableColumnFlags_WidthFixed.rawValue),
+                ImGuiGetFontSize() * 10,
+                UInt32(column + 1))
+        }
+
+        igTableNextRow(Int32(ImGuiTableRowFlags_Headers.rawValue), 0)
+        igTableSetColumnIndex(0)
+        ImGuiTextV("")
+        for column in data.columns.indices {
+            igTableSetColumnIndex(Int32(column + 1))
+            if editingColumnIndex == column {
+                if metadataEditNeedsFocus {
+                    igSetKeyboardFocusHere(0)
+                    metadataEditNeedsFocus = false
+                }
+                ImGuiPushItemWidth(-1)
+                let submitted = inputText(
+                    id: "##columnName\(column)",
+                    value: &columnNameBuffer,
+                    enterReturnsTrue: true)
+                let deactivated = ImGuiIsItemDeactivatedAfterEdit()
+                let escape = ImGuiIsKeyPressed(ImGuiKey_Escape, false)
+                ImGuiPopItemWidth()
+                if escape {
+                    editingColumnIndex = nil
+                    columnNameBuffer = ""
+                } else if submitted || deactivated {
+                    DataTableEditor.setColumnName(
+                        handle: handle,
+                        column: column,
+                        name: columnNameBuffer,
+                        engine: engine)
+                    editingColumnIndex = nil
+                    columnNameBuffer = ""
+                }
+            } else {
+                let selected = isColumnSelected(column, range: engine.interaction.tableSelectionRange, rowCount: data.rows.count)
+                if ImGuiSelectable(
+                    "\(data.columns[column].name)##columnHeader\(column)",
+                    selected,
+                    0,
+                    ImVec2(x: 0, y: 0)) {
+                    guard !data.rows.isEmpty else { continue }
+                    engine.interaction.selectedTableHandle = handle
+                    engine.interaction.tableEditingMode = .cell
+                    engine.interaction.tableSelectionRange = DataTableCellRange(
+                        anchor: DataTableCellAddress(row: 0, column: column),
+                        focus: DataTableCellAddress(row: data.rows.count - 1, column: column))
+                }
+                if ImGuiIsItemHovered(0) && ImGuiIsMouseDoubleClicked(0) {
+                    editingColumnIndex = column
+                    columnNameBuffer = data.columns[column].name
+                    metadataEditNeedsFocus = true
+                }
+            }
+        }
+
+        for row in data.rows.indices {
+            igTableNextRow(Int32(ImGuiTableRowFlags_None.rawValue), 0)
+            igTableSetColumnIndex(0)
+            let rowSelected = isRowSelected(row, range: engine.interaction.tableSelectionRange, columnCount: data.columns.count)
+            if ImGuiSelectable("\(row + 1)##rowHeader\(row)", rowSelected, 0, ImVec2(x: 0, y: 0)) {
+                engine.interaction.selectedTableHandle = handle
+                engine.interaction.tableEditingMode = .cell
+                engine.interaction.tableSelectionRange = DataTableCellRange(
+                    anchor: DataTableCellAddress(row: row, column: 0),
+                    focus: DataTableCellAddress(row: row, column: data.columns.count - 1))
+            }
+
+            for column in data.columns.indices {
+                igTableSetColumnIndex(Int32(column + 1))
+                let address = DataTableCellAddress(row: row, column: column)
+                let selected = contains(address: address, range: engine.interaction.tableSelectionRange)
+                let editing = engine.interaction.tableCellEditorActive
+                    && engine.interaction.selectedTableHandle == handle
+                    && engine.interaction.tableSelectionRange?.focus == address
+
+                if editing {
+                    if engine.interaction.tableCellEditNeedsFocus {
+                        igSetKeyboardFocusHere(0)
+                        engine.interaction.tableCellEditNeedsFocus = false
+                    }
+                    ImGuiPushItemWidth(-1)
+                    let submitted = igInputText(
+                        "##panelCell\(row)_\(column)",
+                        &engine.interaction.tableCellEditBuffer,
+                        4096,
+                        Int32(ImGuiInputTextFlags_EnterReturnsTrue.rawValue),
+                        nil,
+                        nil)
+                    ImGuiPopItemWidth()
+                    let tabPressed = ImGuiIsKeyPressed(ImGuiKey_Tab, false)
+                    let escapePressed = ImGuiIsKeyPressed(ImGuiKey_Escape, false)
+                    if escapePressed {
+                        DataTableEditor.cancelCellEditing(engine: engine)
+                    } else if submitted || tabPressed {
+                        let forward = !(ImGuiGetIO()?.pointee.KeyShift ?? false)
+                        DataTableEditor.commitCellEditing(engine: engine)
+                        if let updated = DataTableEditor.payload(handle: handle, document: engine.document) {
+                            let next = DataTableEditor.advanceAddress(
+                                address,
+                                data: updated.data,
+                                forward: forward,
+                                vertical: submitted)
+                            DataTableEditor.beginCellEditing(handle: handle, address: next, engine: engine)
                         }
-                        engine.tabManager.markActiveDirty()
                     }
-                    ImGuiEndPopup()
-                }
-
-                if expanded {
-                    ImGuiTextV("Rows: \(data.rows.count)  Columns: \(data.columns.count)")
-
-                    if igSmallButton("Add Row##ar\(entity.handle)") {
-                        addRow(to: entity.handle, engine: engine)
+                } else {
+                    let text = DataTableEditor.cellText(data: data, address: address)
+                    let label = "\(text.isEmpty ? " " : text)##cell\(row)_\(column)"
+                    if ImGuiSelectable(label, selected, 0, ImVec2(x: 0, y: 0)) {
+                        let extending = ImGuiGetIO()?.pointee.KeyShift ?? false
+                        engine.interaction.selectTableCell(
+                            handle: handle,
+                            address: address,
+                            extending: extending)
                     }
-                    ImGuiSameLine(0, 4)
-                    if igSmallButton("Delete Row##dr\(entity.handle)") {
-                        deleteLastRow(from: entity.handle, engine: engine)
+                    if ImGuiIsItemHovered(0) && ImGuiIsMouseDoubleClicked(0) {
+                        DataTableEditor.beginCellEditing(handle: handle, address: address, engine: engine)
                     }
-                    ImGuiSameLine(0, 4)
-                    if igSmallButton("Add Column##ac\(entity.handle)") {
-                        addColumn(to: entity.handle, engine: engine)
-                    }
-
-                    // Render a simple grid of cells
-                    if igBeginTable("grid##\(entity.handle)", Int32(data.columns.count + 1),
-                                    Int32(ImGuiTableFlags_Borders.rawValue |
-                                          ImGuiTableFlags_ScrollX.rawValue |
-                                          ImGuiTableFlags_ScrollY.rawValue),
-                                    ImVec2(x: 0, y: ImGuiGetFontSize() * 20),
-                                    ImGuiGetFontSize() * 15) {
-
-                        // Header row
-                        igTableSetupColumn("Row", Int32(ImGuiTableColumnFlags_WidthFixed.rawValue), ImGuiGetFontSize() * 4, 0)
-                        for col in data.columns {
-                            igTableSetupColumn(col.name, Int32(ImGuiTableColumnFlags_WidthFixed.rawValue), ImGuiGetFontSize() * 8, 0)
-                        }
-                        igTableHeadersRow()
-
-                        // Data rows
-                        for (rowIdx, row) in data.rows.enumerated() {
-                            igTableNextRow(Int32(ImGuiTableRowFlags_None.rawValue), 0)
-                            igTableSetColumnIndex(0)
-                            ImGuiTextV("\(rowIdx + 1)")
-
-                            for (colIdx, col) in data.columns.enumerated() {
-                                igTableSetColumnIndex(Int32(colIdx + 1))
-                                let cellValue = cellDisplayText(row: row, columnID: col.id)
-                                let cellLabel = "##c\(entity.handle)r\(rowIdx)c\(colIdx)"
-
-                                if editingTableHandle == entity.handle &&
-                                    editingCellRow == rowIdx && editingCellCol == colIdx {
-                                    // Active cell editing
-                                    igPushItemWidth(ImGuiGetFontSize() * 10)
-                                    if igInputText(cellLabel, &cellEditBuffer, 256,
-                                                   Int32(ImGuiInputTextFlags_EnterReturnsTrue.rawValue), nil, nil) {
-                                        commitCellEdit(entity: entity, row: rowIdx, column: col, engine: engine)
-                                        editingCellRow = -1
-                                        editingCellCol = -1
-                                    }
-                                    igPopItemWidth()
-                                } else {
-                                    ImGuiTextV(cellValue)
-                                    if igIsItemClicked(0) {
-                                        editingTableHandle = entity.handle
-                                        editingCellRow = rowIdx
-                                        editingCellCol = colIdx
-                                        cellEditBuffer = cellValue
-                                    }
-                                }
-                            }
-                        }
-
-                        igEndTable()
-                    }
-
-                    igTreePop()
                 }
             }
         }
     }
 
-    // MARK: - Helpers
 
-    private static func cellDisplayText(row: DataTableRow, columnID: UUID) -> String {
-        for cell in row.cells where cell.columnID == columnID {
-            if cell.coveredByMerge { return "" }
-            // Prefer cached display text for FIELD cells
-            if let display = cell.cachedDisplayText, !display.isEmpty {
-                return display
-            }
-            switch cell.value {
-            case .string(let s): return s
-            case .number(let d): return String(format: "%g", d)
-            case .integer(let i): return String(i)
-            case .boolean(let b): return b ? "true" : "false"
-            case .empty: return ""
-            }
+    private static func inputText(
+        id: String,
+        value: inout String,
+        enterReturnsTrue: Bool
+    ) -> Bool {
+        let bufferSize = 1024
+        var buffer = [CChar](repeating: 0, count: bufferSize)
+        let bytes = value.utf8CString
+        let copyCount = min(bytes.count, bufferSize - 1)
+        buffer.withUnsafeMutableBufferPointer { pointer in
+            _ = pointer.initialize(from: bytes.prefix(copyCount))
         }
-        return ""
+        let flags = enterReturnsTrue
+            ? Int32(ImGuiInputTextFlags_EnterReturnsTrue.rawValue)
+            : 0
+        let submitted = buffer.withUnsafeMutableBufferPointer { pointer -> Bool in
+            guard let base = pointer.baseAddress else { return false }
+            return igInputText(id, base, bufferSize, flags, nil, nil)
+        }
+        value = buffer.withUnsafeBufferPointer { pointer in
+            guard let base = pointer.baseAddress else { return "" }
+            return String(cString: base)
+        }
+        return submitted
     }
 
-    private static func createNewTable(engine: PhrostEngine) {
-        let data = DataTableData(
-            columns: [
-                DataTableColumn(name: "A"),
-                DataTableColumn(name: "B"),
-                DataTableColumn(name: "C"),
-            ],
-            rows: [
-                DataTableRow(cells: [
-                    DataTableCell(columnID: UUID(), value: .string("")),
-                    DataTableCell(columnID: UUID(), value: .string("")),
-                    DataTableCell(columnID: UUID(), value: .string("")),
-                ]),
-                DataTableRow(cells: [
-                    DataTableCell(columnID: UUID(), value: .string("")),
-                    DataTableCell(columnID: UUID(), value: .string("")),
-                    DataTableCell(columnID: UUID(), value: .string("")),
-                ]),
-                DataTableRow(cells: [
-                    DataTableCell(columnID: UUID(), value: .string("")),
-                    DataTableCell(columnID: UUID(), value: .string("")),
-                    DataTableCell(columnID: UUID(), value: .string("")),
-                ]),
-            ],
-            title: "New Table",
-            rowHeights: [],
-            defaultRowHeight: 2.0,
-            defaultColumnWidth: 5.0,
-            headerRowCount: 1,
-            cellMargin: 0.25,
-            textHeight: 1.5,
-            cellAlignment: .left
-        )
-
-        // Fix column IDs in rows to match actual column IDs
-        var fixedData = data
-        for rowIdx in 0..<fixedData.rows.count {
-            for cellIdx in 0..<fixedData.rows[rowIdx].cells.count {
-                if cellIdx < fixedData.columns.count {
-                    fixedData.rows[rowIdx].cells[cellIdx].columnID = fixedData.columns[cellIdx].id
-                }
-            }
+    private static func selectedTable(
+        engine: PhrostEngine
+    ) -> (handle: UUID, entity: CADEntity, data: DataTableData)? {
+        let handle = engine.interaction.selectedTableHandle
+            ?? (engine.cadSelection.selectedCount == 1 ? engine.cadSelection.lastSelectedHandle : nil)
+        guard let handle,
+              engine.cadSelection.selectedHandles.contains(handle),
+              let entity = engine.document.entity(for: handle),
+              let payload = DataTableEditor.payload(in: entity) else { return nil }
+        if engine.interaction.selectedTableHandle != handle {
+            engine.interaction.selectTable(handle: handle)
         }
-
-        let entity = CADEntity(
-            layerID: engine.document.activeLayerID ?? UUID(),
-            blockID: nil,
-            localGeometry: [.table(data: fixedData, origin: .zero, color: nil)],
-            transform: .identity,
-            xdata: [:]
-        )
-        engine.document.addEntity(entity)
-        engine.tabManager.markActiveDirty()
+        return (handle, entity, payload.data)
     }
 
-    private static func addRow(to handle: UUID, engine: PhrostEngine) {
-        guard var entity = engine.document.entity(for: handle),
-              let geom = entity.localGeometry else { return }
-        for (i, prim) in geom.enumerated() {
-            if case .table(var data, let origin, let color) = prim {
-                var cells: [DataTableCell] = []
-                for col in data.columns {
-                    cells.append(DataTableCell(columnID: col.id, value: .empty))
-                }
-                data.rows.append(DataTableRow(cells: cells))
-                entity.localGeometry = nil
-                var newGeom = geom
-                newGeom[i] = .table(data: data, origin: origin, color: color)
-                entity.localGeometry = newGeom
-                engine.document.updateEntity(entity)
-                engine.tabManager.markActiveDirty()
-                return
-            }
-        }
+    private static func selectNearest(
+        handle: UUID,
+        row: Int,
+        column: Int,
+        engine: PhrostEngine
+    ) {
+        guard let data = DataTableEditor.payload(handle: handle, document: engine.document)?.data,
+              !data.rows.isEmpty,
+              !data.columns.isEmpty else { return }
+        engine.interaction.selectTableCell(
+            handle: handle,
+            address: DataTableCellAddress(
+                row: max(0, min(row, data.rows.count - 1)),
+                column: max(0, min(column, data.columns.count - 1))),
+            extending: false)
     }
 
-    private static func deleteLastRow(from handle: UUID, engine: PhrostEngine) {
-        guard var entity = engine.document.entity(for: handle),
-              let geom = entity.localGeometry else { return }
-        for (i, prim) in geom.enumerated() {
-            if case .table(var data, let origin, let color) = prim, !data.rows.isEmpty {
-                data.rows.removeLast()
-                var newGeom = geom
-                newGeom[i] = .table(data: data, origin: origin, color: color)
-                entity.localGeometry = newGeom
-                engine.document.updateEntity(entity)
-                engine.tabManager.markActiveDirty()
-                return
-            }
-        }
+    private static func contains(
+        address: DataTableCellAddress,
+        range: DataTableCellRange?
+    ) -> Bool {
+        guard let range else { return false }
+        return address.row >= range.minRow
+            && address.row <= range.maxRow
+            && address.column >= range.minColumn
+            && address.column <= range.maxColumn
     }
 
-    private static func addColumn(to handle: UUID, engine: PhrostEngine) {
-        guard var entity = engine.document.entity(for: handle),
-              let geom = entity.localGeometry else { return }
-        for (i, prim) in geom.enumerated() {
-            if case .table(var data, let origin, let color) = prim {
-                let newCol = DataTableColumn(name: "Col \(data.columns.count + 1)")
-                data.columns.append(newCol)
-                for rowIdx in 0..<data.rows.count {
-                    data.rows[rowIdx].cells.append(DataTableCell(columnID: newCol.id, value: .empty))
-                }
-                var newGeom = geom
-                newGeom[i] = .table(data: data, origin: origin, color: color)
-                entity.localGeometry = newGeom
-                engine.document.updateEntity(entity)
-                engine.tabManager.markActiveDirty()
-                return
-            }
-        }
+    private static func isRowSelected(
+        _ row: Int,
+        range: DataTableCellRange?,
+        columnCount: Int
+    ) -> Bool {
+        guard let range else { return false }
+        return range.minRow == row
+            && range.maxRow == row
+            && range.minColumn == 0
+            && range.maxColumn == max(0, columnCount - 1)
     }
 
-    private static func commitCellEdit(entity: CADEntity, row: Int, column: DataTableColumn, engine: PhrostEngine) {
-        var updatedEntity = entity
-        guard let geom = entity.localGeometry else { return }
-        for (i, prim) in geom.enumerated() {
-            if case .table(var data, let origin, let color) = prim,
-               row < data.rows.count {
-                for cellIdx in 0..<data.rows[row].cells.count {
-                    if data.rows[row].cells[cellIdx].columnID == column.id {
-                        data.rows[row].cells[cellIdx].value = .string(cellEditBuffer)
-                        var newGeom = geom
-                        newGeom[i] = .table(data: data, origin: origin, color: color)
-                        updatedEntity.localGeometry = newGeom
-                        engine.document.updateEntity(updatedEntity)
-                        engine.tabManager.markActiveDirty()
-                        return
-                    }
-                }
-                // Column not in row yet — add it
-                data.rows[row].cells.append(DataTableCell(columnID: column.id, value: .string(cellEditBuffer)))
-                var newGeom = geom
-                newGeom[i] = .table(data: data, origin: origin, color: color)
-                updatedEntity.localGeometry = newGeom
-                engine.document.updateEntity(updatedEntity)
-                engine.tabManager.markActiveDirty()
-                return
-            }
-        }
+    private static func isColumnSelected(
+        _ column: Int,
+        range: DataTableCellRange?,
+        rowCount: Int
+    ) -> Bool {
+        guard let range else { return false }
+        return range.minColumn == column
+            && range.maxColumn == column
+            && range.minRow == 0
+            && range.maxRow == max(0, rowCount - 1)
     }
 }
