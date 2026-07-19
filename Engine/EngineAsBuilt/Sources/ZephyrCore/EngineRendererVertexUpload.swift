@@ -27,6 +27,22 @@ extension EngineRenderer {
     ) -> [TessInput] {
         var inputs: [TessInput] = []
         let useLightDisplayPalette = engine.ui.isViewportBackgroundLight
+        let viewport = engine.ui.backgroundColor
+        let viewportBackground: (UInt8, UInt8, UInt8, UInt8) = (
+            UInt8(max(0.0, min(255.0, viewport.r * 255.0)).rounded()),
+            UInt8(max(0.0, min(255.0, viewport.g * 255.0)).rounded()),
+            UInt8(max(0.0, min(255.0, viewport.b * 255.0)).rounded()),
+            UInt8(max(0.0, min(255.0, viewport.a * 255.0)).rounded())
+        )
+
+        func displayColor(for primitive: RenderPrimitive) -> (UInt8, UInt8, UInt8, UInt8) {
+            if primitive.usesViewportBackgroundColor {
+                return viewportBackground
+            }
+            return useLightDisplayPalette
+                ? primitive.adjustedColorLight
+                : primitive.adjustedColorDark
+        }
 
         func adjustedGradient(_ gradient: RenderPrimitive.GradientData?) -> RenderPrimitive.GradientData? {
             guard let gradient else { return nil }
@@ -62,7 +78,7 @@ extension EngineRenderer {
                     points: p.points,
                     rects: p.rects,
                     corners: p.corners,
-                    color: useLightDisplayPalette ? p.adjustedColorLight : p.adjustedColorDark,
+                    color: displayColor(for: p),
                     lineWeight: p.lineWeight,
                     geomWidth: p.geomWidth,
                     entityIndex: p.entityIndex,
@@ -83,7 +99,7 @@ extension EngineRenderer {
                     points: p.points,
                     rects: p.rects,
                     corners: p.corners,
-                    color: useLightDisplayPalette ? p.adjustedColorLight : p.adjustedColorDark,
+                    color: displayColor(for: p),
                     lineWeight: p.lineWeight,
                     geomWidth: p.geomWidth,
                     entityIndex: p.entityIndex,

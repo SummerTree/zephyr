@@ -1291,7 +1291,7 @@ public enum DXFImporter {
     ) -> CADDimensionMetadata? {
         guard var metadata else { return nil }
 
-        for primitive in block.geometry {
+        for (primitiveIndex, primitive) in block.geometry.enumerated() {
             guard case .text(
                 let position, _, let height, let rotation, let textStyle,
                 _, _, _, _
@@ -1305,6 +1305,13 @@ public enum DXFImporter {
                 ?? CADDimensionStyle.default
             style.textHeight = height
             style.textStyle = textStyle
+            if let primitiveStyle = block.primitiveStyles[primitiveIndex],
+               primitiveStyle.textBackgroundScale != nil {
+                style.textBackgroundScale = primitiveStyle.textBackgroundScale
+                style.textBackgroundColor = primitiveStyle.textBackgroundColor
+                style.textBackgroundUsesViewportColor =
+                    primitiveStyle.textBackgroundUsesViewportColor
+            }
             metadata.styleOverrides = style
             break
         }

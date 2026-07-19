@@ -235,10 +235,36 @@ public enum DimensionPrimitives {
         )
     }
     
+    private static func primitiveStyles(
+        for primitives: [CADPrimitive],
+        dimensionStyle: CADDimensionStyle
+    ) -> [Int: CADPrimitiveStyle] {
+        guard dimensionStyle.textBackgroundScale != nil else { return [:] }
+
+        var result: [Int: CADPrimitiveStyle] = [:]
+        for (index, primitive) in primitives.enumerated() {
+            guard case .text = primitive else { continue }
+            result[index] = CADPrimitiveStyle(
+                textBackgroundScale: dimensionStyle.textBackgroundScale,
+                textBackgroundColor: dimensionStyle.textBackgroundColor,
+                textBackgroundUsesViewportColor:
+                    dimensionStyle.textBackgroundUsesViewportColor)
+        }
+        return result
+    }
+
     /// Commits the dimension to the document as a block + block reference entity.
     public static func commitDimension(primitives: [CADPrimitive], metadata: CADDimensionMetadata, layerID: UUID, document: CADDocument) {
         let blockName = "*D" + UUID().uuidString.prefix(8)
-        let block = CADBlock(name: blockName, geometry: primitives)
+        let style = metadata.styleOverrides
+            ?? document.dimensionStyles[metadata.styleName]
+            ?? CADDimensionStyle.default
+        let block = CADBlock(
+            name: blockName,
+            geometry: primitives,
+            primitiveStyles: primitiveStyles(
+                for: primitives,
+                dimensionStyle: style))
         document.addBlock(block)
         
         var entity = CADEntity(layerID: layerID)
@@ -448,7 +474,9 @@ public enum DimensionPrimitives {
         // Overwrite the block
         if let blockID = entity.blockID, var block = document.block(for: blockID) {
             block.geometry = newPrimitives
-            block.primitiveStyles.removeAll(keepingCapacity: false)
+            block.primitiveStyles = primitiveStyles(
+                for: newPrimitives,
+                dimensionStyle: style)
             block.primitiveXData.removeAll(keepingCapacity: false)
             block.updateBoundingBox()
             document.addBlock(block)

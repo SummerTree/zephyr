@@ -1021,6 +1021,7 @@ public final class CADRendererBridge {
                     backgroundColor: ts.backgroundUsesViewportColor
                         ? viewportBackground
                         : ts.backgroundColor,
+                    backgroundUsesViewportColor: ts.backgroundUsesViewportColor,
                     z: ts.z,
                     geometryManager: geometryManager,
                     spriteManager: engine.spriteManager,

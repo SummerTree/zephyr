@@ -186,6 +186,7 @@ import SwiftSDL
                 prim.geomWidth = geomWidth
                 prim.isHatchLine = isHatchLine
                 prim.hatchSpacing = hatchSpacing
+                prim.usesViewportBackgroundColor = usesViewportBackground
             }
             return id
         }

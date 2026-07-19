@@ -260,6 +260,9 @@ public final class RenderPrimitive: @unchecked Sendable {
     public var isHatchLine: Bool = false
     public var hatchSpacing: Double = 0.0
     public var gradientData: GradientData?
+    /// Uses the live CAD viewport clear color verbatim. Background masks must
+    /// bypass display-palette contrast adjustment or they become visible.
+    public var usesViewportBackgroundColor: Bool = false
     /// Render only while the camera is actively panning.
     public var isPanProxy: Bool = false
     /// Entity index (0-based, dense). 0 = no entity (default). Set during applySpecs

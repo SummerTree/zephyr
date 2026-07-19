@@ -359,6 +359,7 @@ public final class EngineTextManager {
         color: (UInt8, UInt8, UInt8, UInt8),
         backgroundScale: Double? = nil,
         backgroundColor: (UInt8, UInt8, UInt8, UInt8)? = nil,
+        backgroundUsesViewportColor: Bool = false,
         z: Double,
         geometryManager: GeometryManager,
         spriteManager: SpriteManager,
@@ -500,6 +501,9 @@ public final class EngineTextManager {
                     corners,
                     z: z - 0.02,
                     color: backgroundColor)
+                if let mask = geometryManager.getPrimitive(id: maskID) {
+                    mask.usesViewportBackgroundColor = backgroundUsesViewportColor
+                }
                 primitiveIDs.append(maskID)
             }
         }

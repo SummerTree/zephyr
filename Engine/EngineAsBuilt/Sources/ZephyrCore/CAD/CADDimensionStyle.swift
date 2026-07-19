@@ -42,6 +42,9 @@ public struct CADDimensionStyle: Sendable, Hashable, Codable {
     public var dimensionPrefix: String? = nil
     public var dimensionSuffix: String? = nil
     public var zeroSuppression: Int? = nil
+    public var textBackgroundScale: Double? = nil
+    public var textBackgroundColor: ColorRGBA? = nil
+    public var textBackgroundUsesViewportColor: Bool = false
     public static let `default` = CADDimensionStyle()
     
     public init() {}
