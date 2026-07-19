@@ -94,21 +94,25 @@ var linkerSettings: [LinkerSetting] = []
     // Reuse variable names, ensure SDL3_TTF_INCLUDE/LIB are set in env
     // --- Core SDL3 Paths ---
     if let includePath = sdlIncludePath {
-        csdl3TtfCSettings.append(.unsafeFlags(["-I", includePath]))
-        swiftSettings.append(.unsafeFlags(["-Xcc", "-I", "-Xcc", "\(includePath)"]))
+        let safeIncludePath = includePath.replacingOccurrences(of: "\\", with: "/")
+        csdl3TtfCSettings.append(.unsafeFlags(["-I", safeIncludePath]))
+        swiftSettings.append(.unsafeFlags(["-Xcc", "-I", "-Xcc", "\(safeIncludePath)"]))
     }
     if let libPath = sdlLibraryPath {
-        linkerSettings.append(.unsafeFlags(["-L\(libPath)"]))
+        let safeLibPath = libPath.replacingOccurrences(of: "\\", with: "/")
+        linkerSettings.append(.unsafeFlags(["-L\(safeLibPath)"]))
     }
     linkerSettings.append(.linkedLibrary("SDL3"))
 
     // --- SDL_ttf Specific Paths ---
     if let includePath = sdlTtfIncludePath {
-        csdl3TtfCSettings.append(.unsafeFlags(["-I", includePath]))
-        swiftSettings.append(.unsafeFlags(["-Xcc", "-I", "-Xcc", "\(includePath)"]))
+        let safeIncludePath = includePath.replacingOccurrences(of: "\\", with: "/")
+        csdl3TtfCSettings.append(.unsafeFlags(["-I", safeIncludePath]))
+        swiftSettings.append(.unsafeFlags(["-Xcc", "-I", "-Xcc", "\(safeIncludePath)"]))
     }
     if let libPath = sdlTtfLibraryPath {
-        linkerSettings.append(.unsafeFlags(["-L\(libPath)"]))
+        let safeLibPath = libPath.replacingOccurrences(of: "\\", with: "/")
+        linkerSettings.append(.unsafeFlags(["-L\(safeLibPath)"]))
     }
     linkerSettings.append(.linkedLibrary("SDL3_ttf"))  // Adjust if name differs
 

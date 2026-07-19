@@ -1,11 +1,19 @@
 # compile.ps1
 # This script forces PowerShell to execute the build inside an initialized MSVC CMD context.
-# Usage: .\compile.ps1 [--release] [-DevRoot "D:\workspace"]
+# Usage: .\compile.ps1 [-Release] [-DevRoot "D:\workspace"]
 
 param(
     [switch]$Release,
     [string]$DevRoot = "C:\dev"
 )
+
+# PowerShell does not recognize --release as matching -Release (switch).
+# When passed as --release, it gets bound positionally to $DevRoot instead.
+# Detect and recover from this case.
+if ($DevRoot -eq "--release") {
+    $DevRoot = "C:\dev"
+    $Release = $true
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -82,7 +90,7 @@ $vsInstallerPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\v
 $vsPath = & $vsInstallerPath -latest -property installationPath
 $vcvarsPath = "$vsPath\VC\Auxiliary\Build\vcvarsall.bat"
 
-$buildCommand = "swift build -c $config -Xcc -I`"$($env:SDL3_INCLUDE)`""
+$buildCommand = "swift build --configuration $config -Xcc -I`"$($env:SDL3_INCLUDE)`""
 $cmdScriptPath = "$env:TEMP\swift-compile-local.cmd"
 Set-Content -Path $cmdScriptPath -Encoding ASCII -Value @(
     "@echo off",

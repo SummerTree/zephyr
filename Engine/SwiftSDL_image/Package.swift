@@ -97,21 +97,25 @@ var linkerSettings: [LinkerSetting] = []
 #elseif os(Windows)
     // --- Core SDL3 Paths ---
     if let includePath = sdlIncludePath {
-        csdl3ImageCSettings.append(.unsafeFlags(["-I", includePath]))
-        swiftSettings.append(.unsafeFlags(["-Xcc", "-I", "-Xcc", "\(includePath)"]))
+        let safeIncludePath = includePath.replacingOccurrences(of: "\\", with: "/")
+        csdl3ImageCSettings.append(.unsafeFlags(["-I", safeIncludePath]))
+        swiftSettings.append(.unsafeFlags(["-Xcc", "-I", "-Xcc", "\(safeIncludePath)"]))
     }
     if let libPath = sdlLibraryPath {
-        linkerSettings.append(.unsafeFlags(["-L\(libPath)"]))
+        let safeLibPath = libPath.replacingOccurrences(of: "\\", with: "/")
+        linkerSettings.append(.unsafeFlags(["-L\(safeLibPath)"]))
     }
     linkerSettings.append(.linkedLibrary("SDL3"))
 
     // --- SDL_image Specific Paths ---
     if let includePath = sdlImageIncludePath {
-        csdl3ImageCSettings.append(.unsafeFlags(["-I", includePath]))
-        swiftSettings.append(.unsafeFlags(["-Xcc", "-I", "-Xcc", "\(includePath)"]))
+        let safeIncludePath = includePath.replacingOccurrences(of: "\\", with: "/")
+        csdl3ImageCSettings.append(.unsafeFlags(["-I", safeIncludePath]))
+        swiftSettings.append(.unsafeFlags(["-Xcc", "-I", "-Xcc", "\(safeIncludePath)"]))
     }
     if let libPath = sdlImageLibraryPath {
-        linkerSettings.append(.unsafeFlags(["-L\(libPath)"]))
+        let safeLibPath = libPath.replacingOccurrences(of: "\\", with: "/")
+        linkerSettings.append(.unsafeFlags(["-L\(safeLibPath)"]))
     }
     linkerSettings.append(.linkedLibrary("SDL3_image"))  // Adjust if name differs
 

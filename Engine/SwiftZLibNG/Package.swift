@@ -30,11 +30,13 @@ var linkerSettings: [LinkerSetting] = []
     // The library path is passed via ZLIB_NG_LIB env var.
     // zlibstatic-ng.lib is the static library (vs zlib-ng.lib which is the DLL import lib).
     if let libPath = zlibLibraryPath {
+        // Normalize path separators to forward slashes for SwiftPM compatibility
+        let safeLibPath = libPath.replacingOccurrences(of: "\\", with: "/")
         // Pass the library search path to the linker
-        linkerSettings.append(.unsafeFlags(["-L\(libPath)"]))
+        linkerSettings.append(.unsafeFlags(["-L\(safeLibPath)"]))
         // On MSVC, link.exe needs the .lib file directly for static linking.
-        // We pass the full path to the static library so the linker finds it.
-        linkerSettings.append(.unsafeFlags(["\(libPath)\\zlibstatic-ng.lib"]))
+        // We pass the full path to the static library using forward slashes throughout.
+        linkerSettings.append(.unsafeFlags(["\(safeLibPath)/zlibstatic-ng.lib"]))
     } else {
         print("WARNING: ZLIB_NG_LIB not set. zlib-ng will not be linked!")
     }
