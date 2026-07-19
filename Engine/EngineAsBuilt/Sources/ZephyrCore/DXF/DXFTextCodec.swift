@@ -57,8 +57,9 @@ public class DXFTextCodec {
     /// Convert string from DXF code page to UTF-8.
     /// Decodes \U+XXXX escape sequences embedded in the encoded text.
     public func toUtf8(_ s: String) -> String {
-        if codePage == "UTF-8"  { return decodeUnicodeEscapes(s) }
-        if codePage == "UTF-16" { return decodeUnicodeEscapes(s) }
+        if storesStringsAsUTF8 || codePage == "UTF-8" || codePage == "UTF-16" {
+            return decodeUnicodeEscapes(s)
+        }
         let decoded = foundationDecode(s)
         return decodeUnicodeEscapes(decoded)
     }
@@ -66,14 +67,24 @@ public class DXFTextCodec {
     /// Convert string from UTF-8 to DXF code page.
     /// Characters not representable in target encoding become \U+XXXX.
     public func fromUtf8(_ s: String) -> String {
-        if codePage == "UTF-8"  { return s }
-        if codePage == "UTF-16" { return s }
+        if storesStringsAsUTF8 || codePage == "UTF-8" || codePage == "UTF-16" {
+            return s
+        }
         let encoded = foundationEncode(s)
         // If result is empty (conversion failed), escape non-representable chars
         if encoded.isEmpty && !s.isEmpty {
             return escapeNonRepresentable(s)
         }
         return encoded
+    }
+
+    private var storesStringsAsUTF8: Bool {
+        switch version {
+        case .r2007, .r2010, .r2013, .r2018:
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Foundation Conversion
@@ -88,12 +99,22 @@ public class DXFTextCodec {
         }
 #endif
         let enc = foundationEncodingFor(codePage)
-        if let data = s.data(using: enc, allowLossyConversion: true),
-           let decoded = String(data: data, encoding: .utf8) {
+        if let data = rawByteData(from: s),
+           let decoded = String(data: data, encoding: enc) {
             return decoded
         }
         // Fallback to CP1252 table
         return decode1252Table(s)
+    }
+
+    private func rawByteData(from s: String) -> Data? {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(s.unicodeScalars.count)
+        for scalar in s.unicodeScalars {
+            guard scalar.value <= 0xFF else { return nil }
+            bytes.append(UInt8(scalar.value))
+        }
+        return Data(bytes)
     }
 
     /// Encode string to DXF code page using Foundation String.Encoding.
@@ -287,7 +308,12 @@ public class DXFTextCodec {
 
     private func decode1252Table(_ s: String) -> String {
         var result = ""
-        for byte in s.utf8 {
+        for scalar in s.unicodeScalars {
+            guard scalar.value <= 0xFF else {
+                result.append(Character(scalar))
+                continue
+            }
+            let byte = UInt8(scalar.value)
             if byte < 0x80 || byte >= 0xA0 {
                 result.append(Character(UnicodeScalar(UInt32(byte))!))
             } else {
