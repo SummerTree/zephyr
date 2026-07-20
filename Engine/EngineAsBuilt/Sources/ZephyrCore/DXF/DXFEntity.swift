@@ -995,11 +995,13 @@ public class DXFTableEntity: DXFEntity {
     public var blockName: String
     public var insertion: Vector3
     public var horizontal: Vector3
+    public var data: DataTableData
 
     public override init(eType: DXFEType = .tABLE) {
         self.blockName = ""
         self.insertion = .zero
         self.horizontal = Vector3(x: 1, y: 0, z: 0)
+        self.data = DataTableData()
         super.init(eType: eType)
     }
 }

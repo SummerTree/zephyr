@@ -455,7 +455,14 @@ public enum DataTableEditor {
             guard !data.columns.isEmpty else { return }
             let lower = max(0, min(range?.lowerBound ?? 0, data.columns.count - 1))
             let upper = max(lower, min(range?.upperBound ?? data.columns.count - 1, data.columns.count - 1))
+            let columnIDs = Set(data.columns[lower...upper].map(\.id))
             for column in lower...upper { data.columns[column].alignment = alignment }
+            for rowIndex in data.rows.indices {
+                for cellIndex in data.rows[rowIndex].cells.indices
+                where columnIDs.contains(data.rows[rowIndex].cells[cellIndex].columnID) {
+                    data.rows[rowIndex].cells[cellIndex].horizontalAlignment = alignment
+                }
+            }
             data.cellAlignment = alignment
         }
     }

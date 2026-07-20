@@ -11,6 +11,11 @@ public class DXFReader {
         case unsupportedFormat(String)
     }
 
+    private struct TableStyleInfo {
+        var horizontalMargin: Double
+        var verticalMargin: Double
+    }
+
     public var versionRaw: String = ""
 
     // MARK: - Output
@@ -33,6 +38,7 @@ public class DXFReader {
 
     private var pairs: [(code: Int, value: String)] = []
     private var pos: Int = 0
+    private var tableStylesByHandle: [UInt32: TableStyleInfo] = [:]
     public var textCodec = DXFTextCodec()
 
     public init() {}
@@ -61,6 +67,7 @@ public class DXFReader {
         pairs = try parsePairs(content)
         pos = 0
         try parseSections()
+        resolveTableStyles()
         resolveImageReferences()
         return self
     }
@@ -1235,46 +1242,277 @@ extension DXFReader {
         var blockName = ""
         var insertion = Vector3.zero
         var horizontal = Vector3(x: 1, y: 0, z: 0)
-        var inAcDbTable = false
-        var sawHorizontal = false
+        var tableStyleHandle: String?
+        var blockRecordHandle: String?
+        var tableGroups: [(Int, String)] = []
+        var subclass = ""
 
-        for (c, v) in pairs {
-            if c == 100 {
-                inAcDbTable = v.uppercased() == "ACDBTABLE"
+        for (code, value) in pairs {
+            if code == 100 {
+                subclass = value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
                 continue
             }
 
-            if !inAcDbTable {
-                switch c {
-                case 2: if blockName.isEmpty { blockName = v }
-                case 10: insertion.x = d(v)
-                case 20: insertion.y = d(v)
-                case 30: insertion.z = d(v)
+            switch subclass {
+            case "ACDBBLOCKREFERENCE":
+                switch code {
+                case 2:
+                    if blockName.isEmpty { blockName = decode(value) }
+                case 10: insertion.x = d(value)
+                case 20: insertion.y = d(value)
+                case 30: insertion.z = d(value)
                 default: break
                 }
-            } else {
-                switch c {
-                case 11: horizontal.x = d(v); sawHorizontal = true
-                case 21: horizontal.y = d(v)
-                case 31: horizontal.z = d(v)
+            case "ACDBTABLE":
+                tableGroups.append((code, value))
+                switch code {
+                case 11: horizontal.x = d(value)
+                case 21: horizontal.y = d(value)
+                case 31: horizontal.z = d(value)
+                case 342:
+                    if tableStyleHandle == nil {
+                        tableStyleHandle = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                case 343:
+                    if blockRecordHandle == nil {
+                        blockRecordHandle = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
                 default: break
                 }
+            default:
+                break
             }
         }
 
-        guard !blockName.isEmpty else { return table }
+        table.blockName = blockName
+        table.insertion = insertion
+        table.horizontal = horizontal
 
-        let insert = DXFInsertEntity()
-        applyCommon(pairs, to: insert)
-        insert.name = blockName
-        insert.basePoint = insertion
-        insert.xScale = 1.0
-        insert.yScale = 1.0
-        insert.zScale = 1.0
-        insert.colCount = 1
-        insert.rowCount = 1
-        insert.angle = sawHorizontal ? atan2(horizontal.y, horizontal.x) : 0.0
-        return insert
+        var rowCount = 0
+        var columnCount = 0
+        var rowHeights: [Double] = []
+        var columnWidths: [Double] = []
+        var readingHeader = true
+
+        var cellValues: [String] = []
+        var cellAlignments: [Int?] = []
+        var cellTextStyles: [String?] = []
+        var cellTextHeights: [Double?] = []
+        var pendingAlignment: Int?
+        var pendingTextStyle: String?
+        var pendingTextHeight: Double?
+        var readingValue = false
+        var rawValue: String?
+        var displayValue: String?
+
+        func finishCellValue() {
+            guard readingValue else { return }
+            let preferred = displayValue.flatMap { $0.isEmpty ? nil : $0 }
+                ?? rawValue
+                ?? ""
+            cellValues.append(preferred)
+            cellAlignments.append(pendingAlignment)
+            cellTextStyles.append(pendingTextStyle)
+            cellTextHeights.append(pendingTextHeight)
+            readingValue = false
+            rawValue = nil
+            displayValue = nil
+        }
+
+        for (code, value) in tableGroups {
+            if code == 171 {
+                readingHeader = false
+                pendingAlignment = nil
+                pendingTextStyle = nil
+                pendingTextHeight = nil
+            }
+
+            if code == 301,
+               value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "CELL_VALUE" {
+                finishCellValue()
+                readingHeader = false
+                readingValue = true
+                rawValue = nil
+                displayValue = nil
+                continue
+            }
+
+            if readingValue {
+                switch code {
+                case 1:
+                    rawValue = decode(value)
+                case 302:
+                    displayValue = decode(value)
+                case 304:
+                    if value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "ACVALUE_END" {
+                        finishCellValue()
+                    }
+                default:
+                    break
+                }
+                continue
+            }
+
+            if readingHeader {
+                switch code {
+                case 91:
+                    if rowCount == 0 { rowCount = i(value) }
+                case 92:
+                    if columnCount == 0 { columnCount = i(value) }
+                case 141:
+                    if rowCount == 0 || rowHeights.count < rowCount {
+                        rowHeights.append(d(value))
+                    }
+                case 142:
+                    if columnCount == 0 || columnWidths.count < columnCount {
+                        columnWidths.append(d(value))
+                    }
+                default:
+                    break
+                }
+            }
+
+            switch code {
+            case 170:
+                pendingAlignment = i(value)
+            case 7:
+                let decoded = decode(value)
+                pendingTextStyle = decoded.isEmpty ? nil : decoded
+            case 140:
+                let height = d(value)
+                pendingTextHeight = height > 0 ? height : nil
+            default:
+                break
+            }
+        }
+        finishCellValue()
+
+        let safeRowCount = max(0, min(rowCount, 100_000))
+        let safeColumnCount = max(0, min(columnCount, 256))
+
+        guard safeRowCount > 0, safeColumnCount > 0 else {
+            guard !blockName.isEmpty else { return table }
+            let insert = DXFInsertEntity()
+            applyCommon(pairs, to: insert)
+            insert.name = blockName
+            insert.basePoint = insertion
+            insert.xScale = 1.0
+            insert.yScale = 1.0
+            insert.zScale = 1.0
+            insert.colCount = 1
+            insert.rowCount = 1
+            insert.angle = atan2(horizontal.y, horizontal.x)
+            return insert
+        }
+
+        func columnName(_ index: Int) -> String {
+            var value = index + 1
+            var result = ""
+            while value > 0 {
+                value -= 1
+                result.insert(Character(UnicodeScalar(65 + value % 26)!), at: result.startIndex)
+                value /= 26
+            }
+            return result
+        }
+
+        func alignment(
+            from code: Int?
+        ) -> (horizontal: DataTableCellAlignment, vertical: DataTableCellVerticalAlignment) {
+            let normalized = code.flatMap { (1...9).contains($0) ? $0 : nil } ?? 4
+            let horizontal: DataTableCellAlignment
+            switch (normalized - 1) % 3 {
+            case 1: horizontal = .center
+            case 2: horizontal = .right
+            default: horizontal = .left
+            }
+
+            let vertical: DataTableCellVerticalAlignment
+            switch normalized {
+            case 1...3: vertical = .top
+            case 7...9: vertical = .bottom
+            default: vertical = .middle
+            }
+            return (horizontal, vertical)
+        }
+
+        let validHeights = rowHeights.prefix(safeRowCount).map { max(0.001, $0) }
+        let defaultRowHeight = validHeights.first
+            ?? cellTextHeights.compactMap { $0 }.first.map { max(0.001, $0 * 1.5) }
+            ?? 2.0
+        let normalizedHeights = Array(validHeights)
+            + Array(repeating: defaultRowHeight, count: max(0, safeRowCount - validHeights.count))
+
+        let validWidths = columnWidths.prefix(safeColumnCount).map { max(0.001, $0) }
+        let defaultColumnWidth = validWidths.first ?? 5.0
+        let normalizedWidths = Array(validWidths)
+            + Array(repeating: defaultColumnWidth, count: max(0, safeColumnCount - validWidths.count))
+
+        var columns: [DataTableColumn] = []
+        columns.reserveCapacity(safeColumnCount)
+        for column in 0..<safeColumnCount {
+            let alignmentCode = stride(
+                from: column,
+                to: min(cellAlignments.count, safeRowCount * safeColumnCount),
+                by: safeColumnCount
+            ).compactMap { cellAlignments[$0] }.first
+            columns.append(DataTableColumn(
+                name: columnName(column),
+                width: normalizedWidths[column],
+                alignment: alignment(from: alignmentCode).horizontal))
+        }
+
+        var rows: [DataTableRow] = []
+        rows.reserveCapacity(safeRowCount)
+        for row in 0..<safeRowCount {
+            var cells: [DataTableCell] = []
+            cells.reserveCapacity(safeColumnCount)
+            for column in 0..<safeColumnCount {
+                let index = row * safeColumnCount + column
+                let value = index < cellValues.count ? cellValues[index] : ""
+                let alignmentCode = index < cellAlignments.count ? cellAlignments[index] : nil
+                let cellAlignment = alignmentCode.map { alignment(from: $0) }
+                cells.append(DataTableCell(
+                    columnID: columns[column].id,
+                    value: value.isEmpty ? .empty : .string(value),
+                    cachedDisplayText: value.isEmpty ? nil : value,
+                    horizontalAlignment: cellAlignment?.horizontal,
+                    verticalAlignment: cellAlignment?.vertical ?? .middle))
+            }
+            rows.append(DataTableRow(cells: cells))
+        }
+
+        let textHeight = cellTextHeights.compactMap { $0 }.first
+            ?? max(0.1, defaultRowHeight * 0.6)
+        let textStyle = cellTextStyles.compactMap { $0 }.first
+        let rawGroups = pairs.dropFirst().map {
+            DataTableRawDXFGroup(code: $0.0, value: $0.1)
+        }
+
+        table.data = DataTableData(
+            columns: columns,
+            rows: rows,
+            title: nil,
+            rowHeights: normalizedHeights,
+            defaultRowHeight: defaultRowHeight,
+            defaultColumnWidth: defaultColumnWidth,
+            headerRowCount: 0,
+            cellMargin: 0,
+            textHeight: textHeight,
+            textStyleName: textStyle,
+            textColor: nil,
+            gridColor: nil,
+            gridLineWeight: nil,
+            headerFillColor: nil,
+            backgroundFillColor: nil,
+            cellAlignment: columns.first?.alignment ?? .left,
+            nativeDXFPayload: DataTableNativeDXFPayload(
+                rawGroups: rawGroups,
+                blockName: blockName.isEmpty ? nil : blockName,
+                tableStyleHandle: tableStyleHandle,
+                blockRecordHandle: blockRecordHandle,
+                isModified: false))
+        return table
     }
 
     // MARK: - Table entry parsers
@@ -1557,9 +1795,74 @@ extension DXFReader {
                 tryParse { try parseImageDef(at: pos) }
             } else if c == 0 && v == "LAYOUT" {
                 tryParse { try parseLayout(at: pos) }
+            } else if c == 0 && v == "TABLESTYLE" {
+                tryParse { try parseTableStyle(at: pos) }
             } else {
                 pos += 1
             }
+        }
+    }
+
+
+    private func parseTableStyle(at startIdx: Int) throws {
+        var idx = startIdx + 1
+        var handle: UInt32 = 0
+        var horizontalMargin: Double?
+        var verticalMargin: Double?
+        var inTableStyle = false
+
+        while idx < pairs.count {
+            let (code, value) = pairs[idx]
+            if code == 0 { break }
+            idx += 1
+
+            if code == 5 {
+                handle = parseHandle(value)
+                continue
+            }
+            if code == 100 {
+                inTableStyle = value.caseInsensitiveCompare("AcDbTableStyle") == .orderedSame
+                continue
+            }
+            guard inTableStyle else { continue }
+
+            switch code {
+            case 40:
+                if horizontalMargin == nil { horizontalMargin = max(0, d(value)) }
+            case 41:
+                if verticalMargin == nil { verticalMargin = max(0, d(value)) }
+            default:
+                break
+            }
+        }
+        pos = idx
+
+        guard handle != 0 else { return }
+        tableStylesByHandle[handle] = TableStyleInfo(
+            horizontalMargin: horizontalMargin ?? 0,
+            verticalMargin: verticalMargin ?? horizontalMargin ?? 0)
+    }
+
+    private func resolveTableStyles() {
+        guard !tableStylesByHandle.isEmpty else { return }
+
+        func resolve(_ list: [DXFEntity]) {
+            for entity in list {
+                if let table = entity as? DXFTableEntity,
+                   let handleValue = table.data.nativeDXFPayload?.tableStyleHandle,
+                   let style = tableStylesByHandle[parseHandle(handleValue)] {
+                    table.data.horizontalTextMargin = style.horizontalMargin
+                    table.data.verticalTextMargin = style.verticalMargin
+                }
+                if let block = entity as? DXFBlockEntity {
+                    resolve(block.entities)
+                }
+            }
+        }
+
+        resolve(entities)
+        for block in blocks {
+            resolve(block.entities)
         }
     }
 

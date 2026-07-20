@@ -74,7 +74,15 @@ public enum DXFEntityConverter {
         case .tRACE:
             guard let t = e as? DXFTraceEntity else { return [] }
             return [.line(start: yflip(t.basePoint), end: yflip(t.secPoint), color: primColor)]
-        case .vIEWPORT, .tABLE, .bLOCK, .uNKNOWN:
+        case .tABLE:
+            guard let table = e as? DXFTableEntity,
+                  !table.data.columns.isEmpty,
+                  !table.data.rows.isEmpty else { return [] }
+            return [.table(
+                data: table.data,
+                origin: yflip(table.insertion),
+                color: primColor)]
+        case .vIEWPORT, .bLOCK, .uNKNOWN:
             return []
         default:
             return []

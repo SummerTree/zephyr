@@ -22,6 +22,12 @@ public enum DataTableCellAlignment: String, Hashable, Sendable, Codable, CaseIte
     case right
 }
 
+public enum DataTableCellVerticalAlignment: String, Hashable, Sendable, Codable, CaseIterable {
+    case top
+    case middle
+    case bottom
+}
+
 // =========================================================================
 // MARK: - DataTableColumn
 // =========================================================================
@@ -55,6 +61,8 @@ public struct DataTableCell: Hashable, Sendable, Codable {
     public var rowSpan: Int
     public var colSpan: Int
     public var coveredByMerge: Bool
+    public var horizontalAlignment: DataTableCellAlignment?
+    public var verticalAlignment: DataTableCellVerticalAlignment?
 
     public init(columnID: UUID,
                 value: DataTableCellValue = .empty,
@@ -62,7 +70,9 @@ public struct DataTableCell: Hashable, Sendable, Codable {
                 cachedDisplayText: String? = nil,
                 rowSpan: Int = 1,
                 colSpan: Int = 1,
-                coveredByMerge: Bool = false) {
+                coveredByMerge: Bool = false,
+                horizontalAlignment: DataTableCellAlignment? = nil,
+                verticalAlignment: DataTableCellVerticalAlignment? = nil) {
         self.columnID = columnID
         self.value = value
         self.formulaExpression = formulaExpression
@@ -70,6 +80,8 @@ public struct DataTableCell: Hashable, Sendable, Codable {
         self.rowSpan = rowSpan
         self.colSpan = colSpan
         self.coveredByMerge = coveredByMerge
+        self.horizontalAlignment = horizontalAlignment
+        self.verticalAlignment = verticalAlignment
     }
 }
 
@@ -137,6 +149,8 @@ public struct DataTableData: Hashable, Sendable, Codable {
     public var defaultColumnWidth: Double
     public var headerRowCount: Int
     public var cellMargin: Double
+    public var horizontalTextMargin: Double?
+    public var verticalTextMargin: Double?
 
     // Text styling
     public var textHeight: Double
@@ -165,6 +179,8 @@ public struct DataTableData: Hashable, Sendable, Codable {
         defaultColumnWidth: Double = 5.0,
         headerRowCount: Int = 1,
         cellMargin: Double = 0.25,
+        horizontalTextMargin: Double? = nil,
+        verticalTextMargin: Double? = nil,
         textHeight: Double = 1.5,
         textStyleName: String? = nil,
         textColor: ColorRGBA? = nil,
@@ -184,6 +200,8 @@ public struct DataTableData: Hashable, Sendable, Codable {
         self.defaultColumnWidth = defaultColumnWidth
         self.headerRowCount = headerRowCount
         self.cellMargin = cellMargin
+        self.horizontalTextMargin = horizontalTextMargin
+        self.verticalTextMargin = verticalTextMargin
         self.textHeight = textHeight
         self.textStyleName = textStyleName
         self.textColor = textColor
@@ -208,6 +226,8 @@ public struct DataTableData: Hashable, Sendable, Codable {
         self.defaultColumnWidth = try container.decodeIfPresent(Double.self, forKey: .defaultColumnWidth) ?? 5.0
         self.headerRowCount = try container.decodeIfPresent(Int.self, forKey: .headerRowCount) ?? 1
         self.cellMargin = try container.decodeIfPresent(Double.self, forKey: .cellMargin) ?? 0.25
+        self.horizontalTextMargin = try container.decodeIfPresent(Double.self, forKey: .horizontalTextMargin)
+        self.verticalTextMargin = try container.decodeIfPresent(Double.self, forKey: .verticalTextMargin)
         self.textHeight = try container.decodeIfPresent(Double.self, forKey: .textHeight) ?? 1.5
         self.textStyleName = try container.decodeIfPresent(String.self, forKey: .textStyleName)
         self.textColor = try container.decodeIfPresent(ColorRGBA.self, forKey: .textColor)

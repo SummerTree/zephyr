@@ -383,21 +383,25 @@ public enum DataTableTessellator {
         var primitives: [CADPrimitive] = []
         var gridLines: Set<DataTableGridLineKey> = []
         let layout = layout(data: data, origin: origin)
-        let gridColor = data.gridColor ?? ColorRGBA(r: 128, g: 128, b: 128, a: 255)
-        let textColor = data.textColor ?? ColorRGBA(r: 255, g: 255, b: 255, a: 255)
-        let headerFill = data.headerFillColor ?? ColorRGBA(r: 40, g: 40, b: 60, a: 255)
-        let alternateFill = data.backgroundFillColor ?? ColorRGBA(r: 30, g: 30, b: 40, a: 255)
+        let gridColor = data.gridColor
+        let textColor = data.textColor
+        let headerFill = data.headerFillColor
+        let alternateFill = data.backgroundFillColor
         let margin = max(0, data.cellMargin)
+        let horizontalTextMargin = max(0, data.horizontalTextMargin ?? margin)
+        let verticalTextMargin = max(0, data.verticalTextMargin ?? margin)
 
         if let title = data.title, let titleRect = layout.titleRect {
-            primitives.append(.fillRect(
-                origin: Vector3(x: titleRect.minX, y: titleRect.minY, z: origin.z),
-                size: Vector3(x: titleRect.width, y: titleRect.height, z: 0),
-                color: headerFill))
+            if let headerFill, headerFill.a > 0 {
+                primitives.append(.fillRect(
+                    origin: Vector3(x: titleRect.minX, y: titleRect.minY, z: origin.z),
+                    size: Vector3(x: titleRect.width, y: titleRect.height, z: 0),
+                    color: headerFill))
+            }
             primitives.append(.text(
                 position: Vector3(
-                    x: titleRect.minX + margin,
-                    y: titleRect.minY + margin,
+                    x: titleRect.minX + horizontalTextMargin,
+                    y: titleRect.minY + verticalTextMargin,
                     z: origin.z),
                 text: title,
                 height: data.textHeight,
@@ -405,7 +409,7 @@ public enum DataTableTessellator {
                 style: data.textStyleName,
                 alignH: 0,
                 alignV: 0,
-                mtextWidth: max(0, titleRect.width - margin * 2),
+                mtextWidth: max(0, titleRect.width - horizontalTextMargin * 2),
                 color: textColor))
             appendRectLines(
                 titleRect,
@@ -433,11 +437,13 @@ public enum DataTableTessellator {
                     expandMerged: true) else { continue }
 
                 if row < data.headerRowCount {
-                    primitives.append(.fillRect(
-                        origin: Vector3(x: rect.minX, y: rect.minY, z: origin.z),
-                        size: Vector3(x: rect.width, y: rect.height, z: 0),
-                        color: headerFill))
-                } else if row % 2 == 0 {
+                    if let headerFill, headerFill.a > 0 {
+                        primitives.append(.fillRect(
+                            origin: Vector3(x: rect.minX, y: rect.minY, z: origin.z),
+                            size: Vector3(x: rect.width, y: rect.height, z: 0),
+                            color: headerFill))
+                    }
+                } else if row % 2 == 0, let alternateFill, alternateFill.a > 0 {
                     primitives.append(.fillRect(
                         origin: Vector3(x: rect.minX, y: rect.minY, z: origin.z),
                         size: Vector3(x: rect.width, y: rect.height, z: 0),
@@ -451,34 +457,52 @@ public enum DataTableTessellator {
                     seen: &gridLines,
                     into: &primitives)
 
-                guard row < data.rows.count else { continue }
+                guard row < data.rows.count,
+                      let tableCell = cell(data: data, row: row, column: column) else { continue }
                 let value = displayText(data: data, row: row, column: column)
                 guard !value.isEmpty else { continue }
 
-                let alignment = data.columns[column].alignment
+                let alignment = tableCell.horizontalAlignment ?? data.columns[column].alignment
                 let x: Double
                 let alignH: Int
                 switch alignment {
                 case .left:
-                    x = rect.minX + margin
+                    x = rect.minX + horizontalTextMargin
                     alignH = 0
                 case .center:
                     x = (rect.minX + rect.maxX) * 0.5
                     alignH = 1
                 case .right:
-                    x = rect.maxX - margin
+                    x = rect.maxX - horizontalTextMargin
                     alignH = 2
                 }
 
+                let y: Double
+                let alignV: Int
+                switch tableCell.verticalAlignment {
+                case .top:
+                    y = rect.minY + verticalTextMargin
+                    alignV = 3
+                case .middle:
+                    y = (rect.minY + rect.maxY) * 0.5
+                    alignV = 2
+                case .bottom:
+                    y = rect.maxY - verticalTextMargin
+                    alignV = 1
+                case nil:
+                    y = rect.minY + margin
+                    alignV = 0
+                }
+
                 primitives.append(.text(
-                    position: Vector3(x: x, y: rect.minY + margin, z: origin.z),
+                    position: Vector3(x: x, y: y, z: origin.z),
                     text: value,
                     height: data.textHeight,
                     rotation: 0,
                     style: data.textStyleName,
                     alignH: alignH,
-                    alignV: 0,
-                    mtextWidth: max(0, rect.width - margin * 2),
+                    alignV: alignV,
+                    mtextWidth: max(0, rect.width - horizontalTextMargin * 2),
                     color: textColor))
             }
         }
@@ -489,7 +513,7 @@ public enum DataTableTessellator {
     private static func appendRectLines(
         _ rect: DataTableCellRect,
         z: Double,
-        color: ColorRGBA,
+        color: ColorRGBA?,
         seen: inout Set<DataTableGridLineKey>,
         into primitives: inout [CADPrimitive]
     ) {
@@ -506,7 +530,7 @@ public enum DataTableTessellator {
     private static func appendLine(
         start: Vector3,
         end: Vector3,
-        color: ColorRGBA,
+        color: ColorRGBA?,
         seen: inout Set<DataTableGridLineKey>,
         into primitives: inout [CADPrimitive]
     ) {

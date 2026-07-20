@@ -152,6 +152,38 @@ public final class CADRendererBridge {
         }
     }
 
+    private nonisolated static func inheritingColor(
+        _ inheritedColor: ColorRGBA?,
+        into primitive: CADPrimitive
+    ) -> CADPrimitive {
+        guard let inheritedColor, explicitColor(of: primitive) == nil else {
+            return primitive
+        }
+
+        switch primitive {
+        case .line(let start, let end, _):
+            return .line(start: start, end: end, color: inheritedColor)
+        case .fillRect(let origin, let size, _):
+            return .fillRect(origin: origin, size: size, color: inheritedColor)
+        case .text(
+            let position, let text, let height, let rotation, let style,
+            let alignH, let alignV, let mtextWidth, _
+        ):
+            return .text(
+                position: position,
+                text: text,
+                height: height,
+                rotation: rotation,
+                style: style,
+                alignH: alignH,
+                alignV: alignV,
+                mtextWidth: mtextWidth,
+                color: inheritedColor)
+        default:
+            return primitive
+        }
+    }
+
     private nonisolated static func isFillPrimitive(_ primitive: CADPrimitive) -> Bool {
         switch primitive {
         case .fillRect, .fillPolygon, .fillComplexPolygon, .gradient, .hatch,
@@ -545,10 +577,28 @@ public final class CADRendererBridge {
                             var specs: [PrimitiveSpec] = []
                             var currentZ = baseZ
                             
-                            // Separate fills from non-fills while retaining original indices.
-                            let indexedGeometry = v.geometry.enumerated().map {
-                                (index: $0.offset, primitive: $0.element)
-                            }
+                            // Expand tables before ordering so their generated text passes through
+                            // the same SHX/TTF rendering path as ordinary text primitives.
+                            // CADPrimitiveGenerator can only emit geometry specs, so leaving a table
+                            // nested there drops TTF-backed cell text.
+                            let indexedGeometry: [(index: Int, primitive: CADPrimitive)] =
+                                v.geometry.enumerated().flatMap { item in
+                                    if case .table(let data, let origin, let tableColor) = item.element {
+                                        return DataTableTessellator.generateVisualPrimitives(
+                                            data: data,
+                                            origin: origin
+                                        ).map { visual in
+                                            (
+                                                index: item.offset,
+                                                primitive: Self.inheritingColor(
+                                                    tableColor,
+                                                    into: visual)
+                                            )
+                                        }
+                                    }
+                                    return [(index: item.offset, primitive: item.element)]
+                                }
+
                             let orderedGeometry: [(index: Int, primitive: CADPrimitive)]
                             if indexedGeometry.count <= 1 {
                                 orderedGeometry = indexedGeometry
