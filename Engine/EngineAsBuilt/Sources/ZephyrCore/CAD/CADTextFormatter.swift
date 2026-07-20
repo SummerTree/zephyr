@@ -87,38 +87,41 @@ public enum CADTextFormatter {
         var lines: [Line] = []
 
         for paragraph in paragraphs {
-            let words = splitWords(paragraph)
+            let runs = splitRuns(paragraph)
 
-            if words.isEmpty {
+            if runs.isEmpty {
                 lines.append(Line(glyphs: []))
                 continue
             }
 
             var current: [Glyph] = []
+            var pendingWhitespace: [Glyph] = []
 
-            for word in words {
-                let candidate: [Glyph]
-                if current.isEmpty {
-                    candidate = word
-                } else {
-                    let left = current.last
-                    let right = word.first
-                    let separator = Glyph(
-                        " ",
-                        underline: left?.underline == true && right?.underline == true,
-                        bold: left?.bold == true && right?.bold == true,
-                        italic: left?.italic == true && right?.italic == true)
-                    candidate = current + [separator] + word
+            for run in runs {
+                if run.isWhitespace {
+                    if current.isEmpty {
+                        current.append(contentsOf: run.glyphs)
+                    } else {
+                        pendingWhitespace.append(contentsOf: run.glyphs)
+                    }
+                    continue
                 }
 
-                if !current.isEmpty && measure(string(from: candidate)) > maxWidth {
+                let candidate = current + pendingWhitespace + run.glyphs
+                let currentHasText = current.contains { !isWhitespace($0) }
+
+                if currentHasText && measure(string(from: candidate)) > maxWidth {
                     lines.append(Line(glyphs: current))
-                    current = word
+                    current = run.glyphs
                 } else {
                     current = candidate
                 }
+                pendingWhitespace.removeAll(keepingCapacity: true)
             }
 
+            if !pendingWhitespace.isEmpty {
+                current.append(contentsOf: pendingWhitespace)
+            }
             if !current.isEmpty {
                 lines.append(Line(glyphs: current))
             }
@@ -300,26 +303,48 @@ public enum CADTextFormatter {
         return paragraphs
     }
 
-    private static func splitWords(_ glyphs: [Glyph]) -> [[Glyph]] {
-        var words: [[Glyph]] = []
+    private struct GlyphRun {
+        var glyphs: [Glyph]
+        var isWhitespace: Bool
+    }
+
+    private static func splitRuns(_ glyphs: [Glyph]) -> [GlyphRun] {
+        var runs: [GlyphRun] = []
         var current: [Glyph] = []
+        var currentIsWhitespace: Bool?
+
+        func flush() {
+            guard let isWhitespace = currentIsWhitespace, !current.isEmpty else { return }
+            runs.append(GlyphRun(glyphs: current, isWhitespace: isWhitespace))
+            current.removeAll(keepingCapacity: true)
+        }
 
         for glyph in glyphs {
-            if glyph.text == " " || glyph.text == "\t" {
-                if !current.isEmpty {
-                    words.append(current)
-                    current.removeAll()
+            let whitespace = isWhitespace(glyph)
+            if currentIsWhitespace != nil && currentIsWhitespace != whitespace {
+                flush()
+            }
+            currentIsWhitespace = whitespace
+
+            if glyph.text == "\t" {
+                for _ in 0..<4 {
+                    current.append(Glyph(
+                        " ",
+                        underline: glyph.underline,
+                        bold: glyph.bold,
+                        italic: glyph.italic))
                 }
             } else {
                 current.append(glyph)
             }
         }
 
-        if !current.isEmpty {
-            words.append(current)
-        }
+        flush()
+        return runs
+    }
 
-        return words
+    private static func isWhitespace(_ glyph: Glyph) -> Bool {
+        glyph.text == " " || glyph.text == "\t"
     }
 
     private static func string(from glyphs: [Glyph]) -> String {
