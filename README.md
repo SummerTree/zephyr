@@ -76,6 +76,19 @@ Zephyr's DXF pipeline runs entirely in Swift — a native port of [libdxfrw](htt
 | TEXT | `T` | Multi-line text with font selection, height, rotation, alignment, column width |
 | IMAGE | `IMG` | Raster image placement (PNG, JPG, etc.) |
 | PDFIMPORT | `PDFI` | PDF page underlay import with page selector |
+| TABLE | `DT` | Insert a configurable data table with rows and columns |
+
+### File Commands
+| Command | Alias | Description |
+|---|---|---|
+| NEW | `N` | Create a new blank drawing in a new tab |
+| OPEN | | Open a DXF, DWG, or EAB file in a new tab |
+| CLOSE | | Close the active drawing tab |
+| CLOSEALL | | Close all open drawing tabs |
+| CLOSEALLOTHERS | | Close all tabs except the active one |
+| SAVE | `QSAVE` | Save the current drawing to its file |
+| SAVEAS | | Save the current drawing as a new file |
+| PDFEXPORT | `EXPORTPDF` | Export the current drawing to a PDF file |
 
 ### Dimension Commands
 | Command | Alias | Description |
@@ -107,6 +120,10 @@ Zephyr's DXF pipeline runs entirely in Swift — a native port of [libdxfrw](htt
 | SENDUNDEROBJECTS | `SUO` | Place selection under a picked reference entity |
 | TEXTTOFRONT | `TTF` | Bring all text, dimensions, and leaders to front |
 | HATCHTOBACK | `HTB` | Send all hatches and solid fills to back |
+| FILLET | `F` | Round corners between objects using an exact tangent arc |
+| CHAMFER | `CHA` | Bevel corners between two objects |
+| ALIGN | `AL` | Align objects by matching two pairs of source/destination points (move, rotate, optionally scale) |
+| TORIENT | `TO` | Rotate text individually to an absolute or most-readable angle |
 
 ### Clipboard (Copy/Paste)
 | Command | Description |
@@ -134,6 +151,7 @@ SELECT, MOVE, ROTATE, SCALE, PAN, ZOOM
 | MODEL | `2DVIEW` | Switch to the DXF 2D model-space view |
 | NEXTVIEW | | Switch to next model or sheet view |
 | PREVIOUSVIEW | | Switch to previous model or sheet view |
+| SELECTALL | `SELALL` | Select all entities in the active layer |
 
 ### Snap Engine
 9 anchor types with two-tier filtering (AABB proximity → exact distance):
@@ -211,6 +229,8 @@ Adaptive subdivision keyed to screen pixels. Curves stay smooth at any zoom, bou
 |---|---|---|
 | UNITS | `UNIT`, `DDUNITS` | Set or display the drawing base unit (mm, cm, m, in, ft, yd). Flows through to PDF `/Measure` dictionary for Bluebeam Revu, DXF `$INSUNITS`, and EAB file header. |
 | SETUISCALE | `ZOOMUI`, `UISCALE` | Override UI zoom scale (e.g. `SETUISCALE 1.5` for 150%). `SETUISCALE AUTO` reverts to system DPI. Scales all UI elements including fonts. |
+| STYLE | `ST` | Create, edit, and manage text styles (font file, height, width, oblique) |
+| LANGUAGE | `LANG` | Set the UI font glyph profile without translating UI text (e.g. `LANGUAGE cjk` for Chinese/Japanese/Korean glyphs) |
 
 ## Nightly Builds
 
