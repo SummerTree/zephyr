@@ -158,21 +158,31 @@ public final class CADVertexBufferBuilder {
         let safePixelScale = max(pixelScale, 0.000001)
         let safePixelZoom = max(safeZoom * safePixelScale, 0.000001)
 
-        func lineWorldWidth(for input: TessInput) -> Float {
-            if input.geomWidth > 0.0 {
-                let coreWidth = Float(input.geomWidth)
-                return antiAliasLines ? coreWidth + (2.0 / safePixelZoom) : coreWidth
-            }
+        struct LineRasterMetrics {
+            let worldWidth: Float
+            let coreHalfPixels: Float
+            let outerHalfPixels: Float
+        }
 
+        func lineRasterMetrics(for input: TessInput) -> LineRasterMetrics {
             let corePixels: Float
-            if input.lineWeight > 0.25 {
+            if input.geomWidth > 0.0 {
+                corePixels = max(Float(input.geomWidth) * safePixelZoom, 0.000001)
+            } else if input.lineWeight > 0.25 {
                 corePixels = max(1.0, Float(input.lineWeight) * (96.0 / 25.4))
             } else {
                 corePixels = 1.0
             }
 
-            let totalPixels = antiAliasLines ? corePixels + 2.0 : corePixels
-            return totalPixels / safePixelZoom
+            let coreHalfPixels = corePixels * 0.5
+            let outerHalfPixels = antiAliasLines
+                ? coreHalfPixels + 0.5
+                : coreHalfPixels
+
+            return LineRasterMetrics(
+                worldWidth: (outerHalfPixels * 2.0) / safePixelZoom,
+                coreHalfPixels: coreHalfPixels,
+                outerHalfPixels: outerHalfPixels)
         }
 
         func appendLineVertex(_ p: SDL_FPoint, _ r: Float, _ g: Float, _ b: Float, _ a: Float) {
@@ -184,13 +194,21 @@ public final class CADVertexBufferBuilder {
             appendLineVertex(p2, r, g, b, a)
         }
 
-        func appendQuadSegment(_ p1: SDL_FPoint, _ p2: SDL_FPoint, _ width: Float, _ r: Float, _ g: Float, _ b: Float, _ a: Float) {
+        func appendQuadSegment(
+            _ p1: SDL_FPoint,
+            _ p2: SDL_FPoint,
+            _ metrics: LineRasterMetrics,
+            _ r: Float,
+            _ g: Float,
+            _ b: Float,
+            _ a: Float
+        ) {
             let dx = p2.x - p1.x
             let dy = p2.y - p1.y
             let len = sqrt(dx * dx + dy * dy)
             guard len > 1e-5 else { return }
 
-            let halfW = width * 0.5
+            let halfW = metrics.worldWidth * 0.5
             let nx = -dy / len * halfW
             let ny = dx / len * halfW
             let c1 = SDL_FPoint(x: p1.x + nx, y: p1.y + ny)
@@ -198,24 +216,34 @@ public final class CADVertexBufferBuilder {
             let c3 = SDL_FPoint(x: p2.x - nx, y: p2.y - ny)
             let c4 = SDL_FPoint(x: p2.x + nx, y: p2.y + ny)
 
-            vertices.append(CADVertex(x: c1.x, y: c1.y, r: r, g: g, b: b, a: a, u: 0.0, v: 1.0))
-            vertices.append(CADVertex(x: c2.x, y: c2.y, r: r, g: g, b: b, a: a, u: 0.0, v: -1.0))
-            vertices.append(CADVertex(x: c3.x, y: c3.y, r: r, g: g, b: b, a: a, u: 1.0, v: -1.0))
+            let coreHalf = metrics.coreHalfPixels
+            let outerHalf = metrics.outerHalfPixels
 
-            vertices.append(CADVertex(x: c1.x, y: c1.y, r: r, g: g, b: b, a: a, u: 0.0, v: 1.0))
-            vertices.append(CADVertex(x: c3.x, y: c3.y, r: r, g: g, b: b, a: a, u: 1.0, v: -1.0))
-            vertices.append(CADVertex(x: c4.x, y: c4.y, r: r, g: g, b: b, a: a, u: 1.0, v: 1.0))
+            vertices.append(CADVertex(x: c1.x, y: c1.y, r: r, g: g, b: b, a: a, u: coreHalf, v: outerHalf))
+            vertices.append(CADVertex(x: c2.x, y: c2.y, r: r, g: g, b: b, a: a, u: coreHalf, v: -outerHalf))
+            vertices.append(CADVertex(x: c3.x, y: c3.y, r: r, g: g, b: b, a: a, u: coreHalf, v: -outerHalf))
+
+            vertices.append(CADVertex(x: c1.x, y: c1.y, r: r, g: g, b: b, a: a, u: coreHalf, v: outerHalf))
+            vertices.append(CADVertex(x: c3.x, y: c3.y, r: r, g: g, b: b, a: a, u: coreHalf, v: -outerHalf))
+            vertices.append(CADVertex(x: c4.x, y: c4.y, r: r, g: g, b: b, a: a, u: coreHalf, v: outerHalf))
         }
 
         func appendRenderableSegment(_ p1: SDL_FPoint, _ p2: SDL_FPoint, _ input: TessInput, _ r: Float, _ g: Float, _ b: Float, _ a: Float) {
             if input.lineWeight > 0.25 || input.geomWidth > 0.0 || antiAliasLines || hairlineQuads {
-                appendQuadSegment(p1, p2, lineWorldWidth(for: input), r, g, b, a)
+                appendQuadSegment(p1, p2, lineRasterMetrics(for: input), r, g, b, a)
             } else {
                 appendLineSegment(p1, p2, r, g, b, a)
             }
         }
 
-        func appendJoinedQuadPath(_ sourcePoints: [SDL_FPoint], _ width: Float, _ r: Float, _ g: Float, _ b: Float, _ a: Float) {
+        func appendJoinedQuadPath(
+            _ sourcePoints: [SDL_FPoint],
+            _ metrics: LineRasterMetrics,
+            _ r: Float,
+            _ g: Float,
+            _ b: Float,
+            _ a: Float
+        ) {
             guard sourcePoints.count >= 2 else { return }
 
             var points: [SDL_FPoint] = []
@@ -230,7 +258,7 @@ public final class CADVertexBufferBuilder {
             }
             guard points.count >= 2 else { return }
             if points.count == 2 {
-                appendQuadSegment(points[0], points[1], width, r, g, b, a)
+                appendQuadSegment(points[0], points[1], metrics, r, g, b, a)
                 return
             }
 
@@ -242,7 +270,7 @@ public final class CADVertexBufferBuilder {
             }
             guard points.count >= 2 else { return }
 
-            let halfW = width * 0.5
+            let halfW = metrics.worldWidth * 0.5
             let count = points.count
             let segmentCount = isClosed ? count : count - 1
             var normals = [SDL_FPoint](repeating: SDL_FPoint(x: 0, y: 0), count: segmentCount)
@@ -311,19 +339,22 @@ public final class CADVertexBufferBuilder {
                 let l2 = left[next]
                 let r2 = right[next]
 
-                vertices.append(CADVertex(x: l1.x, y: l1.y, r: r, g: g, b: b, a: a, u: 0.0, v: 1.0))
-                vertices.append(CADVertex(x: r1.x, y: r1.y, r: r, g: g, b: b, a: a, u: 0.0, v: -1.0))
-                vertices.append(CADVertex(x: r2.x, y: r2.y, r: r, g: g, b: b, a: a, u: 1.0, v: -1.0))
+                let coreHalf = metrics.coreHalfPixels
+                let outerHalf = metrics.outerHalfPixels
 
-                vertices.append(CADVertex(x: l1.x, y: l1.y, r: r, g: g, b: b, a: a, u: 0.0, v: 1.0))
-                vertices.append(CADVertex(x: r2.x, y: r2.y, r: r, g: g, b: b, a: a, u: 1.0, v: -1.0))
-                vertices.append(CADVertex(x: l2.x, y: l2.y, r: r, g: g, b: b, a: a, u: 1.0, v: 1.0))
+                vertices.append(CADVertex(x: l1.x, y: l1.y, r: r, g: g, b: b, a: a, u: coreHalf, v: outerHalf))
+                vertices.append(CADVertex(x: r1.x, y: r1.y, r: r, g: g, b: b, a: a, u: coreHalf, v: -outerHalf))
+                vertices.append(CADVertex(x: r2.x, y: r2.y, r: r, g: g, b: b, a: a, u: coreHalf, v: -outerHalf))
+
+                vertices.append(CADVertex(x: l1.x, y: l1.y, r: r, g: g, b: b, a: a, u: coreHalf, v: outerHalf))
+                vertices.append(CADVertex(x: r2.x, y: r2.y, r: r, g: g, b: b, a: a, u: coreHalf, v: -outerHalf))
+                vertices.append(CADVertex(x: l2.x, y: l2.y, r: r, g: g, b: b, a: a, u: coreHalf, v: outerHalf))
             }
         }
 
         func appendRenderablePath(_ points: [SDL_FPoint], _ input: TessInput, _ r: Float, _ g: Float, _ b: Float, _ a: Float) {
             if input.lineWeight > 0.25 || input.geomWidth > 0.0 || antiAliasLines || hairlineQuads {
-                appendJoinedQuadPath(points, lineWorldWidth(for: input), r, g, b, a)
+                appendJoinedQuadPath(points, lineRasterMetrics(for: input), r, g, b, a)
             } else {
                 for i in 0..<(points.count - 1) {
                     appendLineSegment(points[i], points[i + 1], r, g, b, a)

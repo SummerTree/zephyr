@@ -76,7 +76,7 @@ public final class EngineRenderer {
     internal var imguiIndexCapacity: Int = 0
 
 
-    internal var usesTriangleHairlines: Bool { true }
+    internal var usesTriangleHairlines: Bool { false }
 
     internal var lineWidthPixelScale: Float {
         max(1.0, max(engine.scaleX, engine.scaleY))
