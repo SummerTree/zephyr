@@ -1162,9 +1162,11 @@ public class DXFWriter {
         case .aRC:
             guard let arc = e as? DXFArcEntity else { return }
             writeEntityHeader("ARC", entity: arc, handle: h, ownerHandle: ownerHandle, &out)
-            out += "100\r\nAcDbArc\r\n"
+            if hasSubclassMarkers { out += "100\r\nAcDbCircle\r\n" }
             writePoint3(10, arc.basePoint, &out)
             writeDbl(40, arc.radius, &out)
+            writeDbl(39, arc.thickness_p, &out)
+            if hasSubclassMarkers { out += "100\r\nAcDbArc\r\n" }
             writeDbl(50, arc.startAngle * 180.0 / .pi, &out)  // radians → degrees
             writeDbl(51, arc.endAngle * 180.0 / .pi, &out)
 
@@ -1379,10 +1381,10 @@ public class DXFWriter {
             writeInt(91, ht.loops.count, &out)
 
             for loop in ht.loops {
-                writeInt(92, loop.type, &out)
+                let polyline = loop.entities.compactMap { $0 as? DXFLWPolylineEntity }.first
+                writeInt(92, polyline == nil ? (loop.type & ~2) : (loop.type | 2), &out)
 
-                if (loop.type & 2) != 0,
-                   let polyline = loop.entities.compactMap({ $0 as? DXFLWPolylineEntity }).first {
+                if let polyline {
                     let hasBulge = polyline.vertices.contains { abs($0.bulge) > 1e-12 }
                     writeInt(72, hasBulge ? 1 : 0, &out)
                     writeInt(73, (polyline.flags & 1) != 0 ? 1 : 0, &out)

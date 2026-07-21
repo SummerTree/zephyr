@@ -306,7 +306,97 @@ public enum DXFWriterBridge {
             }
         }
 
-        try writer.write(to: filePath)
+        let content = normalizeLinetypeRecords(
+            writer.writeToString(),
+            includeElementType: dxfVersion != .r10 && dxfVersion != .r12
+        )
+        let encoding: String.Encoding = writer.codePage == "UTF-8" ? .utf8 : .isoLatin1
+        guard let data = content.data(using: encoding, allowLossyConversion: false) else {
+            throw DXFWriter.WriterError.writeError(
+                "Cannot encode DXF using \(writer.codePage)"
+            )
+        }
+        try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
+    }
+
+    private static func normalizeLinetypeRecords(
+        _ content: String,
+        includeElementType: Bool
+    ) -> String {
+        var lines = content.components(separatedBy: "\r\n")
+        guard lines.count > 2 else { return content }
+
+        let hasTrailingLineBreak = lines.last?.isEmpty == true
+        if hasTrailingLineBreak {
+            lines.removeLast()
+        }
+
+        var output: [String] = []
+        output.reserveCapacity(lines.count + 64)
+
+        var index = 0
+        while index + 1 < lines.count {
+            let codeLine = lines[index]
+            let valueLine = lines[index + 1]
+            let code = Int(codeLine.trimmingCharacters(in: .whitespaces))
+
+            guard code == 0,
+                  valueLine.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare("LTYPE") == .orderedSame else {
+                output.append(codeLine)
+                output.append(valueLine)
+                index += 2
+                continue
+            }
+
+            var record: [(code: String, value: String)] = [(codeLine, valueLine)]
+            index += 2
+            while index + 1 < lines.count {
+                let nextCode = Int(lines[index].trimmingCharacters(in: .whitespaces))
+                if nextCode == 0 { break }
+                record.append((lines[index], lines[index + 1]))
+                index += 2
+            }
+
+            let hasDescription = record.contains {
+                Int($0.code.trimmingCharacters(in: .whitespaces)) == 3
+            }
+            var descriptionInserted = hasDescription
+
+            for recordIndex in record.indices {
+                let pair = record[recordIndex]
+                let pairCode = Int(pair.code.trimmingCharacters(in: .whitespaces))
+
+                if pairCode == 72, !descriptionInserted {
+                    output.append("  3")
+                    output.append("")
+                    descriptionInserted = true
+                }
+
+                output.append(pair.code)
+                output.append(pair.value)
+
+                if includeElementType, pairCode == 49 {
+                    let nextPairCode: Int? = recordIndex + 1 < record.count
+                        ? Int(record[recordIndex + 1].code.trimmingCharacters(in: .whitespaces))
+                        : nil
+                    if nextPairCode != 74 {
+                        output.append(" 74")
+                        output.append("0")
+                    }
+                }
+            }
+        }
+
+        if index < lines.count {
+            output.append(contentsOf: lines[index...])
+        }
+
+        var normalized = output.joined(separator: "\r\n")
+        if hasTrailingLineBreak {
+            normalized += "\r\n"
+        }
+        return normalized
     }
 
     private static func sheetExportPlan(
@@ -985,7 +1075,8 @@ public enum DXFWriterBridge {
         if !path.hatchEdges.isEmpty {
             let entities = path.hatchEdges.compactMap { hatchEdgeEntity($0, transform: transform) }
             if entities.count == path.hatchEdges.count {
-                let loop = DXFHatchLoop(type: path.hatchLoopType ?? (isOuter ? 1 : 0))
+                let loopType = (path.hatchLoopType ?? (isOuter ? 1 : 0)) & ~2
+                let loop = DXFHatchLoop(type: loopType)
                 loop.entities = entities
                 loop.numEdges = entities.count
                 return loop
