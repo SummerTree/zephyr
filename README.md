@@ -15,11 +15,33 @@ Zephyr is a drafting app that runs natively on macOS (Metal) and Windows (Direct
 | Windows 10+ | ARM64 (Snapdragon / Surface) | [Zephyr-Windows-arm64.zip](https://github.com/joseph-montanez/zephyr/releases/download/nightly/Zephyr-Windows-arm64.zip) |
 | Windows 10+ | x64 | [Zephyr-Windows-x64.zip](https://github.com/joseph-montanez/zephyr/releases/download/nightly/Zephyr-Windows-x64.zip) |
 
+## Escape the Rent Trap
+
+**Own nothing and be happy? Break free from constant price hikes.**
+
+If you look at the subscription costs for AutoCAD LT, it's **$540 a year** if you pay upfront, or a massive markup to **$840 a year** if you have to pay monthly. They use aggressive marketing to lock you into 3-year commitments just to avoid price hikes, and the second you stop paying, you own absolutely nothing.
+
+On top of that, finding great cross-platform tools that treat macOS and Linux as first-class citizens is a nightmare. Most polished solutions are strictly Windows-only. For example, while Autodesk finally added AutoLISP support to AutoCAD LT on Windows recently (2024), their official documentation explicitly states that AutoLISP is completely blocked on AutoCAD LT for Mac. If you're on a Mac and need LISP automation, they force you to step up to the full AutoCAD license at over **$2,000 a year**.
+
+> **Note:** We highly encourage looking at other excellent free open-source software like **QCAD**, **LibreCAD**, **FreeCAD**, **SolveSpace**, and **Open 2D Studio** as powerful options to try in your drafting workflows. Zephyr exists alongside these community solutions as a performance-oriented alternative, utilizing Direct3D 12 on Windows and Metal on macOS through a single Swift GPU pipeline to feel native on both.
+
+### macOS
+- Universal binary, Apple silicon native
+- Real Cmd shortcuts, real trackpad gestures
+- High DPI on every external display
+- Files app, Quick Look, drag-and-drop
+
+### Windows
+- Native ARM64 — runs natively on Snapdragon & Surface
+- No .NET install, no Visual C++ runtime
+- Single signed .exe, ~14 MB
+- Per-monitor DPI, multi-display ready
+
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| **Language** | Swift (~50k LOC) |
+| **Language** | Swift (~65k LOC) |
 | **GPU (macOS)** | Metal via SDL3 |
 | **GPU (Windows)** | Direct3D 12 via SDL3 |
 | **UI** | ImGui (SDL3 GPU backend) |
