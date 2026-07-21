@@ -53,6 +53,11 @@ struct AppCommandRegistration {
             factory: { MatchPropCommand() }
         )
         engine.commandProcessor.registerFeatureCommand(
+            name: "TORIENT",
+            aliases: ["TO", "TEXTO"],
+            factory: { TextOrientCommand() }
+        )
+        engine.commandProcessor.registerFeatureCommand(
             name: "SPLINEEDIT",
             aliases: ["SPE"],
             factory: { SplineEditCommand() }

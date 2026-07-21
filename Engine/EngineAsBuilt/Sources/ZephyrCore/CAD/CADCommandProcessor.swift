@@ -193,6 +193,7 @@ public struct CommandDescriptor: Sendable {
         CommandDescriptor(canonicalName: "FILLET",     aliases: ["F"],            category: .modify,  syntax: "", description: "Round corners between objects using an exact tangent arc"),
         CommandDescriptor(canonicalName: "CHAMFER",    aliases: ["CHA", "BEVEL"], category: .modify,  syntax: "", description: "Bevel corners using distances or a distance and angle"),
         CommandDescriptor(canonicalName: "MATCHPROP",   aliases: ["MA", "MATCH"],  category: .modify,  syntax: "", description: "Copy properties from one entity to others"),
+        CommandDescriptor(canonicalName: "TORIENT",    aliases: ["TO", "TEXTO"], category: .modify, syntax: "", description: "Rotate text individually to an absolute or most-readable angle"),
         CommandDescriptor(canonicalName: "SPLINEEDIT", aliases: ["SPE"],           category: .modify,  syntax: "", description: "Edit an existing spline (reverse, convert to polyline, etc.)"),
         // --- View ---
         CommandDescriptor(canonicalName: "SELECTALL",  aliases: ["SELALL"],        category: .view,    syntax: "", description: "Select all entities in the active layer"),
