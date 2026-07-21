@@ -151,7 +151,7 @@ public enum DXFWriterBridge {
                     : -abs(DXFColorTable.rgbaToACI(layer.color))
                 entry.color24 = DXFColorTable.rgbaToTrueColor(layer.color) ?? -1
                 entry.lWeight = DXFLineWidth.fromDXF(Int((layer.lineWeight * 100.0).rounded()))
-                entry.transparency = opacityToDXF(layer.opacity)
+                entry.transparency = DXFColorTable.opacityToTransparency(layer.opacity)
                 writer.addLayer(entry)
             }
         }
@@ -1766,7 +1766,7 @@ public enum DXFWriterBridge {
             applyColor(color, to: entity)
         }
         if let opacity = xdataDouble(xdata, "dxf.opacity") {
-            entity.transparency = opacityToDXF(opacity)
+            entity.transparency = DXFColorTable.opacityToTransparency(opacity)
         }
         if let lineType = xdataString(xdata, "dxf.lineType"), !lineType.isEmpty {
             entity.lineType = lineType
@@ -1814,7 +1814,7 @@ public enum DXFWriterBridge {
             entity.ltypeScale = lineTypeScale
         }
         if let opacity = style.opacity {
-            entity.transparency = opacityToDXF(opacity)
+            entity.transparency = DXFColorTable.opacityToTransparency(opacity)
         }
         if let handle = style.plotStyleHandle,
            let value = UInt32(handle, radix: 16) {
@@ -1831,7 +1831,7 @@ public enum DXFWriterBridge {
                 mtext.backgroundFillFlags |= 1
                 mtext.backgroundColor = Int(DXFColorTable.rgbaToACI(color))
                 mtext.backgroundColor24 = Int(DXFColorTable.rgbaToTrueColor(color) ?? -1)
-                mtext.backgroundTransparency = Int(opacityToDXF(Double(color.a) / 255.0))
+                mtext.backgroundTransparency = Int(DXFColorTable.opacityToTransparency(Double(color.a) / 255.0))
             }
         }
     }
@@ -1852,7 +1852,7 @@ public enum DXFWriterBridge {
             entity.backgroundColor24 = Int(DXFColorTable.rgbaToTrueColor(color) ?? -1)
         }
         if let opacity = xdataDouble(xdata, "dxf.mtextBackgroundOpacity") {
-            entity.backgroundTransparency = Int(opacityToDXF(opacity))
+            entity.backgroundTransparency = Int(DXFColorTable.opacityToTransparency(opacity))
         }
     }
 
@@ -1874,12 +1874,6 @@ public enum DXFWriterBridge {
             r: UInt8((rgb >> 16) & 0xFF),
             g: UInt8((rgb >> 8) & 0xFF),
             b: UInt8(rgb & 0xFF))
-    }
-
-    private static func opacityToDXF(_ opacity: Double) -> Int32 {
-        let value = max(0.0, min(1.0, opacity))
-        if value >= 0.999999 { return -1 }
-        return Int32(max(0, min(90, Int(((1.0 - value) * 100.0).rounded()))))
     }
 
     private static func transformedVector(_ vector: Vector3, by transform: Transform3D) -> Vector3 {

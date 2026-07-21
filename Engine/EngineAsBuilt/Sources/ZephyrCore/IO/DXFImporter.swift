@@ -762,9 +762,8 @@ public enum DXFImporter {
             xdata["dxf.color"] = .string(String(
                 format: "#%02X%02X%02X", color.r, color.g, color.b))
         }
-        if entity.transparency >= 0 {
-            xdata["dxf.opacity"] = .double(
-                DXFColorTable.transparencyToOpacity(entity.transparency))
+        if let opacity = DXFColorTable.explicitTransparencyToOpacity(entity.transparency) {
+            xdata["dxf.opacity"] = .double(opacity)
         }
 
         let lineType = entity.lineType.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -842,9 +841,9 @@ public enum DXFImporter {
                     color24: Int32(mtext.backgroundColor24))
                 xdata["dxf.mtextBackgroundColor"] = .string(String(
                     format: "#%02X%02X%02X", background.r, background.g, background.b))
-                if mtext.backgroundTransparency >= 0 {
-                    xdata["dxf.mtextBackgroundOpacity"] = .double(
-                        DXFColorTable.transparencyToOpacity(Int32(mtext.backgroundTransparency)))
+                if let opacity = DXFColorTable.explicitTransparencyToOpacity(
+                    Int32(mtext.backgroundTransparency)) {
+                    xdata["dxf.mtextBackgroundOpacity"] = .double(opacity)
                 }
             }
         }
@@ -973,9 +972,8 @@ public enum DXFImporter {
                 var background = DXFColorTable.aciToRGBA(
                     Int32(mtext.backgroundColor),
                     color24: Int32(mtext.backgroundColor24))
-                if mtext.backgroundTransparency >= 0 {
-                    let opacity = DXFColorTable.transparencyToOpacity(
-                        Int32(mtext.backgroundTransparency))
+                if let opacity = DXFColorTable.explicitTransparencyToOpacity(
+                    Int32(mtext.backgroundTransparency)) {
                     background = ColorRGBA(
                         r: background.r,
                         g: background.g,
@@ -996,9 +994,7 @@ public enum DXFImporter {
             isLineWeightByBlock: entity.lWeight == .byBlock,
             lineTypeScale: entity.ltypeScale > 0 ? entity.ltypeScale : nil,
             geomWidth: geomWidth,
-            opacity: entity.transparency >= 0
-                ? DXFColorTable.transparencyToOpacity(entity.transparency)
-                : nil,
+            opacity: DXFColorTable.explicitTransparencyToOpacity(entity.transparency),
             plotStyleHandle: entity.plotStyleHandle == 0
                 ? nil
                 : String(entity.plotStyleHandle, radix: 16).uppercased(),

@@ -1500,8 +1500,7 @@ public enum DXFExporter {
     }
 
     private static func opacityToDXF(_ opacity: Double) -> Int {
-        let pct = Int(((1.0 - opacity) * 100.0).rounded())
-        return max(0, min(90, pct))
+        Int(DXFColorTable.opacityToTransparency(opacity, omitOpaque: false))
     }
 }
 

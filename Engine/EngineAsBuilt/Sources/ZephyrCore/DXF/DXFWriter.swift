@@ -759,7 +759,11 @@ public class DXFWriter {
                     writeStr(347, materialGlobalHandle, &out)
                 }
             }
-            if layer.transparency >= 0 { writeInt(440, Int(layer.transparency), &out) }
+            if hasTransparency, layer.transparency >= 0 {
+                writeInt(440, Int(layer.transparency), &out)
+                writeStr(1001, "AcCmTransparency", &out)
+                writeInt(1071, Int(layer.transparency), &out)
+            }
         }
 
         out += "  0\r\nENDTAB\r\n"
@@ -843,6 +847,11 @@ public class DXFWriter {
             let acad = DXFAppIdEntry()
             acad.name = "ACAD"
             append(acad)
+        }
+        if hasTransparency, layers.contains(where: { $0.transparency >= 0 }) {
+            let transparency = DXFAppIdEntry()
+            transparency.name = "AcCmTransparency"
+            append(transparency)
         }
         for app in appids { append(app) }
 
@@ -1599,7 +1608,7 @@ public class DXFWriter {
         if e.space != 0 { writeInt(67, e.space, &out) }
         if e.lWeight != .byLayer { writeInt(370, e.lWeight.dxfInt, &out) }
         if !e.colorName.isEmpty { writeStr(430, e.colorName, &out) }
-        if e.transparency >= 0 { writeInt(440, Int(e.transparency), &out) }
+        if hasTransparency, e.transparency >= 0 { writeInt(440, Int(e.transparency), &out) }
         if e.haveExtrusion || e.extrusion != Vector3(x: 0, y: 0, z: 1) {
             writeCoord3(210, e.extrusion, &out)
         }

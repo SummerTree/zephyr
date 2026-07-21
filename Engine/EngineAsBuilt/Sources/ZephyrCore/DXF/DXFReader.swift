@@ -1519,6 +1519,9 @@ extension DXFReader {
 
     func parseLayer(at startIdx: Int) throws {
         let entry = DXFLayerEntry()
+        var groupTransparency: Int32?
+        var xdataTransparency: Int32?
+        var activeXDataApp: String?
         var idx = startIdx
         idx += 1
         while idx < pairs.count {
@@ -1534,10 +1537,17 @@ extension DXFReader {
             case 370: entry.lWeight = dxfLineWeightVal(v)
             case 390: entry.plotStyleHandle = parseHandle(v)
             case 420: entry.color24 = i32(v)
-            case 440: entry.transparency = i32(v)
+            case 440: groupTransparency = i32(v)
+            case 1001:
+                activeXDataApp = decode(v).trimmingCharacters(in: .whitespacesAndNewlines)
+            case 1071:
+                if activeXDataApp?.caseInsensitiveCompare("AcCmTransparency") == .orderedSame {
+                    xdataTransparency = i32(v)
+                }
             default:  break
             }
         }
+        entry.transparency = groupTransparency ?? xdataTransparency ?? -1
         layers.append(entry)
     }
 
@@ -2001,6 +2011,9 @@ extension DXFReader {
     func applyCommon(_ pairs: [(Int, String)], to entity: DXFEntity) {
         var inAppData = false
         var currentAppBlock: [(code: Int, value: Any)] = []
+        var groupTransparency: Int32?
+        var xdataTransparency: Int32?
+        var activeXDataApp: String?
         
         func flushAppBlock() {
             if !currentAppBlock.isEmpty {
@@ -2045,8 +2058,12 @@ extension DXFReader {
             case 390: entity.plotStyleHandle = parseHandle(v)
             case 420: entity.color24 = i32(v)
             case 430: entity.colorName = decode(v)
-            case 440: entity.transparency = i32(v)
-            case 1000, 1001, 1002, 1003, 1004, 1005:
+            case 440:
+                groupTransparency = i32(v)
+            case 1001:
+                activeXDataApp = decode(v).trimmingCharacters(in: .whitespacesAndNewlines)
+                entity.extendedData.append((c, decode(v)))
+            case 1000, 1002, 1003, 1004, 1005:
                 entity.extendedData.append((c, decode(v)))
             case 1010, 1011, 1012, 1013:
                 entity.extendedData.append((c, d(v)))
@@ -2056,11 +2073,18 @@ extension DXFReader {
             case 1070:
                 if !inAppData { entity.extendedData.append((c, i(v))) }
             case 1071:
-                if !inAppData { entity.extendedData.append((c, i32(v))) }
+                if !inAppData {
+                    let value = i32(v)
+                    entity.extendedData.append((c, value))
+                    if activeXDataApp?.caseInsensitiveCompare("AcCmTransparency") == .orderedSame {
+                        xdataTransparency = value
+                    }
+                }
             default:  break
             }
         }
         if inAppData { flushAppBlock() }
+        entity.transparency = groupTransparency ?? xdataTransparency ?? entity.transparency
     }
 
     /// Decode string through text codec

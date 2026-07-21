@@ -293,19 +293,52 @@ public enum DXFColorTable {
         return lw / 100.0
     }
 
-    /// Convert DXF transparency (group code 440) to opacity 0.0–1.0.
-    ///
-    /// DXF convention:
-    /// - 0 = opaque
-    /// - 1–90 = transparency percentage (1 = 1% transparent → 0.99 opaque)
-    /// - > 90 = direct alpha value
-    /// - -1 = not set (default to opaque)
+    /// Convert DXF transparency (group code 440/441) to opacity 0.0–1.0.
+    /// Explicit DXF transparency is packed as 0x020000TT, where TT is an
+    /// alpha byte (0 = transparent, 255 = opaque). 0x01000000 means ByBlock,
+    /// and an omitted value means ByLayer.
     public static func transparencyToOpacity(_ trans: Int32) -> Double {
-        if trans < 0 { return 1.0 }          // not set → fully opaque
-        if trans == 0 { return 1.0 }          // 0 = opaque
-        if trans <= 90 { return 1.0 - Double(trans) / 100.0 }  // percentage
-        // > 90: direct alpha value (0=transparent, 255=opaque)
-        return Double(trans) / 255.0
+        guard trans >= 0 else { return 1.0 }
+
+        let raw = UInt32(bitPattern: trans)
+        switch raw & 0xFF00_0000 {
+        case 0x0200_0000:
+            return Double(raw & 0xFF) / 255.0
+        case 0x0100_0000:
+            return 1.0
+        default:
+            // Backward compatibility with DXFs written by older Zephyr builds,
+            // which emitted bare transparency percentages/alpha values.
+            if raw == 0 { return 1.0 }
+            if raw <= 90 { return 1.0 - Double(raw) / 100.0 }
+            if raw <= 255 { return Double(raw) / 255.0 }
+            return 1.0
+        }
+    }
+
+    /// Returns an opacity only when group 440/441 contains an explicit value.
+    /// ByLayer/ByBlock values must remain inherited rather than becoming opaque.
+    public static func explicitTransparencyToOpacity(_ trans: Int32) -> Double? {
+        guard trans >= 0 else { return nil }
+        let raw = UInt32(bitPattern: trans)
+        let method = raw & 0xFF00_0000
+        if method == 0x0100_0000 { return nil }
+        if method == 0x0200_0000 || raw <= 255 {
+            return transparencyToOpacity(trans)
+        }
+        return nil
+    }
+
+    /// Convert opacity 0.0–1.0 to packed DXF group 440/441 format.
+    /// Fully opaque values are omitted by default so entities remain ByLayer.
+    public static func opacityToTransparency(
+        _ opacity: Double,
+        omitOpaque: Bool = true
+    ) -> Int32 {
+        let value = max(0.0, min(1.0, opacity))
+        if omitOpaque && value >= 0.999999 { return -1 }
+        let alpha = UInt32(max(0, min(255, Int((value * 255.0).rounded()))))
+        return Int32(bitPattern: 0x0200_0000 | alpha)
     }
 
     /// Convert RGBA → ACI. Returns 7 (white) by default.
