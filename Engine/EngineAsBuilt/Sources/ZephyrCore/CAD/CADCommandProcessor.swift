@@ -862,7 +862,7 @@ public final class CADCommandProcessor {
             let arg = String(text.dropFirst(prefixLen)).trimmingCharacters(in: .whitespaces)
             guard !arg.isEmpty else {
                 print("[CAD] Usage: SET-BACKGROUND <index|hex>")
-                print("[CAD]   ACI index (1-255) or hex RRGGBB (e.g. BD20FF)")
+                print("[CAD]   ACI index (0-255) or hex RRGGBB (e.g. BD20FF)")
                 clearCommand()
                 return
             }
@@ -874,16 +874,24 @@ public final class CADCommandProcessor {
                 engine.ui.backgroundColor = SDL_FColor(r: r, g: g, b: b, a: 1.0)
                 print("[CAD] Background set to #\(arg.uppercased()) (RGB \(Int(r*255)),\(Int(g*255)),\(Int(b*255)))")
             }
-            // Try parsing as ACI index (1-255)
-            else if let aci = Int32(arg), aci >= 1, aci <= 255 {
-                let rgba = DXFColorTable.aciToRGBA(aci, color24: -1)
-                let r = Float(rgba.r) / 255.0
-                let g = Float(rgba.g) / 255.0
-                let b = Float(rgba.b) / 255.0
+            // Try parsing as ACI index (0-255)
+            else if let aci = Int32(arg), aci >= 0, aci <= 255 {
+                let r: Float
+                let g: Float
+                let b: Float
+                if aci == 0 {
+                    // ACI 0 = BYBLOCK, but for background purposes use pure black
+                    r = 0; g = 0; b = 0
+                } else {
+                    let rgba = DXFColorTable.aciToRGBA(aci, color24: -1)
+                    r = Float(rgba.r) / 255.0
+                    g = Float(rgba.g) / 255.0
+                    b = Float(rgba.b) / 255.0
+                }
                 engine.ui.backgroundColor = SDL_FColor(r: r, g: g, b: b, a: 1.0)
-                print("[CAD] Background set to ACI \(aci) (RGB \(rgba.r),\(rgba.g),\(rgba.b))")
+                print("[CAD] Background set to ACI \(aci) (RGB \(Int(r*255)),\(Int(g*255)),\(Int(b*255)))")
             } else {
-                print("[CAD] Invalid color: '\(arg)'. Use ACI index (1-255) or hex RRGGBB (e.g. BD20FF).")
+                print("[CAD] Invalid color: '\(arg)'. Use ACI index (0-255) or hex RRGGBB (e.g. BD20FF).")
             }
             clearCommand()
         // --- Simplify Complex Blocks ---
