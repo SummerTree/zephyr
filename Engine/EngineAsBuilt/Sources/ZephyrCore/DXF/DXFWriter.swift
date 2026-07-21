@@ -705,11 +705,14 @@ public class DXFWriter {
             out += "100\r\nAcDbLinetypeTableRecord\r\n"
             writeStr(2, lt.name, &out)
             writeInt(70, lt.flags, &out)
-            writeStr(3, lt.desc, &out)
+            writeStrAllowEmpty(3, lt.desc, &out)
             writeInt(72, 65, &out)
             writeInt(73, lt.path.count, &out)
             writeDbl(40, lt.path.reduce(0) { $0 + abs($1) }, &out)
-            for p in lt.path { writeDbl(49, p, &out) }
+            for p in lt.path {
+                writeDbl(49, p, &out)
+                if isModern { writeInt(74, 0, &out) }
+            }
         }
 
         out += "  0\r\nENDTAB\r\n"
