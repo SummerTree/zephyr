@@ -289,7 +289,7 @@ public enum CADPrimitiveGenerator {
         }
         // Consult document-level linetype table first (exact match from DXF/EAB).
         if let patterns = linetypePatterns, let exact = patterns[n] {
-            return exact
+            return exact.isEmpty ? nil : exact
         }
         if n.contains("DASHED") {
             return [10.0, 5.0]
