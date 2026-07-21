@@ -47,8 +47,9 @@ internal final class EngineInputHandler {
             let handledByImGui = engine.ui.processImGuiInput(event: &e)
 
             switch e.type {
-            case UInt32(SDL_EVENT_QUIT.rawValue):
-                engine.running = false
+            case UInt32(SDL_EVENT_QUIT.rawValue),
+                 UInt32(SDL_EVENT_WINDOW_CLOSE_REQUESTED.rawValue):
+                engine.requestStop()
                 return eventCount
 
             case UInt32(SDL_EVENT_WINDOW_RESIZED.rawValue):
@@ -235,7 +236,7 @@ internal final class EngineInputHandler {
                     if engine.io.pointee.KeyShift {
                         engine.commandProcessor.executeCommand("CLOSEALL")
                     } else {
-                    _ = engine.tabManager.closeActiveTab()
+                    _ = engine.tabManager.requestCloseActiveTab()
                     }
                 case SDL_SCANCODE_S:
                     if engine.io.pointee.KeyShift {

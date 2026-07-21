@@ -31,5 +31,9 @@ struct AppFileCallbacks {
         engine.saveFileBrowser.onSaveFileSelected = { url, dxfVersion in
             engine.tabManager.startSaveActiveTabAs(url: url, dxfVersion: dxfVersion)
         }
+
+        engine.tabManager.onTabCloseConfirmationRequested = { tabID in
+            AppUI.requestTabCloseConfirmation(tabID: tabID)
+        }
     }
 }

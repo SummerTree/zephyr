@@ -228,6 +228,9 @@ public final class PhrostEngine {
 
     // MARK: State
     internal var running = true
+    /// Called before an OS or custom-titlebar close request is accepted.
+    /// Return false when the app needs to show an unsaved-changes confirmation first.
+    public var windowCloseRequestHandler: (() -> Bool)?
     public internal(set) var windowWidth: Int32 = 0
     public internal(set) var windowHeight: Int32 = 0
     internal var pixelWidth: Int32 = 0
@@ -785,6 +788,13 @@ public final class PhrostEngine {
 
     // MARK: - Stop Engine
 
+    public func requestStop() {
+        guard windowCloseRequestHandler?() ?? true else { return }
+        stop()
+    }
+
+    /// Immediately stops the engine. Confirmation UI should call this only
+    /// after the user has explicitly chosen to discard changes and exit.
     public func stop() {
         self.running = false
     }

@@ -71,6 +71,10 @@ struct ZephyrApp {
 
         // Wire up file browser callbacks for opening and saving DXF/EAB files.
         AppFileCallbacks.configure(on: engine)
+        engine.windowCloseRequestHandler = { [weak engine] in
+            guard let engine else { return true }
+            return AppUI.requestWindowClose(engine: engine)
+        }
 
         // The main ImGui frame callback — called once per frame by the engine
         // to render all UI panels, toolbars, and the command line.

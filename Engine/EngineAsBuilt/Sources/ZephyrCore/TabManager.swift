@@ -94,10 +94,16 @@ public struct DocumentTab {
         self.parentDocument = parentDocument
     }
 
+    /// True when any model or layout view in this tab has unsaved changes.
+    public var hasUnsavedChanges: Bool {
+        drawingViews.contains { $0.document.hasUnsavedChanges }
+    }
+
     /// Build an immutable snapshot for background save.
-    /// Captures all drawing views, image assets, and the current edit revision.
+    /// Captures all drawing views, image assets, and their current edit revisions.
     public func buildSaveSnapshot(formatVersion: UInt32 = 7,
                                    appVersion: String = "Zephyr 1.0") -> SaveTabSnapshot {
+        let viewEditRevisions = drawingViews.map { $0.document.editRevision }
         let viewSnapshots = drawingViews.map { view in
             view.document.buildSaveSnapshot(
                 viewName: view.name,
@@ -110,7 +116,8 @@ public struct DocumentTab {
             drawingViews: viewSnapshots,
             fileURL: fileURL,
             displayName: displayName,
-            editRevision: document.editRevision,
+            editRevision: viewEditRevisions[activeViewIndex],
+            viewEditRevisions: viewEditRevisions,
             formatVersion: formatVersion,
             appVersion: appVersion
         )
@@ -152,6 +159,22 @@ public struct SaveProgressState {
 
 // =========================================================================
 
+private struct PendingSaveKey: Hashable, Sendable {
+    let tabID: UUID
+    let saveID: UUID
+}
+
+private struct PendingSaveCompletion: Sendable {
+    let tabID: UUID
+    let saveID: UUID
+    let snapshot: SaveTabSnapshot
+    let targetURL: URL
+    let isAutosave: Bool
+    let dxfVersion: DXFVersion
+    let success: Bool
+    let errorMessage: String?
+}
+
 /// Manages a list of `DocumentTab`s and tracks which one is active.
 /// The engine delegates to the active tab for all CAD operations.
 @MainActor
@@ -167,6 +190,9 @@ public final class TabManager {
 
     /// Callback invoked when a tab is closed.
     public var onTabClosed: ((Int) -> Void)? = nil
+
+    /// Callback invoked when a dirty tab needs user confirmation before closing.
+    public var onTabCloseConfirmationRequested: ((UUID) -> Void)? = nil
 
     /// Callback invoked to get the viewport's background color for exports.
     public var getBackgroundColor: (() -> ColorRGBA)? = nil
@@ -184,6 +210,10 @@ public final class TabManager {
     private var saveTasksByTabID: [UUID: (task: Task<Void, Never>, saveID: UUID)] = [:]
     /// Progress/status for each tab's current (or most recent) save.
     public private(set) var saveStateByTabID: [UUID: SaveProgressState] = [:]
+
+    private nonisolated(unsafe) var pendingSaveProgress: [PendingSaveKey: Float] = [:]
+    private nonisolated(unsafe) var pendingSaveCompletions: [PendingSaveCompletion] = []
+    private let pendingSaveLock = NSLock()
 
     /// Computed — the active tab's in-flight save state, for the status bar.
     public var activeSaveState: SaveProgressState? {
@@ -232,8 +262,7 @@ public final class TabManager {
 
     /// Whether the active tab has unsaved changes.
     public var activeIsDirty: Bool {
-        guard let tab = activeTab else { return false }
-        return tab.document.hasUnsavedChanges
+        activeTab?.hasUnsavedChanges ?? false
     }
 
     // MARK: - Tab Lifecycle
@@ -357,18 +386,52 @@ public final class TabManager {
         return idx
     }
 
-    /// Close the tab at the given index.
-    /// - Returns: True if the tab was closed.
+    public func indexOfTab(id: UUID) -> Int? {
+        tabs.firstIndex { $0.id == id }
+    }
+
+    /// Request closing a tab. Dirty tabs are deferred to the UI confirmation callback.
+    @discardableResult
+    public func requestCloseTab(at index: Int) -> Bool {
+        guard index >= 0, index < tabs.count else { return false }
+        let tab = tabs[index]
+        if tab.hasUnsavedChanges {
+            onTabCloseConfirmationRequested?(tab.id)
+            return false
+        }
+        return closeTab(at: index)
+    }
+
+    /// Request closing the active tab, respecting unsaved-change confirmation.
+    @discardableResult
+    public func requestCloseActiveTab() -> Bool {
+        requestCloseTab(at: activeIndex)
+    }
+
+    /// Close the tab at the given index without prompting.
+    /// - Returns: True if the tab was closed or replaced by a clean untitled tab.
     @discardableResult
     public func closeTab(at index: Int) -> Bool {
         guard index >= 0, index < tabs.count else { return false }
-        guard tabs.count > 1 else {
-            // Don't close the last tab — clear it instead
-            return false
+
+        // Cancel any in-flight save for this tab before removing it.
+        let tabID = tabs[index].id
+        if tabs.count == 1 {
+            cancelSave(for: tabID, reason: .close)
+            let doc = CADDocument()
+            doc.importLayersBlocksEntities(
+                layers: [Layer(name: "0", color: .white)],
+                blocks: [],
+                entities: []
+            )
+            doc.savedRevision = doc.editRevision
+            tabs[0] = DocumentTab(document: doc, fileURL: nil, displayName: "Untitled")
+            activeIndex = 0
+            onActiveTabChanged?()
+            onTabClosed?(index)
+            return true
         }
 
-        // Cancel any in-flight save for this tab before removing it
-        let tabID = tabs[index].id
         cancelSave(for: tabID, reason: .close)
 
         let wasActive = (index == activeIndex)
@@ -1001,11 +1064,9 @@ public final class TabManager {
         dxfVersion: DXFVersion
     ) {
         let saveID = UUID()
-        // 1. Cancel any existing save for this tab (restart — no flicker)
         cancelSave(for: tab.id, reason: .restart)
-        // 2. Build immutable snapshot (on MainActor, fast)
         let snapshot = tab.buildSaveSnapshot()
-        // 3. Set progress state
+        let backgroundColor = getBackgroundColor?()
         let status: SaveStatus = isAutosave ? .autosaving : .saving
         let statusText = isAutosave ? "Autosaving..." : "Saving..."
         saveStateByTabID[tab.id] = SaveProgressState(
@@ -1013,33 +1074,96 @@ public final class TabManager {
             status: status, saveID: saveID,
             isAutosave: isAutosave
         )
-        // 4. Launch detached task
+
         let task = Task.detached { [weak self] in
             guard let self else { return }
             await self.performBackgroundSave(
                 snapshot: snapshot, saveID: saveID,
                 targetURL: url, isAutosave: isAutosave,
-                dxfVersion: dxfVersion
+                dxfVersion: dxfVersion,
+                backgroundColor: backgroundColor
             )
         }
         saveTasksByTabID[tab.id] = (task, saveID)
     }
 
+    nonisolated private func publishSaveProgress(
+        tabID: UUID,
+        saveID: UUID,
+        progress: Float
+    ) {
+        let key = PendingSaveKey(tabID: tabID, saveID: saveID)
+        pendingSaveLock.withLock {
+            pendingSaveProgress[key] = progress
+        }
+    }
+
+    nonisolated private func publishSaveCompletion(_ completion: PendingSaveCompletion) {
+        pendingSaveLock.withLock {
+            pendingSaveProgress.removeValue(
+                forKey: PendingSaveKey(tabID: completion.tabID, saveID: completion.saveID)
+            )
+            pendingSaveCompletions.append(completion)
+        }
+    }
+
+    @discardableResult
+    public func applyPendingSaveUpdates() -> Bool {
+        let pending = pendingSaveLock.withLock { () -> (
+            progress: [PendingSaveKey: Float],
+            completions: [PendingSaveCompletion]
+        ) in
+            let result = (pendingSaveProgress, pendingSaveCompletions)
+            pendingSaveProgress.removeAll(keepingCapacity: true)
+            pendingSaveCompletions.removeAll(keepingCapacity: true)
+            return result
+        }
+
+        var changed = false
+
+        for (key, progress) in pending.progress {
+            guard saveStateByTabID[key.tabID]?.saveID == key.saveID else { continue }
+            saveStateByTabID[key.tabID]?.progress = progress
+            changed = true
+        }
+
+        for completion in pending.completions {
+            guard saveStateByTabID[completion.tabID]?.saveID == completion.saveID else { continue }
+            if completion.success {
+                _ = beginCommit(tabID: completion.tabID, saveID: completion.saveID)
+            }
+            finishSave(
+                tabID: completion.tabID,
+                saveID: completion.saveID,
+                snapshot: completion.snapshot,
+                targetURL: completion.targetURL,
+                isAutosave: completion.isAutosave,
+                dxfVersion: completion.dxfVersion,
+                success: completion.success,
+                errorMessage: completion.errorMessage
+            )
+            changed = true
+        }
+
+        return changed
+    }
+
     nonisolated private func performBackgroundSave(
         snapshot: SaveTabSnapshot, saveID: UUID,
         targetURL: URL, isAutosave: Bool,
-        dxfVersion: DXFVersion
+        dxfVersion: DXFVersion,
+        backgroundColor: ColorRGBA?
     ) async {
         let ext = targetURL.pathExtension.lowercased()
         do {
             try Task.checkCancellation()
 
-            let progressHandler: ((Float) -> Void)? = { progress in
-                Task { @MainActor [weak self] in
-                    guard let self,
-                          self.saveStateByTabID[snapshot.tabID]?.saveID == saveID else { return }
-                    self.saveStateByTabID[snapshot.tabID]?.progress = progress
-                }
+            let progressHandler: ((Float) -> Void)? = { [weak self] progress in
+                self?.publishSaveProgress(
+                    tabID: snapshot.tabID,
+                    saveID: saveID,
+                    progress: progress
+                )
             }
 
             if ext == "eab" {
@@ -1049,18 +1173,15 @@ public final class TabManager {
                     progress: progressHandler
                 )
             } else if ext == "pdf" {
-                // For PDF, use the first view's document snapshot
                 let docSnap = snapshot.drawingViews.first?.docSnapshot
                     ?? snapshot.drawingViews[0].docSnapshot
-                let bgColor = await MainActor.run { self.getBackgroundColor?() }
                 try PDFExporter.export(
                     snapshot: docSnap,
                     to: targetURL,
-                    backgroundColor: bgColor,
+                    backgroundColor: backgroundColor,
                     progress: progressHandler
                 )
             } else if ext == "dwg" {
-                // Save DXF to temp, then convert to DWG via ODA FileConverter.
                 guard ODADWGConverter.isAvailable else {
                     throw ODADWGConvertError.converterNotFound
                 }
@@ -1086,40 +1207,39 @@ public final class TabManager {
                 )
             }
 
-            // Commit phase — validate saveID on MainActor before final replace
             try Task.checkCancellation()
-            let canCommit = await MainActor.run {
-                self.beginCommit(tabID: snapshot.tabID, saveID: saveID) == true
-            }
-            guard canCommit else { throw CancellationError() }
-            // atomicReplace already done inside the exporters
-
-            // Success — apply results on MainActor
-            await MainActor.run { [weak self] in
-                guard let self,
-                      self.saveStateByTabID[snapshot.tabID]?.saveID == saveID else { return }
-                self.finishSave(tabID: snapshot.tabID, saveID: saveID,
-                                snapshot: snapshot, targetURL: targetURL,
-                                isAutosave: isAutosave, dxfVersion: dxfVersion,
-                                success: true)
-            }
+            publishSaveCompletion(PendingSaveCompletion(
+                tabID: snapshot.tabID,
+                saveID: saveID,
+                snapshot: snapshot,
+                targetURL: targetURL,
+                isAutosave: isAutosave,
+                dxfVersion: dxfVersion,
+                success: true,
+                errorMessage: nil
+            ))
         } catch is CancellationError {
-            await MainActor.run { [weak self] in
-                self?.finishSave(tabID: snapshot.tabID, saveID: saveID,
-                                 snapshot: snapshot, targetURL: targetURL,
-                                 isAutosave: isAutosave, dxfVersion: dxfVersion,
-                                 success: false)
-            }
+            publishSaveCompletion(PendingSaveCompletion(
+                tabID: snapshot.tabID,
+                saveID: saveID,
+                snapshot: snapshot,
+                targetURL: targetURL,
+                isAutosave: isAutosave,
+                dxfVersion: dxfVersion,
+                success: false,
+                errorMessage: nil
+            ))
         } catch {
-            await MainActor.run { [weak self] in
-                guard let self,
-                      self.saveStateByTabID[snapshot.tabID]?.saveID == saveID else { return }
-                self.finishSave(tabID: snapshot.tabID, saveID: saveID,
-                                snapshot: snapshot, targetURL: targetURL,
-                                isAutosave: isAutosave, dxfVersion: dxfVersion,
-                                success: false,
-                                errorMessage: error.localizedDescription)
-            }
+            publishSaveCompletion(PendingSaveCompletion(
+                tabID: snapshot.tabID,
+                saveID: saveID,
+                snapshot: snapshot,
+                targetURL: targetURL,
+                isAutosave: isAutosave,
+                dxfVersion: dxfVersion,
+                success: false,
+                errorMessage: error.localizedDescription
+            ))
         }
     }
 
@@ -1140,9 +1260,13 @@ public final class TabManager {
                     if targetURL.pathExtension.lowercased() == "dxf" {
                         tabs[idx].dxfVersion = dxfVersion
                     }
-                    tabs[idx].document.markSaved(upTo: snapshot.editRevision)
-                    // Force UI refresh so tab bar asterisk clears immediately
-                    tabs[idx].document.markNeedsRegeneration()
+                    for viewIndex in tabs[idx].drawingViews.indices {
+                        let revision = snapshot.viewEditRevisions.indices.contains(viewIndex)
+                            ? snapshot.viewEditRevisions[viewIndex]
+                            : snapshot.editRevision
+                        tabs[idx].drawingViews[viewIndex].document.markSaved(upTo: revision)
+                        tabs[idx].drawingViews[viewIndex].document.markNeedsRegeneration()
+                    }
                 }
             }
             saveStateByTabID.removeValue(forKey: tabID)

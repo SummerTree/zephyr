@@ -66,7 +66,7 @@ struct TopChromeUI {
             let closeBtnX = dw - btnWidth
             ImGuiSetCursorScreenPos(ImVec2(x: closeBtnX, y: 0))
             if igInvisibleButton("##CloseBtn", ImVec2(x: btnWidth, y: btnHeight), 0) {
-                engine.stop()
+                engine.requestStop()
             }
             let closeHovered = ImGuiIsItemHovered(0)
 
@@ -124,7 +124,7 @@ struct TopChromeUI {
             // Close
             ImGuiSetCursorScreenPos(ImVec2(x: startX - circleRadius - 4, y: centerY - circleRadius - 4))
             if igInvisibleButton("##CloseBtn", ImVec2(x: circleRadius * 2 + 8, y: circleRadius * 2 + 8), 0) {
-                engine.stop()
+                engine.requestStop()
             }
             let closeHovered = ImGuiIsItemHovered(0)
 

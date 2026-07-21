@@ -439,7 +439,7 @@ public final class CADCommandProcessor {
             engine?.fileBrowser.open(filterExtension: "dxf;eab")
             clearCommand()
         case "CLOSE":
-            _ = engine?.tabManager.closeActiveTab()
+            _ = engine?.tabManager.requestCloseActiveTab()
             clearCommand()
         case "CLOSEALL":
             guard let engine = engine else { clearCommand(); return }
@@ -451,7 +451,7 @@ public final class CADCommandProcessor {
             var idx = engine.tabManager.tabs.count - 1
             while idx >= 0 {
                 if idx != keepIndex {
-                    _ = engine.tabManager.closeTab(at: idx)
+                    _ = engine.tabManager.requestCloseTab(at: idx)
                 }
                 idx -= 1
             }
@@ -463,7 +463,7 @@ public final class CADCommandProcessor {
             var idx = engine.tabManager.tabs.count - 1
             while idx >= 0 {
                 if idx != activeIdx {
-                    _ = engine.tabManager.closeTab(at: idx)
+                    _ = engine.tabManager.requestCloseTab(at: idx)
                 }
                 idx -= 1
             }

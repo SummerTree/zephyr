@@ -23,6 +23,23 @@ import ImGui
 
 @MainActor
 struct AppUI {
+    private static var _tabClosePendingID: UUID?
+    private static var _tabClosePopupRequested = false
+    private static var _windowClosePending = false
+
+    static func requestTabCloseConfirmation(tabID: UUID) {
+        _tabClosePendingID = tabID
+        _tabClosePopupRequested = true
+    }
+
+    static func requestWindowClose(engine: PhrostEngine) -> Bool {
+        guard engine.tabManager.tabs.contains(where: { $0.hasUnsavedChanges }) else {
+            return true
+        }
+        _windowClosePending = true
+        return false
+    }
+
     /// Called once per frame by the engine to render the entire UI.
     /// Orders all panels, chrome, and dialogs in the correct z-order.
     /// - Parameters:
@@ -214,9 +231,110 @@ struct AppUI {
             }
         }
 
+        renderTabCloseConfirmation(engine: engine, dw: dw)
+        renderWindowCloseConfirmation(engine: engine, dw: dw)
+
         // 12. Radial Navigation Tool (Artrage style)
         if engine.ui.radialNavVisible {
             RadialNavUI.render(engine: engine, dw: dw, dh: dh)
+        }
+    }
+
+
+    private static func renderTabCloseConfirmation(engine: PhrostEngine, dw: Float) {
+        if _tabClosePopupRequested {
+            _tabClosePopupRequested = false
+            ImGuiOpenPopup("Discard Changes##RequestedTabClose", Int32(ImGuiPopupFlags_None.rawValue))
+        }
+
+        let popupW: Float = 380
+        let popupH: Float = 110
+        ImGuiSetNextWindowPos(
+            ImVec2(x: (dw - popupW) * 0.5, y: 150),
+            Int32(ImGuiCond_Appearing.rawValue),
+            ImVec2(x: 0, y: 0))
+        ImGuiSetNextWindowSize(ImVec2(x: popupW, y: popupH), Int32(ImGuiCond_Appearing.rawValue))
+
+        var popupOpen = true
+        if ImGuiBeginPopupModal("Discard Changes##RequestedTabClose", &popupOpen,
+                                Int32(ImGuiWindowFlags_NoSavedSettings.rawValue)) {
+            defer { ImGuiEndPopup() }
+
+            if !popupOpen {
+                _tabClosePendingID = nil
+                return
+            }
+
+            guard let tabID = _tabClosePendingID,
+                  let index = engine.tabManager.indexOfTab(id: tabID) else {
+                _tabClosePendingID = nil
+                ImGuiCloseCurrentPopup()
+                return
+            }
+
+            let tabName = engine.tabManager.tabs[index].displayName
+            ImGuiTextV("Discard unsaved changes to \"\(tabName)\"?")
+            igSeparator()
+
+            if igSmallButton("Discard Changes") {
+                _ = engine.tabManager.closeTab(at: index)
+                _tabClosePendingID = nil
+                ImGuiCloseCurrentPopup()
+            }
+            ImGuiSameLine(0, 8)
+            if igSmallButton("Cancel") {
+                _tabClosePendingID = nil
+                ImGuiCloseCurrentPopup()
+            }
+        }
+    }
+
+    private static func renderWindowCloseConfirmation(engine: PhrostEngine, dw: Float) {
+        guard _windowClosePending else { return }
+
+        let dirtyTabs = engine.tabManager.tabs.filter { $0.hasUnsavedChanges }
+        if dirtyTabs.isEmpty {
+            _windowClosePending = false
+            engine.stop()
+            return
+        }
+
+        ImGuiOpenPopup("Unsaved Changes##WindowClose", Int32(ImGuiPopupFlags_None.rawValue))
+
+        let popupW: Float = 440
+        let popupH: Float = 145
+        ImGuiSetNextWindowPos(
+            ImVec2(x: (dw - popupW) * 0.5, y: 150),
+            Int32(ImGuiCond_Appearing.rawValue),
+            ImVec2(x: 0, y: 0))
+        ImGuiSetNextWindowSize(ImVec2(x: popupW, y: popupH), Int32(ImGuiCond_Appearing.rawValue))
+
+        var popupOpen = true
+        if ImGuiBeginPopupModal("Unsaved Changes##WindowClose", &popupOpen,
+                                Int32(ImGuiWindowFlags_NoSavedSettings.rawValue)) {
+            defer { ImGuiEndPopup() }
+
+            if !popupOpen {
+                _windowClosePending = false
+                return
+            }
+
+            let names = dirtyTabs.prefix(4).map(\.displayName).joined(separator: ", ")
+            let remaining = max(0, dirtyTabs.count - 4)
+            ImGuiTextV("Unsaved changes will be lost in:")
+            ImGuiTextV(remaining > 0 ? "\(names), and \(remaining) more" : names)
+            igSeparator()
+
+            if igSmallButton("Discard Changes & Exit") {
+                _windowClosePending = false
+                ImGuiCloseCurrentPopup()
+                engine.stop()
+            }
+            ImGuiSameLine(0, 8)
+            if igSmallButton("Cancel") {
+                _windowClosePending = false
+                ImGuiCloseCurrentPopup()
+            }
         }
     }
 

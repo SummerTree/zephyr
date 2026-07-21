@@ -38,9 +38,15 @@ public final class EngineLoopController {
         // The core of the "Lazy Loop": Determines if the engine should render.
         // Starts at 5 to ensure initial ImGui setup frames render cleanly.
         var framesToRender: Int = 5
+        var lastSaveStateCount = engine.tabManager.saveStateByTabID.count
 
         while engine.running {
             let frameStart: UInt64 = SDL_GetTicks()
+
+            if engine.tabManager.applyPendingSaveUpdates() {
+                framesToRender = max(framesToRender, 5)
+            }
+
             let now = SDL_GetTicks()
             let deltaMs = Double(now &- lastTick)
 
@@ -53,12 +59,18 @@ public final class EngineLoopController {
             // If the application is idle, put the thread to sleep until an event
             // is fired or 16ms elapses. This drops idle CPU/GPU usage to near 0%.
             let interaction = engine.interaction
+            let saveStateCount = engine.tabManager.saveStateByTabID.count
+            if saveStateCount != lastSaveStateCount {
+                framesToRender = max(framesToRender, 5)
+                lastSaveStateCount = saveStateCount
+            }
             let isActionActive =
                 interaction.dragActive || interaction.panActive || interaction.touchPanActive
                 || engine.commandProcessor.activeCommand != nil || engine.commandProcessor.activeFeatureCommand != nil
                 || engine.commandProcessor.commandLineActive || engine.document.needsRegeneration
                 || engine._regenerationInFlight != nil
                 || engine.renderer._vbInFlightToken != nil
+                || saveStateCount > 0
             
             if framesToRender <= 0 && !isActionActive {
                 SDL_WaitEventTimeout(nil, 16)
@@ -77,12 +89,12 @@ public final class EngineLoopController {
             let autosaveIntervalSec = engine.autosaveIntervalMinutes * 60.0
             if engine._autosaveAccumulator >= autosaveIntervalSec {
                 var anyStarted = false
-                for tab in engine.tabManager.tabs where tab.document.hasUnsavedChanges {
+                for tab in engine.tabManager.tabs where tab.hasUnsavedChanges {
                     guard engine.tabManager.saveStateByTabID[tab.id] == nil else { continue }
                     engine.tabManager.startAutosave(tabID: tab.id)
                     anyStarted = true
                 }
-                if anyStarted || engine.tabManager.tabs.allSatisfy({ !$0.document.hasUnsavedChanges }) {
+                if anyStarted || engine.tabManager.tabs.allSatisfy({ !$0.hasUnsavedChanges }) {
                     engine._autosaveAccumulator = 0
                 } else {
                     engine._autosaveAccumulator = autosaveIntervalSec * 0.9

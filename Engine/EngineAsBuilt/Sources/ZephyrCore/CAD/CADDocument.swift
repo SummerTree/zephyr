@@ -127,9 +127,12 @@ public struct SaveTabSnapshot: Sendable {
     public let drawingViews: [SaveDocumentSnapshot]
     public let fileURL: URL?
     public let displayName: String
-    /// The editRevision at the moment the snapshot was taken.
-    /// Used by markSaved(upTo:) to avoid clearing dirty if user edited during save.
+    /// The active view's editRevision at the moment the snapshot was taken.
+    /// Kept for compatibility with single-view callers.
     public let editRevision: UInt64
+    /// Each drawing view's editRevision at the moment the snapshot was taken.
+    /// Used to avoid clearing edits made while a background save is in flight.
+    public let viewEditRevisions: [UInt64]
     /// File format version for the exporter to embed in output.
     public let formatVersion: UInt32
     /// Application version string.
@@ -137,12 +140,14 @@ public struct SaveTabSnapshot: Sendable {
 
     public init(tabID: UUID, drawingViews: [SaveDocumentSnapshot], fileURL: URL?,
                 displayName: String, editRevision: UInt64,
+                viewEditRevisions: [UInt64] = [],
                 formatVersion: UInt32, appVersion: String) {
         self.tabID = tabID
         self.drawingViews = drawingViews
         self.fileURL = fileURL
         self.displayName = displayName
         self.editRevision = editRevision
+        self.viewEditRevisions = viewEditRevisions
         self.formatVersion = formatVersion
         self.appVersion = appVersion
     }

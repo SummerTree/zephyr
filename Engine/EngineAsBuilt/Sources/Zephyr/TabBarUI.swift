@@ -52,6 +52,7 @@ struct TabBarUI {
         
         ImGuiPushStyleColor(Int32(ImGuiCol_WindowBg.rawValue), engine.ui.theme.tabBarBg)
 
+        var requestedCloseIndex: Int?
         var opened = true
         if igBegin("##TabBar", &opened, flags) {
             let tabs = engine.tabManager.tabs
@@ -68,7 +69,7 @@ struct TabBarUI {
                 for i in 0..<tabs.count {
                     let tab = tabs[i]
                     let isActive = (i == activeIdx)
-                    let hasUnsaved = tab.document.hasUnsavedChanges
+                    let hasUnsaved = tab.hasUnsavedChanges
                     let label = tab.displayName
 
                     var tabFlags: Int32 = 0
@@ -83,7 +84,8 @@ struct TabBarUI {
                         ImGuiPushFont(boldFont, ImGuiGetFontSize())
                     }
                     
-                    let tabVisible = ImGuiBeginTabItem("\(label)###Tab_\(tab.id.uuidString)", nil, tabFlags)
+                    var tabOpen = true
+                    let tabVisible = ImGuiBeginTabItem("\(label)###Tab_\(tab.id.uuidString)", &tabOpen, tabFlags)
                     
                     if isActive, engine.ui.boldFont != nil {
                         ImGuiPopFont()
@@ -116,7 +118,9 @@ struct TabBarUI {
                         ImGuiEndTabItem()
                     }
 
-
+                    if !tabOpen {
+                        requestedCloseIndex = i
+                    }
                 }
 
                 // Add the '+' button at the trailing end
@@ -138,6 +142,10 @@ struct TabBarUI {
 
         ImGuiPopStyleVar(4)
         ImGuiPopStyleColor(1)
+
+        if let index = requestedCloseIndex {
+            _ = engine.tabManager.requestCloseTab(at: index)
+        }
 
         // Modal popup for unsaved changes when closing a dirty tab.
         if _tabCloseDirty {
