@@ -330,8 +330,10 @@ public enum DXFImporter {
         }
 
         var blockNameByHandle: [UInt32: String] = [:]
+        var blockHandleByName: [String: UInt32] = [:]
         for record in reader.blockRecords where record.handle != 0 && !record.name.isEmpty {
             blockNameByHandle[record.handle] = record.name
+            blockHandleByName[record.name.uppercased()] = record.handle
         }
         var textStyleNameByHandle: [UInt32: String] = [:]
         for textStyle in reader.textstyles where textStyle.handle != 0 && !textStyle.name.isEmpty {
@@ -435,11 +437,72 @@ public enum DXFImporter {
             blockByID[handle] = cadBlock
         }
 
-        func convertEntities(_ sourceEntities: [DXFEntity]) -> [CADEntity] {
-            var converted: [CADEntity] = []
-            converted.reserveCapacity(sourceEntities.count)
+        let sortEntsFlags: Int = {
+            if let value = reader.header.headerVars["$SORTENTS"] as? Int { return value }
+            if let value = reader.header.headerVars["$SORTENTS"] as? Int32 { return Int(value) }
+            return 127
+        }()
+        let sortEntsRegenEnabled = (sortEntsFlags & 16) != 0
 
-            for (drawOrder, entity) in sourceEntities.enumerated() {
+        func drawOrderedEntities(
+            _ sourceEntities: [DXFEntity],
+            ownerHandle preferredOwnerHandle: UInt32
+        ) -> [DXFEntity] {
+            guard sortEntsRegenEnabled, sourceEntities.count > 1 else {
+                return sourceEntities
+            }
+
+            let ownerHandle: UInt32 = {
+                if preferredOwnerHandle != 0 { return preferredOwnerHandle }
+                var counts: [UInt32: Int] = [:]
+                for entity in sourceEntities where entity.parentHandle != 0 {
+                    counts[entity.parentHandle, default: 0] += 1
+                }
+                return counts.max { lhs, rhs in lhs.value < rhs.value }?.key ?? 0
+            }()
+            guard ownerHandle != 0 else { return sourceEntities }
+
+            var sortHandlesByEntity: [UInt32: UInt32] = [:]
+            for table in reader.sortEntsTables where table.ownerHandle == ownerHandle {
+                sortHandlesByEntity.merge(
+                    table.sortHandlesByEntity,
+                    uniquingKeysWith: { _, replacement in replacement })
+            }
+            guard !sortHandlesByEntity.isEmpty else { return sourceEntities }
+
+            return sourceEntities.enumerated().sorted { lhs, rhs in
+                let lhsHandle = lhs.element.handle
+                let rhsHandle = rhs.element.handle
+                let lhsSortHandle: UInt32?
+                if let mapped = sortHandlesByEntity[lhsHandle] {
+                    lhsSortHandle = mapped
+                } else {
+                    lhsSortHandle = lhsHandle == 0 ? nil : lhsHandle
+                }
+                let rhsSortHandle: UInt32?
+                if let mapped = sortHandlesByEntity[rhsHandle] {
+                    rhsSortHandle = mapped
+                } else {
+                    rhsSortHandle = rhsHandle == 0 ? nil : rhsHandle
+                }
+                let lhsKey = lhsSortHandle.map(UInt64.init) ?? UInt64.max
+                let rhsKey = rhsSortHandle.map(UInt64.init) ?? UInt64.max
+                if lhsKey != rhsKey { return lhsKey < rhsKey }
+                return lhs.offset < rhs.offset
+            }.map { $0.element }
+        }
+
+        func convertEntities(
+            _ sourceEntities: [DXFEntity],
+            ownerHandle: UInt32 = 0
+        ) -> [CADEntity] {
+            let orderedEntities = drawOrderedEntities(
+                sourceEntities,
+                ownerHandle: ownerHandle)
+            var converted: [CADEntity] = []
+            converted.reserveCapacity(orderedEntities.count)
+
+            for (drawOrder, entity) in orderedEntities.enumerated() {
                 guard Self.shouldRenderAttributeEntity(entity) else { continue }
 
                 if let insert = entity as? DXFInsertEntity,
@@ -643,7 +706,10 @@ public enum DXFImporter {
         let views: [DXFDrawingView]
 
         if reader.layouts.isEmpty {
-            modelEntities = convertEntities(reader.entities)
+            let modelOwnerHandle = blockHandleByName["*MODEL_SPACE"] ?? 0
+            modelEntities = convertEntities(
+                reader.entities,
+                ownerHandle: modelOwnerHandle)
             views = [DXFDrawingView(
                 name: "Model",
                 kind: .model,
@@ -666,7 +732,11 @@ public enum DXFImporter {
             } else {
                 modelSource = reader.entities.filter { $0.space == 0 }
             }
-            modelEntities = convertEntities(modelSource)
+            modelEntities = convertEntities(
+                modelSource,
+                ownerHandle: modelLayout?.blockRecordHandle
+                    ?? blockHandleByName["*MODEL_SPACE"]
+                    ?? 0)
 
             var importedViews: [DXFDrawingView] = [DXFDrawingView(
                 name: modelLayout?.name ?? "Model",
@@ -676,7 +746,9 @@ public enum DXFImporter {
             for layout in orderedLayouts where
                 layout.name.caseInsensitiveCompare("Model") != .orderedSame {
                 let paperSource = sourceEntities(for: layout)
-                var paperEntities = convertEntities(paperSource)
+                var paperEntities = convertEntities(
+                    paperSource,
+                    ownerHandle: layout.blockRecordHandle)
                 let paperDrawOrderOffset = modelEntities.count + 1
                 for index in paperEntities.indices where paperEntities[index].drawOrder != Int.max {
                     paperEntities[index].drawOrder += paperDrawOrderOffset

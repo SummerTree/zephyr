@@ -1,5 +1,21 @@
 import Foundation
 
+public struct DXFSortEntsTable: Sendable {
+    public var handle: UInt32
+    public var ownerHandle: UInt32
+    public var sortHandlesByEntity: [UInt32: UInt32]
+
+    public init(
+        handle: UInt32,
+        ownerHandle: UInt32,
+        sortHandlesByEntity: [UInt32: UInt32]
+    ) {
+        self.handle = handle
+        self.ownerHandle = ownerHandle
+        self.sortHandlesByEntity = sortHandlesByEntity
+    }
+}
+
 /// Pure Swift DXF file reader.
 /// Parses ASCII DXF pair-based format and builds libdxfrw-compatible entity tree.
 public class DXFReader {
@@ -31,6 +47,7 @@ public class DXFReader {
     public var blockRecords: [DXFBlockRecordEntry] = []
     public var imagedefs: [DXFImageDefEntry] = []
     public var layouts: [DXFLayoutEntry] = []
+    public var sortEntsTables: [DXFSortEntsTable] = []
     public var blocks: [DXFBlockEntity] = []
     public var entities: [DXFEntity] = []
 
@@ -1807,12 +1824,67 @@ extension DXFReader {
                 tryParse { try parseLayout(at: pos) }
             } else if c == 0 && v == "TABLESTYLE" {
                 tryParse { try parseTableStyle(at: pos) }
+            } else if c == 0 && v == "SORTENTSTABLE" {
+                tryParse { try parseSortEntsTable(at: pos) }
             } else {
                 pos += 1
             }
         }
     }
 
+    private func parseSortEntsTable(at startIdx: Int) throws {
+        var idx = startIdx + 1
+        var objectHandle: UInt32 = 0
+        var ownerHandle: UInt32 = 0
+        var entityHandles: [UInt32] = []
+        var sortHandles: [UInt32] = []
+        var inSortEntsSubclass = false
+
+        while idx < pairs.count {
+            let (code, value) = pairs[idx]
+            if code == 0 { break }
+            idx += 1
+
+            if code == 100 {
+                if value.caseInsensitiveCompare("AcDbSortentsTable") == .orderedSame {
+                    inSortEntsSubclass = true
+                }
+                continue
+            }
+
+            if !inSortEntsSubclass {
+                if code == 5 && objectHandle == 0 {
+                    objectHandle = parseHandle(value)
+                }
+                continue
+            }
+
+            switch code {
+            case 330:
+                if ownerHandle == 0 { ownerHandle = parseHandle(value) }
+            case 331:
+                entityHandles.append(parseHandle(value))
+            case 5:
+                sortHandles.append(parseHandle(value))
+            default:
+                break
+            }
+        }
+        pos = idx
+
+        guard ownerHandle != 0 else { return }
+        var mapping: [UInt32: UInt32] = [:]
+        mapping.reserveCapacity(min(entityHandles.count, sortHandles.count))
+        for (entityHandle, sortHandle) in zip(entityHandles, sortHandles)
+            where entityHandle != 0 {
+            mapping[entityHandle] = sortHandle
+        }
+        guard !mapping.isEmpty else { return }
+        sortEntsTables.append(DXFSortEntsTable(
+            handle: objectHandle,
+            ownerHandle: ownerHandle,
+            sortHandlesByEntity: mapping))
+    }
 
     private func parseTableStyle(at startIdx: Int) throws {
         var idx = startIdx + 1
